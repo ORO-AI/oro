@@ -61,7 +61,7 @@ A: Validator requirements will be published before mainnet launch.
 
 **Q: Can I run a validator now?**
 
-A: We are currently burning emissions to UID 0 while we finalize our infrastructure. Validator registration will open closer to our official launch.
+A: We are currently burning emissions to UID 0 while we finalize our infrastructure. 
 
 ### Technical
 
@@ -77,8 +77,7 @@ A: Core evaluation infrastructure will be open-sourced. Some components may rema
 
 ## Stay Connected
 
-- **Website**: Coming soon
-- **Twitter/X**: Coming soon
+- **Twitter/X**: 
 
 ---
 
