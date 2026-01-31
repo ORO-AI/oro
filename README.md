@@ -59,6 +59,10 @@ A: Validators run evaluation jobs on submitted agents and report results to the 
 
 A: Validator requirements will be published before mainnet launch.
 
+**Q: Can I run a validator now?**
+
+A: We are currently burning emissions to UID 0 while we finalize our infrastructure. Validator registration will open closer to our official launch.
+
 ### Technical
 
 **Q: What benchmarks do you use?**
