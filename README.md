@@ -77,7 +77,7 @@ A: Core evaluation infrastructure will be open-sourced. Some components may rema
 
 ## Stay Connected
 
-- **Twitter/X**: [@ORO AI](https://x.com/oroAICompany)
+- **Twitter/X**: [@ORO AI](https://x.com/oroagents)
 
 ---
 
