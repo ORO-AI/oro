@@ -9,6 +9,7 @@ for local Java/Pyserini installation.
 
 import os
 import logging
+
 try:
     import ujson as json
 except ImportError:
@@ -31,6 +32,11 @@ SEARCH_SERVER_URL = os.getenv("SEARCH_SERVER_URL", "http://localhost:5632")
 
 # Cache for product lookups to avoid repeated HTTP calls
 _product_cache: dict[str, Optional[dict]] = {}
+
+
+def clear_product_cache() -> None:
+    """Clear the product cache between evaluation runs to prevent unbounded growth."""
+    _product_cache.clear()
 
 
 def get_product(product_id: str) -> Optional[dict]:
@@ -152,7 +158,9 @@ class ProblemScorer:
                         else format_reward(completion, ["tool_call"])
                     )
                 except (KeyError, TypeError, AttributeError) as e:
-                    logging.warning("Malformed output step during format scoring: %s", e)
+                    logging.warning(
+                        "Malformed output step during format scoring: %s", e
+                    )
                     continue
         format_score = format_score / len(output) if output else 0
         score["format"] = format_score
@@ -185,7 +193,9 @@ class ProblemScorer:
                         if command["name"] == "recommend_product":
                             product_ids = command["parameters"].get("product_ids", "")
             except (KeyError, TypeError, AttributeError) as e:
-                logging.warning("Malformed output step during product extraction: %s", e)
+                logging.warning(
+                    "Malformed output step during product extraction: %s", e
+                )
                 continue
 
         if not isinstance(product_ids, str):
