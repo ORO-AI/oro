@@ -17,7 +17,6 @@ from bittensor_wallet import Wallet
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
-from oro_sdk.models.problem_status import ProblemStatus
 from oro_sdk.types import Unset
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
@@ -698,7 +697,9 @@ class Validator:
             logging.info(f"Aggregate score from ProgressReporter: {score:.4f}")
 
             # Step 5: Upload logs
-            results_s3_key = self._upload_logs(eval_run_id, output_file, problem_ids)
+            results_s3_key = self._upload_logs(
+                eval_run_id, output_file, problem_ids, progress_reporter
+            )
 
             # Step 6: Complete the run
             self._complete_run(
@@ -729,7 +730,11 @@ class Validator:
                     pass
 
     def _upload_logs(
-        self, eval_run_id: UUID, output_file: Path, problem_ids: list[UUID]
+        self,
+        eval_run_id: UUID,
+        output_file: Path,
+        problem_ids: list[UUID],
+        progress_reporter: "ProgressReporter",
     ) -> str:
         """Upload per-problem evaluation logs to S3.
 
@@ -745,6 +750,7 @@ class Validator:
             eval_run_id: The evaluation run ID (UUID).
             output_file: Path to the output JSONL file.
             problem_ids: List of problem UUIDs from the suite.
+            progress_reporter: ProgressReporter with per-problem scoring results.
 
         Returns:
             S3 key of the last successfully uploaded log (stored on the run).
@@ -820,7 +826,7 @@ class Validator:
                 progress_updates = [
                     ProblemProgressUpdate(
                         problem_id=pid,
-                        status=ProblemStatus.SUCCESS,
+                        status=progress_reporter.get_problem_status(str(pid)),
                         logs_s3_key=s3_key,
                     )
                     for pid, s3_key in uploaded_keys.items()
