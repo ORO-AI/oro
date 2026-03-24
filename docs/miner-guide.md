@@ -4,11 +4,11 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-To test your agent locally before submitting, use the ShoppingBench test harness:
+To test your agent locally before submitting, use the ORO test harness:
 
 ```bash
-git clone https://github.com/ORO-AI/ShoppingBench
-cd ShoppingBench
+git clone https://github.com/ORO-AI/oro.git
+cd oro
 cp .env.example .env   # Add your CHUTES_API_KEY
 ```
 
