@@ -17,6 +17,18 @@ if TYPE_CHECKING:
     from .retry_queue import LocalRetryQueue
 
 
+def extract_inference_stats(dialogue: list[dict]) -> tuple[int, int]:
+    """Extract inference failure count and total from the last dialogue step's extra_info.
+
+    Returns:
+        (inference_failed, inference_total)
+    """
+    if not dialogue:
+        return 0, 0
+    extra_info = dialogue[-1].get("extra_info", {})
+    return extra_info.get("inference_failed", 0), extra_info.get("inference_total", 0)
+
+
 class ProgressReporter:
     """Monitors sandbox output file, scores problems, and reports to Backend.
 
@@ -339,12 +351,27 @@ class ProgressReporter:
             if self._completed_count == self._total_problems:
                 self._compute_aggregate()
 
+            # Extract inference stats from the last dialogue step
+            inference_failure_count, inference_total = extract_inference_stats(dialogue)
+
+            # Build score_components_summary with inference stats
+            # (inference fields will be promoted to top-level fields in Task 4)
+            from oro_sdk.models import ProblemProgressUpdateScoreComponentsSummaryType0
+
+            score_summary = ProblemProgressUpdateScoreComponentsSummaryType0.from_dict(
+                {
+                    "inference_failure_count": inference_failure_count,
+                    "inference_total": inference_total,
+                }
+            )
+
             return ProblemProgressUpdate(
                 problem_id=UUID(problem_id)
                 if isinstance(problem_id, str)
                 else problem_id,
                 status=status,
                 score=score,
+                score_components_summary=score_summary,
             )
 
         except json.JSONDecodeError:

@@ -12,6 +12,7 @@ All requests go through the proxy service for network isolation.
 
 import os
 import logging
+import threading
 import time
 from typing import Dict, Optional, Callable
 from urllib.parse import urlencode
@@ -24,6 +25,31 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 2
+
+
+class InferenceStats:
+    """Thread-safe counter for inference call outcomes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._success = 0
+        self._failed = 0
+
+    def record_success(self):
+        with self._lock:
+            self._success += 1
+
+    def record_failure(self):
+        with self._lock:
+            self._failed += 1
+
+    def to_dict(self) -> dict:
+        with self._lock:
+            return {
+                "inference_success": self._success,
+                "inference_failed": self._failed,
+                "inference_total": self._success + self._failed,
+            }
 
 
 class ProxyClient:
@@ -57,6 +83,7 @@ class ProxyClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.api_key = api_key or os.getenv("CHUTES_ACCESS_TOKEN")
+        self.inference_stats = InferenceStats()
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -165,6 +192,12 @@ class ProxyClient:
             return response
 
         response = self._make_request_with_retries(make_request, f"POST {path}")
+        # Track inference call outcomes
+        if "/inference/" in path:
+            if response and response.status_code == 200:
+                self.inference_stats.record_success()
+            else:
+                self.inference_stats.record_failure()
         if response and response.status_code == 200:
             return response.json()
         return None

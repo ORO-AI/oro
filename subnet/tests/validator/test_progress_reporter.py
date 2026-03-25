@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
 from validator.backend_client import BackendError
-from validator.progress_reporter import ProgressReporter
+from validator.progress_reporter import ProgressReporter, extract_inference_stats
 from validator.retry_queue import LocalRetryQueue
 
 
@@ -367,3 +367,31 @@ class TestReportProgressRetry:
         reporter.start_monitoring()
         assert reporter._failed_reports == []
         reporter.stop_monitoring()
+
+
+class TestExtractInferenceStats:
+    def test_from_last_step(self):
+        dialogue = [
+            {"extra_info": {"step": 1}},
+            {"extra_info": {"step": 2, "inference_failed": 3, "inference_total": 10}},
+        ]
+        failed, total = extract_inference_stats(dialogue)
+        assert failed == 3
+        assert total == 10
+
+    def test_missing_stats_returns_zeros(self):
+        dialogue = [{"extra_info": {"step": 1}}]
+        failed, total = extract_inference_stats(dialogue)
+        assert failed == 0
+        assert total == 0
+
+    def test_empty_dialogue_returns_zeros(self):
+        failed, total = extract_inference_stats([])
+        assert failed == 0
+        assert total == 0
+
+    def test_no_extra_info_returns_zeros(self):
+        dialogue = [{"completion": {}}]
+        failed, total = extract_inference_stats(dialogue)
+        assert failed == 0
+        assert total == 0

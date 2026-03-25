@@ -3,7 +3,7 @@
 from unittest.mock import patch, MagicMock
 
 
-from src.agent.proxy_client import ProxyClient
+from src.agent.proxy_client import InferenceStats, ProxyClient
 
 
 class TestProxyClientAuth:
@@ -54,3 +54,33 @@ class TestProxyClientAuth:
         with patch.dict("os.environ", {"CHUTES_ACCESS_TOKEN": "env-token"}):
             client = ProxyClient(proxy_url="http://proxy:80", api_key="explicit")
             assert client.api_key == "explicit"
+
+
+class TestInferenceStats:
+    def test_initial_state(self):
+        stats = InferenceStats()
+        assert stats.to_dict() == {"inference_success": 0, "inference_failed": 0, "inference_total": 0}
+
+    def test_record_success(self):
+        stats = InferenceStats()
+        stats.record_success()
+        d = stats.to_dict()
+        assert d["inference_success"] == 1
+        assert d["inference_failed"] == 0
+        assert d["inference_total"] == 1
+
+    def test_record_failure(self):
+        stats = InferenceStats()
+        stats.record_failure()
+        d = stats.to_dict()
+        assert d["inference_failed"] == 1
+        assert d["inference_success"] == 0
+        assert d["inference_total"] == 1
+
+    def test_mixed(self):
+        stats = InferenceStats()
+        stats.record_success()
+        stats.record_success()
+        stats.record_failure()
+        d = stats.to_dict()
+        assert d == {"inference_success": 2, "inference_failed": 1, "inference_total": 3}

@@ -840,4 +840,9 @@ def agent_main(problem_data: Dict) -> List[Dict]:
         steps.append(fallback_step)
 
     logger.info(f"[ReAct] Completed with {len(steps)} steps")
+
+    # Inject inference stats into final dialogue step for downstream tracking
+    if steps and hasattr(_proxy, 'inference_stats'):
+        steps[-1].setdefault("extra_info", {}).update(_proxy.inference_stats.to_dict())
+
     return steps
