@@ -77,6 +77,10 @@ FIELDS = ["title", "price", "service", "sku & attrs"]
 
 VALID_TASKS = ["product", "shop", "voucher"]
 
+# Multiplier applied to per-step format score when extra_info.timestamp is missing.
+# 1.0 = no penalty, 0.0 = full penalty. Tunable at launch.
+TIMESTAMP_MISSING_PENALTY = 0.5
+
 
 class ProblemScorer:
     """Scores individual shopping benchmark problems independently.
@@ -145,18 +149,23 @@ class ProblemScorer:
         length_score = length_reward(output)
         score["length"] = length_score
 
-        # Format score
+        # Format score (includes timestamp presence penalty)
         format_score = 0
         if model != "human":
             for step in output:
                 try:
                     message = Message.from_dict(step["completion"]["message"])
                     completion = message.to_string(OUTPUT_ROLES)
-                    format_score += (
+                    step_format = (
                         format_reward(completion)
                         if mode == "think"
                         else format_reward(completion, ["tool_call"])
                     )
+                    # Penalize steps missing a valid timestamp in extra_info
+                    ts = step.get("extra_info", {}).get("timestamp")
+                    if not isinstance(ts, (int, float)) or ts <= 0:
+                        step_format *= TIMESTAMP_MISSING_PENALTY
+                    format_score += step_format
                 except (KeyError, TypeError, AttributeError) as e:
                     logging.warning(
                         "Malformed output step during format scoring: %s", e
