@@ -440,7 +440,9 @@ class Validator:
 
                     # Claim work from Backend
                     logging.info("Claiming work from Backend...")
-                    work = self.backend_client.claim_work()
+                    work = self.backend_client.claim_work(
+                        service_versions=self.service_versions
+                    )
 
                     if work is None:
                         logging.info(
