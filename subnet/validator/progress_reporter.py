@@ -101,9 +101,14 @@ class ProgressReporter:
             os.chdir(str(self.workspace_dir))
 
             # Add workspace to path so we can import ShoppingBench modules
-            sys.path.insert(0, str(self.workspace_dir / "src" / "agent"))
+            scorer_path = str(self.workspace_dir / "src" / "agent")
+            if scorer_path not in sys.path:
+                sys.path.insert(0, scorer_path)
 
-            from problem_scorer import ProblemScorer
+            from problem_scorer import ProblemScorer, clear_product_cache
+
+            # Clear product cache from previous evaluation runs
+            clear_product_cache()
 
             # Group rewards and vouchers by category
             category_rewards: Dict[str, Dict] = {}
@@ -256,6 +261,26 @@ class ProgressReporter:
             return ProblemStatus.SUCCESS
         return ProblemStatus.FAILED
 
+    def _read_inference_stats(self, problem_id: str) -> tuple[int, int]:
+        """Read inference stats for a problem from the shared JSONL file.
+
+        ProxyClient appends one line per problem to inference_stats.jsonl
+        in the same directory as the output file. Returns (failure_count, total).
+        """
+        stats_path = self.output_file.parent / "inference_stats.jsonl"
+        try:
+            with open(stats_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    if str(entry.get("problem_id")) == str(problem_id):
+                        return entry.get("inference_failed", 0), entry.get("inference_total", 0)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+        return 0, 0
+
     def _process_line(self, line: str) -> Optional[ProblemProgressUpdate]:
         """Parse a dialogue entry from sandbox output and score it.
 
@@ -339,13 +364,25 @@ class ProgressReporter:
             if self._completed_count == self._total_problems:
                 self._compute_aggregate()
 
-            return ProblemProgressUpdate(
+            # Read inference stats from sidecar file written by ProxyClient
+            inf_failures, inf_total = self._read_inference_stats(problem_id)
+
+            update = ProblemProgressUpdate(
                 problem_id=UUID(problem_id)
                 if isinstance(problem_id, str)
                 else problem_id,
                 status=status,
                 score=score,
             )
+            # Add inference stats to score_components_summary (Backend stores all JSONB fields)
+            if inf_total > 0:
+                from oro_sdk.models import ProblemProgressUpdateScoreComponentsSummaryType0
+                summary = ProblemProgressUpdateScoreComponentsSummaryType0.from_dict({
+                    "inference_failure_count": inf_failures,
+                    "inference_total": inf_total,
+                })
+                update.score_components_summary = summary
+            return update
 
         except json.JSONDecodeError:
             logging.warning(f"Failed to parse dialogue line: {line[:100]}...")
@@ -471,9 +508,7 @@ class ProgressReporter:
         if not unscored_ids:
             return
 
-        logging.info(
-            f"Reporting {len(unscored_ids)} unscored problems as TIMED_OUT"
-        )
+        logging.info(f"Reporting {len(unscored_ids)} unscored problems as TIMED_OUT")
         for problem_id_str in unscored_ids:
             try:
                 from uuid import UUID
@@ -541,7 +576,4 @@ class ProgressReporter:
             )
         except Exception as e:
             self._failed_reports.append(progress)
-            logging.warning(
-                f"Failed to report progress for {progress.problem_id}: {e}"
-            )
-
+            logging.warning(f"Failed to report progress for {progress.problem_id}: {e}")
