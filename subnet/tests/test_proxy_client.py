@@ -1,9 +1,12 @@
-"""Tests for proxy_client Authorization header injection."""
+"""Tests for proxy_client Authorization header injection and inference stats."""
 
+import json
+import os
+import tempfile
 from unittest.mock import patch, MagicMock
 
 
-from src.agent.proxy_client import ProxyClient
+from src.agent.proxy_client import InferenceStats, ProxyClient
 
 
 class TestProxyClientAuth:
@@ -54,3 +57,54 @@ class TestProxyClientAuth:
         with patch.dict("os.environ", {"CHUTES_ACCESS_TOKEN": "env-token"}):
             client = ProxyClient(proxy_url="http://proxy:80", api_key="explicit")
             assert client.api_key == "explicit"
+
+
+class TestInferenceStats:
+    def test_to_dict(self):
+        stats = InferenceStats()
+        stats.record_success()
+        stats.record_success()
+        stats.record_failure()
+        assert stats.to_dict() == {
+            "inference_success": 2,
+            "inference_failed": 1,
+            "inference_total": 3,
+        }
+
+    def test_append_to_file(self):
+        stats = InferenceStats()
+        stats.record_success()
+        stats.record_failure()
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-123"}'}):
+                stats.append_to_file(path)
+            with open(path) as f:
+                entry = json.loads(f.readline())
+            assert entry["problem_id"] == "p-123"
+            assert entry["inference_success"] == 1
+            assert entry["inference_failed"] == 1
+            assert entry["inference_total"] == 2
+        finally:
+            os.unlink(path)
+
+    def test_append_multiple_problems(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            for pid, successes, failures in [("a", 3, 1), ("b", 0, 2)]:
+                stats = InferenceStats()
+                for _ in range(successes):
+                    stats.record_success()
+                for _ in range(failures):
+                    stats.record_failure()
+                with patch.dict("os.environ", {"PROBLEM_DATA": json.dumps({"problem_id": pid})}):
+                    stats.append_to_file(path)
+            with open(path) as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+            assert len(lines) == 2
+            assert lines[0]["problem_id"] == "a"
+            assert lines[1]["problem_id"] == "b"
+        finally:
+            os.unlink(path)

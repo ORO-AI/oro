@@ -35,6 +35,8 @@ class ProblemResult:
     error: Optional[str] = None
     execution_time: float = 0.0
     problem_id: Optional[str] = None  # UUID or identifier from problem metadata
+    inference_failure_count: int = 0
+    inference_total: int = 0
 
 
 def load_problems(problem_file: str) -> List[Dict]:
@@ -140,10 +142,31 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
+def _read_inference_stats(path: str, problem_id: str) -> tuple:
+    """Read inference stats for a problem from the shared JSONL file.
+
+    Each line is a JSON object with problem_id, inference_success, inference_failed, inference_total.
+    Returns (failure_count, total) for the matching problem_id.
+    """
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if str(entry.get("problem_id")) == str(problem_id):
+                    return entry.get("inference_failed", 0), entry.get("inference_total", 0)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return 0, 0
+
+
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
     result_queue: multiprocessing.Queue,
+    stats_file: Optional[str] = None,
 ) -> None:
     """Target function executed in a child process.
 
@@ -151,6 +174,8 @@ def _run_in_process(
     *result_queue*.  Any exception is caught and sent back as an error string
     so the parent never blocks on a dead queue.
     """
+    if stats_file:
+        os.environ["INFERENCE_STATS_FILE"] = stats_file
     os.environ["PROBLEM_DATA"] = json.dumps(problem)
     try:
         agent_fn = _load_agent(agent_file)
@@ -184,10 +209,15 @@ def execute_single_problem(
     problem_id = problem.get("problem_id") or problem.get("id")
     start_time = time.time()
 
+    # All processes append to a shared JSONL file alongside output.jsonl.
+    # Each line includes problem_id so the reader can match.
+    output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
+    output_dir = os.path.dirname(output_file) if output_file else "/tmp"
+    stats_file = os.path.join(output_dir, "inference_stats.jsonl")
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue),
+        args=(problem, agent_file, result_queue, stats_file),
     )
     process.start()
     process.join(timeout=timeout)
@@ -202,6 +232,7 @@ def execute_single_problem(
         if process.is_alive():
             process.kill()
             process.join()
+        inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
         result_queue.close()
         return ProblemResult(
             query=query,
@@ -209,8 +240,11 @@ def execute_single_problem(
             error=f"Execution exceeded timeout of {timeout}s",
             execution_time=execution_time,
             problem_id=problem_id,
+            inference_failure_count=inf_failures,
+            inference_total=inf_total,
         )
 
+    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
     try:
         if not result_queue.empty():
             status, data = result_queue.get_nowait()
@@ -221,6 +255,8 @@ def execute_single_problem(
                     result=data,
                     execution_time=execution_time,
                     problem_id=problem_id,
+                    inference_failure_count=inf_failures,
+                    inference_total=inf_total,
                 )
             return ProblemResult(
                 query=query,
@@ -228,6 +264,8 @@ def execute_single_problem(
                 error=data,
                 execution_time=execution_time,
                 problem_id=problem_id,
+                inference_failure_count=inf_failures,
+                inference_total=inf_total,
             )
         return ProblemResult(
             query=query,
@@ -235,6 +273,8 @@ def execute_single_problem(
             error=f"Process exited with code {process.exitcode} but produced no result",
             execution_time=execution_time,
             problem_id=problem_id,
+            inference_failure_count=inf_failures,
+            inference_total=inf_total,
         )
     finally:
         result_queue.close()
