@@ -263,8 +263,13 @@ class BackendClient:
                 status_code=e.status_code,
             )
 
-    def claim_work(self) -> Optional[ClaimWorkResponse]:
+    def claim_work(
+        self, service_versions: Optional[dict[str, str]] = None
+    ) -> Optional[ClaimWorkResponse]:
         """Claim the next available work item.
+
+        Args:
+            service_versions: Optional Docker image digests for validator stack services.
 
         Returns:
             ClaimWorkResponse if work is available, None if no work (204).
@@ -275,11 +280,22 @@ class BackendClient:
                 - is_conflict=True if at capacity (409)
                 - is_auth_error=True if authentication fails (401/403)
         """
+        kwargs: dict[str, Any] = {
+            "client": self._auth_client,
+        }
+
+        if service_versions is not None:
+            from oro_sdk.models.heartbeat_request import (
+                HeartbeatRequest as SdkHeartbeatRequest,
+            )
+
+            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
+
         return self._call_api(
             claim_work.sync_detailed,
             "claim_work",
             allow_204=True,
-            client=self._auth_client,
+            **kwargs,
         )
 
     def heartbeat(
