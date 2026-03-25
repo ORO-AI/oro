@@ -1,0 +1,16 @@
+FROM python:3.10-slim
+
+# Copy JDK 21 from eclipse-temurin (handles multi-arch automatically)
+ENV JAVA_HOME=/opt/java/openjdk
+COPY --from=eclipse-temurin:21-jdk $JAVA_HOME $JAVA_HOME
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY docker/search-server/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-built indexes (~3GB) — this is why the base image exists.
+# Rebuild with: ./scripts/publish-search-server-base.sh
+COPY indexes /app/indexes

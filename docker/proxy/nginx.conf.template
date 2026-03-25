@@ -1,0 +1,94 @@
+load_module modules/ngx_http_js_module.so;
+
+events {}
+
+http {
+    # Load njs validation script
+    js_import validate_model from /etc/nginx/validate_model.js;
+
+    # Limit request body size (prevents memory exhaustion from oversized payloads)
+    client_max_body_size 10m;
+
+    # Rate limiting zone: 30 requests/second per client IP
+    limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
+
+    server {
+        listen 80;
+
+        # Default deny — block any path not explicitly handled below
+        location / {
+            return 403 '{"error": "forbidden"}\n';
+            add_header Content-Type application/json;
+        }
+
+        # Block agent access to scoring-only endpoint (returns full product docs)
+        location /search/get_product_raw {
+            return 403 '{"error": "forbidden"}\n';
+            add_header Content-Type application/json;
+        }
+
+        # Route /search/* requests to search-server
+        location /search/ {
+            limit_req zone=agent burst=50 nodelay;
+
+            # Re-resolve Docker DNS on every request so container IP changes
+            # (e.g. from Watchtower image updates) are picked up automatically.
+            resolver 127.0.0.11 valid=10s;
+            set $search_upstream http://${SEARCH_SERVER_URL}:${SEARCH_SERVER_PORT};
+
+            # Strip /search prefix and forward to search-server
+            rewrite ^/search/(.*) /$1 break;
+            proxy_pass $search_upstream;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
+        # Route /inference/* requests through njs model validation
+        location /inference/ {
+            limit_req zone=agent burst=50 nodelay;
+            client_body_buffer_size 1m;
+            js_content validate_model.validate;
+        }
+
+        # Internal location for proxying validated requests to Chutes API
+        location /_chutes_proxy/ {
+            internal;
+
+            # DNS resolution for external hostname (use Docker internal DNS)
+            resolver 127.0.0.11 valid=30s;
+            set $chutes_upstream https://${CHUTES_HOST};
+
+            # Strip /_chutes_proxy prefix and map to Chutes /v1/* API
+            rewrite ^/_chutes_proxy/(.*) /v1/$1 break;
+            proxy_pass $chutes_upstream;
+            proxy_ssl_server_name on;
+
+            # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN)
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header Host ${CHUTES_HOST};
+            proxy_set_header X-Identifier "orosn15";
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+            # Prevent gzip double-encoding: tell upstream not to compress
+            proxy_set_header Accept-Encoding identity;
+
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
+        # Health check endpoint
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+    }
+}
