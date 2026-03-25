@@ -101,6 +101,7 @@ services:
       - ./logs:/app/logs
       - validator-data:/root/.validator
     environment:
+      - DOCKER_CONTEXT=default
       - HOST_PROJECT_DIR=${PWD}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:latest}
       - SANDBOX_NETWORK=sandbox-network
