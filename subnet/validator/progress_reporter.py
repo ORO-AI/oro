@@ -122,6 +122,10 @@ class ProgressReporter:
                     category = "product"
 
                 if query and reward:
+                    # Attach precomputed title embeddings to the reward dict if available
+                    title_embeddings = problem.get("reward_title_embeddings")
+                    if title_embeddings:
+                        reward["_title_embeddings"] = title_embeddings
                     category_rewards.setdefault(category, {})[query] = reward
 
                 if category == "voucher":
@@ -276,7 +280,9 @@ class ProgressReporter:
                         continue
                     entry = json.loads(line)
                     if str(entry.get("problem_id")) == str(problem_id):
-                        return entry.get("inference_failed", 0), entry.get("inference_total", 0)
+                        return entry.get("inference_failed", 0), entry.get(
+                            "inference_total", 0
+                        )
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
         return 0, 0
@@ -353,7 +359,11 @@ class ProgressReporter:
                 self._problem_categories[problem_id] = category
             self._completed_count += 1
 
-            status = ProblemStatus.SUCCESS if is_problem_successful(score_dict, category) else ProblemStatus.FAILED
+            status = (
+                ProblemStatus.SUCCESS
+                if is_problem_successful(score_dict, category)
+                else ProblemStatus.FAILED
+            )
 
             logging.info(
                 f"Problem {self._completed_count}/{self._total_problems} scored: {score:.4f} (query: {query[:50]}...)"
@@ -375,11 +385,16 @@ class ProgressReporter:
             )
             # Add inference stats to score_components_summary (Backend stores all JSONB fields)
             if inf_total > 0:
-                from oro_sdk.models import ProblemProgressUpdateScoreComponentsSummaryType0
-                summary = ProblemProgressUpdateScoreComponentsSummaryType0.from_dict({
-                    "inference_failure_count": inf_failures,
-                    "inference_total": inf_total,
-                })
+                from oro_sdk.models import (
+                    ProblemProgressUpdateScoreComponentsSummaryType0,
+                )
+
+                summary = ProblemProgressUpdateScoreComponentsSummaryType0.from_dict(
+                    {
+                        "inference_failure_count": inf_failures,
+                        "inference_total": inf_total,
+                    }
+                )
                 update.score_components_summary = summary
             return update
 

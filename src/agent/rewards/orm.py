@@ -37,14 +37,23 @@ def rule_score_reward(product: dict, reward: dict) -> tuple[float, Counter, Coun
 
     is_ground_truth = ground_truth_reward(product, reward) == 1
 
-    # title
+    # title — use precomputed embeddings if available, otherwise encode both
     model = _get_sentence_model()
-    if "title" in reward and model is not None:
+    precomputed = reward.get("_title_embeddings", {})
+    if "title" in reward and (model is not None or precomputed):
         for title in reward["title"]:
-            sentences = [product["title"], title]
-            embeddings = model.encode(sentences)
-            similarities = model.similarity(embeddings, embeddings)
-            sim = similarities[0][1]
+            if title in precomputed and model is not None:
+                # Only encode the agent's product title; reuse cached GT embedding
+                product_emb = model.encode([product["title"]])
+                gt_emb = [precomputed[title]]
+            elif model is not None:
+                # Fallback: encode both
+                both = model.encode([product["title"], title])
+                product_emb = [both[0]]
+                gt_emb = [both[1]]
+            else:
+                continue
+            sim = model.similarity(product_emb, gt_emb)[0][0]
             total_count += 1
             total_counter["title"] += 1
             if sim >= 0.7:

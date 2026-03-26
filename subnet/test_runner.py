@@ -59,6 +59,10 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         reward = p.get("reward")
         category = p.get("category", "Product").lower()
         if query and reward:
+            # Attach precomputed title embeddings to the reward dict if available
+            title_embeddings = p.get("reward_title_embeddings")
+            if title_embeddings:
+                reward["_title_embeddings"] = title_embeddings
             rewards[query] = reward
             task_for_query[query] = category
             voucher = p.get("voucher")
@@ -111,8 +115,12 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         print()
         for cat in categories:
             cat_scores = [s for s in scores if s["category"] == cat]
-            cat_pass = sum(1 for s in cat_scores if is_problem_successful(s["score_dict"], cat))
-            print(f"  {cat:8s}: {cat_pass}/{len(cat_scores)} passed ({len(cat_scores)} problems)")
+            cat_pass = sum(
+                1 for s in cat_scores if is_problem_successful(s["score_dict"], cat)
+            )
+            print(
+                f"  {cat:8s}: {cat_pass}/{len(cat_scores)} passed ({len(cat_scores)} problems)"
+            )
 
     print()
     print(f"Ground truth rate: {agg['ground_truth_rate']:.3f}")
@@ -211,12 +219,17 @@ def run_test(
 
     if not output_file.exists():
         if result.returncode != 0:
-            print(f"Error: Sandbox exited with code {result.returncode}", file=sys.stderr)
+            print(
+                f"Error: Sandbox exited with code {result.returncode}", file=sys.stderr
+            )
         print("Error: No output file produced", file=sys.stderr)
         return -1.0
 
     if result.returncode != 0:
-        print(f"Warning: Sandbox exited with code {result.returncode}, scoring partial results", file=sys.stderr)
+        print(
+            f"Warning: Sandbox exited with code {result.returncode}, scoring partial results",
+            file=sys.stderr,
+        )
 
     # Score using ProblemScorer (HTTP calls to search-server, no pyserini)
     print()

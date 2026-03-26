@@ -513,7 +513,8 @@ class BackendClient:
         try:
             # Use public client (no auth required)
             response = self._public_client.get_httpx_client().get(
-                f"/v1/public/suites/{suite_id}/problems"
+                f"/v1/public/suites/{suite_id}/problems",
+                params={"include_embeddings": "true"},
             )
 
             if response.status_code == 200:
