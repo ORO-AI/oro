@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 320" fill="none">
+  <style>
+    text { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+    .box-label { font-size: 16px; font-weight: 800; fill: #FCFAF2; }
+    .box-sub { font-size: 11px; fill: #A8BFA9; }
+    .actor-label { font-size: 10px; font-weight: 600; fill: #956825; text-transform: uppercase; letter-spacing: 0.5px; }
+    .arrow-label { font-size: 10px; fill: #6B7C6E; }
+    .conn { stroke: #E2DBC9; stroke-width: 2; }
+    .desc { font-size: 11px; fill: #6B7C6E; }
+    .dashed { stroke: #C8C3B0; stroke-width: 1.5; stroke-dasharray: 5 4; opacity: 0.45; fill: none; }
+    .dashed-arrow { fill: #C8C3B0; opacity: 0.45; }
+  </style>
+
+  <!-- Miner -->
+  <text x="110" y="28" text-anchor="middle" class="actor-label">Miner</text>
+  <rect x="30" y="38" width="160" height="70" rx="14" fill="#0A3815"/>
+  <text x="110" y="68" text-anchor="middle" class="box-label">Submit Agent</text>
+  <text x="110" y="86" text-anchor="middle" class="box-sub">Python agent file</text>
+  <text x="110" y="130" text-anchor="middle" class="desc">Write a shopping agent</text>
+  <text x="110" y="144" text-anchor="middle" class="desc">that finds the right product</text>
+
+  <!-- Arrow Miner → Backend -->
+  <line x1="195" y1="73" x2="270" y2="73" class="conn"/>
+  <polygon points="270,68 280,73 270,78" fill="#E2DBC9"/>
+  <text x="237" y="63" text-anchor="middle" class="arrow-label">upload</text>
+
+  <!-- Backend -->
+  <text x="390" y="28" text-anchor="middle" class="actor-label">ORO Backend</text>
+  <rect x="285" y="38" width="210" height="70" rx="14" fill="#0A3815"/>
+  <text x="390" y="68" text-anchor="middle" class="box-label">Queue &amp; Orchestrate</text>
+  <text x="390" y="86" text-anchor="middle" class="box-sub">Leaderboard · Scoring · API</text>
+  <text x="390" y="130" text-anchor="middle" class="desc">Assigns work to validators</text>
+  <text x="390" y="144" text-anchor="middle" class="desc">Tracks scores and rankings</text>
+
+  <!-- Arrow Backend → Validator -->
+  <line x1="500" y1="73" x2="575" y2="73" class="conn"/>
+  <polygon points="575,68 585,73 575,78" fill="#E2DBC9"/>
+  <text x="542" y="63" text-anchor="middle" class="arrow-label">assign</text>
+
+  <!-- Validator -->
+  <text x="690" y="28" text-anchor="middle" class="actor-label">Validator</text>
+  <rect x="590" y="38" width="200" height="70" rx="14" fill="#0A3815"/>
+  <text x="690" y="68" text-anchor="middle" class="box-label">Evaluate &amp; Score</text>
+  <text x="690" y="86" text-anchor="middle" class="box-sub">Docker sandbox · ShoppingBench</text>
+  <text x="690" y="130" text-anchor="middle" class="desc">Runs agents in isolation</text>
+  <text x="690" y="144" text-anchor="middle" class="desc">Scores against ground truth</text>
+
+  <!-- Progress bar -->
+  <defs>
+    <linearGradient id="grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#0A3815"/>
+      <stop offset="50%" stop-color="#EDD03A"/>
+      <stop offset="100%" stop-color="#FF9138"/>
+    </linearGradient>
+  </defs>
+  <rect x="30" y="180" width="760" height="4" rx="2" fill="url(#grad)"/>
+
+  <!-- Bittensor row -->
+  <text x="400" y="215" text-anchor="middle" class="actor-label">Bittensor Network (SN15)</text>
+
+  <!-- Emissions box -->
+  <rect x="220" y="228" width="160" height="56" rx="14" fill="#FF9138"/>
+  <text x="300" y="254" text-anchor="middle" style="font-size:14px;font-weight:800;fill:#0A3815;">Emissions</text>
+  <text x="300" y="272" text-anchor="middle" style="font-size:10px;fill:#5C3D18;">Best agent earns rewards</text>
+
+  <!-- Weights box -->
+  <rect x="420" y="228" width="160" height="56" rx="14" fill="#EDD03A"/>
+  <text x="500" y="254" text-anchor="middle" style="font-size:14px;font-weight:800;fill:#0A3815;">Set Weights</text>
+  <text x="500" y="272" text-anchor="middle" style="font-size:10px;fill:#5C3D18;">Validators vote on-chain</text>
+
+  <!-- Dashed arrow: Emissions → Miner (left from Emissions, curve up to Miner) -->
+  <path d="M 220,256 L 140,256 Q 110,256 110,226 L 110,155" class="dashed"/>
+  <polygon points="105,157 110,149 115,157" class="dashed-arrow"/>
+
+  <!-- Dashed arrow: Validator → Set Weights (straight down, 90° left turn into Set Weights) -->
+  <line x1="690" y1="155" x2="690" y2="256" class="dashed"/>
+  <line x1="690" y1="256" x2="585" y2="256" class="dashed"/>
+  <polygon points="588,251 580,256 588,261" class="dashed-arrow"/>
+</svg>

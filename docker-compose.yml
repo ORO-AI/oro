@@ -1,0 +1,193 @@
+services:
+  search-server:
+    image: ghcr.io/oro-ai/oro/search-server:latest
+    build:
+      context: .
+      dockerfile: docker/search-server/Dockerfile
+    container_name: shoppingbench-search-server
+    environment:
+      - HOST=${HOST:-0.0.0.0}
+      - PORT=${PORT:-5632}
+      - JAVA_OPTS=${JAVA_OPTS:--Xmx8g -Xms4g}
+      - WAITRESS_CONNECTION_LIMIT=${WAITRESS_CONNECTION_LIMIT:-1000}
+    ports:
+      - "${PORT:-5632}:${PORT:-5632}"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; import urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('PORT', '5632') + '/health').read()\""]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    labels:
+      com.centurylinklabs.watchtower.scope: "oro-validator"
+    networks:
+      - main
+    restart: unless-stopped
+
+  proxy:
+    image: ghcr.io/oro-ai/oro/proxy:latest
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    container_name: shoppingbench-proxy
+    environment:
+      - SEARCH_SERVER_URL=${SEARCH_SERVER_URL:-search-server}
+      - SEARCH_SERVER_PORT=${SEARCH_SERVER_PORT:-5632}
+      - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
+    ports:
+      - "${PROXY_PORT:-8080}:80"
+    networks:
+      - main
+      - sandbox
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      com.centurylinklabs.watchtower.scope: "oro-validator"
+    restart: unless-stopped
+
+  sandbox:
+    image: ghcr.io/oro-ai/oro/sandbox:latest
+    build:
+      context: .
+      dockerfile: docker/sandbox/Dockerfile
+    environment:
+      - SANDBOX_PROXY_URL=http://proxy:80
+      - SANDBOX_PROBLEM_FILE=${SANDBOX_PROBLEM_FILE:-data/synthesize_product_test.jsonl}
+      - SANDBOX_MAX_WORKERS=${SANDBOX_MAX_WORKERS:-}
+      - SANDBOX_TIMEOUT=${SANDBOX_TIMEOUT:-300.0}
+      - SANDBOX_OUTPUT_FILE=${SANDBOX_OUTPUT_FILE:-}
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+    networks:
+      - sandbox
+    profiles:
+      - tools
+    restart: "no"
+
+  index-builder:
+    build:
+      context: .
+      dockerfile: docker/index-builder/Dockerfile
+    container_name: shoppingbench-index-builder
+    volumes:
+      - ./resources:/data/resources:ro
+      - ./indexes:/data/indexes
+    profiles:
+      - tools
+    restart: "no"
+
+  # Production validator — full evaluation loop with Backend API
+  validator:
+    image: ghcr.io/oro-ai/oro/validator:latest
+    build:
+      context: .
+      dockerfile: docker/validator/Dockerfile
+    profiles:
+      - validator
+    depends_on:
+      search-server:
+        condition: service_healthy
+      proxy:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/.docker/config.json:/root/.docker/config.json:ro
+      - ${HOME}/.bittensor/wallets:/root/.bittensor/wallets:ro
+      - ./logs:/app/logs
+      - validator-data:/root/.validator
+    environment:
+      - DOCKER_CONTEXT=default
+      - HOST_PROJECT_DIR=${PWD}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:latest}
+      - SANDBOX_NETWORK=sandbox-network
+      - SEARCH_SERVER_URL=http://search-server:5632
+      - WALLET_NAME=${WALLET_NAME:-default}
+      - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
+      - NETUID=${NETUID:-15}
+      - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
+      - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
+      - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
+    command:
+      - "--wallet.name"
+      - "${WALLET_NAME:-default}"
+      - "--wallet.hotkey"
+      - "${WALLET_HOTKEY:-default}"
+      - "--netuid"
+      - "${NETUID:-15}"
+      - "--subtensor.network"
+      - "${SUBTENSOR_NETWORK:-finney}"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    labels:
+      com.centurylinklabs.watchtower.scope: "oro-validator"
+    networks:
+      - main
+    restart: unless-stopped
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: shoppingbench-watchtower
+    profiles:
+      - validator
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/.docker/config.json:/config.json:ro
+    environment:
+      - DOCKER_API_VERSION=1.44
+      - DOCKER_CONFIG=/
+      - WATCHTOWER_HTTP_API_UPDATE=true
+      - WATCHTOWER_HTTP_API_PERIODIC_POLLS=0
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
+      - WATCHTOWER_SCOPE=oro-validator
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LOG_LEVEL=${WATCHTOWER_LOG_LEVEL:-info}
+    labels:
+      com.centurylinklabs.watchtower.scope: "oro-validator"
+    networks:
+      - main
+    restart: unless-stopped
+
+  # Local testing — run agent against test problems, print score, exit
+  test:
+    image: ghcr.io/oro-ai/oro/validator:latest
+    build:
+      context: .
+      dockerfile: docker/validator/Dockerfile
+    profiles:
+      - test
+    depends_on:
+      search-server:
+        condition: service_healthy
+      proxy:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/workspace:ro
+      - ./logs:/app/logs
+    environment:
+      - HOST_PROJECT_DIR=${PWD}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:latest}
+      - SANDBOX_NETWORK=sandbox-network
+      - CHUTES_API_KEY=${CHUTES_API_KEY:-}
+    entrypoint: ["python", "-m", "subnet.test_runner"]
+    networks:
+      - main
+    restart: "no"
+
+volumes:
+  validator-data:
+
+networks:
+  main:
+    name: shoppingbench-main
+    driver: bridge
+  sandbox:
+    name: sandbox-network
+    driver: bridge
+    internal: true
