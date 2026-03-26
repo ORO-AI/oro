@@ -1,0 +1,458 @@
+"""
+Sandbox executor for running agents against ShoppingBench problems in parallel.
+
+This module manages parallel execution of agent_main() against multiple problems
+from JSONL files, with timeout handling and error isolation.
+
+Uses multiprocessing for per-problem execution so that timed-out agents can be
+reliably terminated (unlike threads, which continue running after timeout).
+"""
+
+import importlib.util
+import json
+import logging
+import multiprocessing
+import os
+import time
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+    as_completed,
+)
+from typing import Dict, List, Optional, Callable
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ProblemResult:
+    """Result of executing an agent against a single problem."""
+
+    query: str
+    success: bool
+    result: Optional[Dict] = None
+    error: Optional[str] = None
+    execution_time: float = 0.0
+    problem_id: Optional[str] = None  # UUID or identifier from problem metadata
+    inference_failure_count: int = 0
+    inference_total: int = 0
+
+
+def load_problems(problem_file: str) -> List[Dict]:
+    """
+    Load problems from a JSONL file.
+
+    Args:
+        problem_file: Path to JSONL file containing problems
+
+    Returns:
+        List of problem dictionaries (with reward removed)
+    """
+    problems = []
+    try:
+        with open(problem_file, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    problem = json.loads(line)
+                    if "query" not in problem:
+                        logger.warning(
+                            f"Skipping line {line_num}: missing 'query' field"
+                        )
+                        continue
+                    # Remove reward - agent should not see the expected answer
+                    if "reward" in problem:
+                        problem = {k: v for k, v in problem.items() if k != "reward"}
+                    problems.append(problem)
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"Failed to parse line {line_num} in {problem_file}: {e}"
+                    )
+                    continue
+    except FileNotFoundError:
+        logger.error(f"Problem file not found: {problem_file}")
+        return []
+    except Exception as e:
+        logger.error(f"Error loading problems from {problem_file}: {e}")
+        return []
+
+    logger.info(f"Loaded {len(problems)} problems from {problem_file}")
+    return problems
+
+
+def load_agent_from_file(file_path: str) -> Callable:
+    """
+    Load agent_main function from a Python file.
+
+    Args:
+        file_path: Path to the agent Python file
+
+    Returns:
+        The agent_main function from the loaded module
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ImportError: If the module can't be loaded or agent_main is missing
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Agent file not found: {file_path}")
+
+    if not os.path.isfile(file_path):
+        raise ValueError(f"Agent file path is not a file: {file_path}")
+
+    # Create a unique module name based on the file path
+    module_name = f"user_agent_{abs(hash(file_path))}"
+
+    # Load the module
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not create module spec from file: {file_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # Extract agent_main function
+    if not hasattr(module, "agent_main"):
+        raise ImportError(f"Module {file_path} does not define 'agent_main' function")
+
+    agent_main = getattr(module, "agent_main")
+    if not callable(agent_main):
+        raise ImportError(f"'agent_main' in {file_path} is not callable")
+
+    logger.info(f"Succesfully loaded agent from {file_path}")
+    return agent_main
+
+
+def _load_agent(agent_file: Optional[str] = None) -> Callable:
+    """Load agent_main function from file or default module.
+
+    Args:
+        agent_file: Optional path to agent file. If None, uses default src.agent.agent.
+
+    Returns:
+        The agent_main callable.
+    """
+    if agent_file:
+        return load_agent_from_file(agent_file)
+    from src.agent.agent import agent_main
+
+    return agent_main
+
+
+def _read_inference_stats(path: str, problem_id: str) -> tuple:
+    """Read inference stats for a problem from the shared JSONL file.
+
+    Each line is a JSON object with problem_id, inference_success, inference_failed, inference_total.
+    Returns (failure_count, total) for the matching problem_id.
+    """
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if str(entry.get("problem_id")) == str(problem_id):
+                    return entry.get("inference_failed", 0), entry.get("inference_total", 0)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return 0, 0
+
+
+def _run_in_process(
+    problem: Dict,
+    agent_file: Optional[str],
+    result_queue: multiprocessing.Queue,
+    stats_file: Optional[str] = None,
+) -> None:
+    """Target function executed in a child process.
+
+    Loads the agent, runs it against *problem*, and puts the outcome into
+    *result_queue*.  Any exception is caught and sent back as an error string
+    so the parent never blocks on a dead queue.
+    """
+    if stats_file:
+        os.environ["INFERENCE_STATS_FILE"] = stats_file
+    os.environ["PROBLEM_DATA"] = json.dumps(problem)
+    try:
+        agent_fn = _load_agent(agent_file)
+        result = agent_fn(problem)
+        result_queue.put(("success", result))
+    except Exception as e:
+        result_queue.put(("error", str(e)))
+
+
+def execute_single_problem(
+    problem: Dict,
+    timeout: float = 300.0,
+    agent_file: Optional[str] = None,
+) -> ProblemResult:
+    """Execute agent_main() for a single problem with timeout.
+
+    Spawns the agent in a child **process** so that a timed-out execution can
+    be reliably terminated via SIGTERM/SIGKILL (unlike threads which continue
+    running after ``future.result(timeout=...)`` raises).
+
+    Args:
+        problem: Problem dictionary with 'query' key (reward removed).
+        timeout: Maximum execution time in seconds.
+        agent_file: Path to agent file (loaded in child process). If None,
+            uses default ``src.agent.agent``.
+
+    Returns:
+        ProblemResult with execution outcome.
+    """
+    query = problem.get("query", "")
+    problem_id = problem.get("problem_id") or problem.get("id")
+    start_time = time.time()
+
+    # All processes append to a shared JSONL file alongside output.jsonl.
+    # Each line includes problem_id so the reader can match.
+    output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
+    output_dir = os.path.dirname(output_file) if output_file else "/tmp"
+    stats_file = os.path.join(output_dir, "inference_stats.jsonl")
+    result_queue: multiprocessing.Queue = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=_run_in_process,
+        args=(problem, agent_file, result_queue, stats_file),
+    )
+    process.start()
+    process.join(timeout=timeout)
+    execution_time = time.time() - start_time
+
+    if process.is_alive():
+        logger.warning(
+            f"Problem '{query}' exceeded timeout of {timeout}s, terminating process"
+        )
+        process.terminate()
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+        inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+        result_queue.close()
+        return ProblemResult(
+            query=query,
+            success=False,
+            error=f"Execution exceeded timeout of {timeout}s",
+            execution_time=execution_time,
+            problem_id=problem_id,
+            inference_failure_count=inf_failures,
+            inference_total=inf_total,
+        )
+
+    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+    try:
+        if not result_queue.empty():
+            status, data = result_queue.get_nowait()
+            if status == "success":
+                return ProblemResult(
+                    query=query,
+                    success=True,
+                    result=data,
+                    execution_time=execution_time,
+                    problem_id=problem_id,
+                    inference_failure_count=inf_failures,
+                    inference_total=inf_total,
+                )
+            return ProblemResult(
+                query=query,
+                success=False,
+                error=data,
+                execution_time=execution_time,
+                problem_id=problem_id,
+                inference_failure_count=inf_failures,
+                inference_total=inf_total,
+            )
+        return ProblemResult(
+            query=query,
+            success=False,
+            error=f"Process exited with code {process.exitcode} but produced no result",
+            execution_time=execution_time,
+            problem_id=problem_id,
+            inference_failure_count=inf_failures,
+            inference_total=inf_total,
+        )
+    finally:
+        result_queue.close()
+
+
+def _format_single_result(result: ProblemResult) -> Optional[str]:
+    """Format a single ProblemResult as a JSONL line for dialogue output.
+
+    Returns the JSON string (without trailing newline), or None if the
+    result should be skipped (failed, wrong format).
+    """
+    if not result.success:
+        return None
+
+    if not isinstance(result.result, list):
+        return None
+
+    dialogue_steps = result.result
+
+    for i, step in enumerate(dialogue_steps):
+        if "extra_info" not in step:
+            step["extra_info"] = {
+                "step": i + 1,
+                "query": result.query,
+                "timestamp": int(time.time() * 1000),
+            }
+        if "query" not in step.get("extra_info", {}):
+            step.setdefault("extra_info", {})["query"] = result.query
+        if result.problem_id and "problem_id" not in step.get("extra_info", {}):
+            step.setdefault("extra_info", {})["problem_id"] = result.problem_id
+
+    return json.dumps(dialogue_steps)
+
+
+def execute_problems_parallel(
+    problems: List[Dict],
+    max_workers: Optional[int] = None,
+    timeout_per_problem: float = 300.0,
+    agent_file: Optional[str] = None,
+    output_file: Optional[str] = None,
+) -> List[ProblemResult]:
+    """Execute multiple problems in parallel, writing results incrementally.
+
+    Each problem runs in its own child process (via ``execute_single_problem``)
+    so that timeouts reliably kill the work.  A ``ThreadPoolExecutor`` controls
+    concurrency — at most *max_workers* processes run simultaneously.
+
+    When *output_file* is provided, each result is appended and flushed
+    as its future completes, enabling real-time progress monitoring.
+    """
+    if not problems:
+        logger.warning("No problems to execute")
+        return []
+
+    if max_workers is None:
+        max_workers = multiprocessing.cpu_count()
+
+    if agent_file:
+        logger.info(f"Using agent from {agent_file}")
+    else:
+        logger.info("Using default agent from src.agent.agent")
+
+    logger.info(
+        f"Executing {len(problems)} problems with {max_workers} workers, timeout={timeout_per_problem}s"
+    )
+
+    fout = None
+    if output_file:
+        from pathlib import Path
+
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+        fout = open(output_file, "a", encoding="utf-8")
+
+    results: List[ProblemResult] = []
+    start_time = time.time()
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_problem = {
+                executor.submit(
+                    execute_single_problem, problem, timeout_per_problem, agent_file
+                ): problem
+                for problem in problems
+            }
+
+            completed = 0
+            for future in as_completed(future_to_problem):
+                completed += 1
+                try:
+                    result = future.result(timeout=timeout_per_problem + 30)
+                    results.append(result)
+                    status = "OK" if result.success else "FAIL"
+                    logger.info(
+                        f"[{completed}/{len(problems)}] {status} {result.query[:50]}... "
+                        f"({result.execution_time:.2f}s)"
+                    )
+
+                    if fout is not None:
+                        line = _format_single_result(result)
+                        if line is not None:
+                            fout.write(line + "\n")
+                            fout.flush()
+
+                except FutureTimeoutError:
+                    problem = future_to_problem[future]
+                    query = problem.get("query", "unknown")
+                    logger.error(
+                        f"Future for problem '{query}' timed out during result retrieval"
+                    )
+                    results.append(
+                        ProblemResult(
+                            query=query,
+                            success=False,
+                            error="Future timeout during result retrieval",
+                            execution_time=timeout_per_problem,
+                        )
+                    )
+                except Exception as e:
+                    problem = future_to_problem[future]
+                    query = problem.get("query", "unknown")
+                    logger.error(f"Unexpected error retrieving result for '{query}': {e}")
+                    results.append(
+                        ProblemResult(
+                            query=query,
+                            success=False,
+                            error=f"Unexpected error: {str(e)}",
+                            execution_time=0.0,
+                        )
+                    )
+    finally:
+        if fout is not None:
+            fout.close()
+
+    total_time = time.time() - start_time
+    succeeded = sum(1 for r in results if r.success)
+    logger.info(
+        f"Completed {len(results)} problems in {total_time:.2f}s "
+        f"({succeeded} succeeded, {len(results) - succeeded} failed)"
+    )
+
+    return results
+
+
+def format_results(results: List[ProblemResult]) -> Dict:
+    """
+    Format execution results for evaluation.
+
+    Args:
+        results: List of ProblemResult objects
+
+    Returns:
+        Dictionary with formatted results
+    """
+    completed = [r for r in results if r.success]
+    failed = [r for r in results if not r.success]
+
+    total_time = sum(r.execution_time for r in results)
+    avg_time = total_time / len(results) if results else 0.0
+
+    return {
+        "summary": {
+            "total": len(results),
+            "completed": len(completed),
+            "failed": len(failed),
+            "completion_rate": len(completed) / len(results) if results else 0.0,
+            "total_execution_time": total_time,
+            "average_execution_time": avg_time,
+        },
+        "results": [
+            {
+                "query": r.query,
+                "success": r.success,
+                "result": r.result,
+                "error": r.error,
+                "execution_time": r.execution_time,
+            }
+            for r in results
+        ],
+    }
+
+

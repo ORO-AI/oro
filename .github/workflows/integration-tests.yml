@@ -1,0 +1,138 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Check if indexes exist locally
+        id: check-indexes
+        run: |
+          if [ -d "indexes" ] && [ -n "$(ls -A indexes 2>/dev/null)" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Local indexes directory found"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No local indexes found, will try cache or build"
+          fi
+      
+      - name: Get documents.jsonl hash for cache key
+        if: steps.check-indexes.outputs.exists != 'true'
+        id: cache-key
+        run: |
+          if [ -f "resources/documents.jsonl.gz" ]; then
+            HASH=$(sha256sum resources/documents.jsonl.gz | cut -d' ' -f1)
+            echo "hash=$HASH" >> $GITHUB_OUTPUT
+          else
+            echo "hash=no-documents" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Restore indexes from cache
+        if: steps.check-indexes.outputs.exists != 'true'
+        id: cache-indexes
+        uses: actions/cache@v4
+        with:
+          path: indexes
+          key: search-indexes-${{ steps.cache-key.outputs.hash }}
+          restore-keys: |
+            search-indexes-
+      
+      - name: Check if build is needed
+        id: need-build
+        run: |
+          if [ "${{ steps.check-indexes.outputs.exists }}" = "true" ]; then
+            echo "needed=false" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.cache-indexes.outputs.cache-hit }}" = "true" ]; then
+            echo "needed=false" >> $GITHUB_OUTPUT
+          else
+            echo "needed=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Install and configure Java 21
+        if: steps.need-build.outputs.needed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openjdk-21-jdk-headless
+          sudo update-alternatives --set java /usr/lib/jvm/java-21-openjdk-amd64/bin/java
+          echo "JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64" >> $GITHUB_ENV
+
+      - name: Set up Python
+        if: steps.need-build.outputs.needed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      - name: Build search indexes
+        if: steps.need-build.outputs.needed == 'true'
+        run: |
+          pip install -r requirements.txt
+          ./build_index.sh
+      
+      - name: Save indexes to cache
+        if: steps.need-build.outputs.needed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: indexes
+          key: search-indexes-${{ steps.cache-key.outputs.hash }}
+
+      - name: Verify indexes exist
+        run: |
+          if [ ! -d "indexes" ] || [ -z "$(ls -A indexes)" ]; then
+            echo "Error: Indexes directory is empty or does not exist!"
+            exit 1
+          fi
+          echo "Indexes verified"
+      
+      - name: Set up Python (for tests)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build all services
+        run: |
+          docker compose build search-server proxy sandbox
+
+      - name: Start search server
+        run: |
+          docker compose up -d search-server
+          timeout 120 bash -c 'until docker compose ps search-server | grep -q "healthy"; do sleep 2; done' || true
+      
+      - name: Start proxy
+        run: |
+          docker compose up -d proxy
+          timeout 60 bash -c 'until docker compose ps proxy | grep -q "healthy"; do sleep 2; done' || true
+      
+      - name: Start sandbox
+        run: |
+          docker compose up -d sandbox
+      
+      - name: Install test dependencies
+        run: |
+          pip install requests
+      
+      - name: Run sandbox isolation tests
+        run: |
+          pytest tests/integration/test_sandbox_isolation.py -v --tb=short
+      
+      - name: Show service logs on failure
+        if: failure()
+        run: |
+          docker compose logs --tail 50 search-server
+          docker compose logs --tail 50 proxy
+      
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v
