@@ -11,6 +11,7 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
 from bittensor.utils.btlogging import logging
 
+from src.agent.scoring import is_problem_successful, compute_aggregate
 from .backend_client import BackendClient
 
 if TYPE_CHECKING:
@@ -80,8 +81,6 @@ class ProgressReporter:
         self._aggregate_score: Optional[Dict[str, Any]] = None
         self._retry_queue = retry_queue
         self._failed_reports: List[ProblemProgressUpdate] = []
-
-        # Create problem_id -> problem lookup for matching dialogue to problems
         self._id_to_problem: Dict[str, Dict[str, Any]] = {}
         for problem in problems:
             problem_id = str(problem.get("problem_id") or problem.get("id"))
@@ -247,7 +246,7 @@ class ProgressReporter:
     def get_problem_status(self, problem_id: str) -> ProblemStatus:
         """Return the status for a scored problem.
 
-        Uses the same logic as _process_line: SUCCESS if score > 0, else FAILED.
+        Uses category-aware success check (is_problem_successful from shared scoring module).
         If the problem was never scored, returns FAILED as a safe default.
 
         Args:
@@ -256,8 +255,9 @@ class ProgressReporter:
         Returns:
             ProblemStatus.SUCCESS or ProblemStatus.FAILED.
         """
-        score = self._problem_scores.get(problem_id)
-        if score is not None and score > 0:
+        score_dict = self._problem_score_dicts.get(problem_id)
+        category = self._problem_categories.get(problem_id, "product")
+        if is_problem_successful(score_dict, category):
             return ProblemStatus.SUCCESS
         return ProblemStatus.FAILED
 
@@ -353,8 +353,7 @@ class ProgressReporter:
                 self._problem_categories[problem_id] = category
             self._completed_count += 1
 
-            # Determine status based on score
-            status = ProblemStatus.SUCCESS if score > 0 else ProblemStatus.FAILED
+            status = ProblemStatus.SUCCESS if is_problem_successful(score_dict, category) else ProblemStatus.FAILED
 
             logging.info(
                 f"Problem {self._completed_count}/{self._total_problems} scored: {score:.4f} (query: {query[:50]}...)"
@@ -403,6 +402,8 @@ class ProgressReporter:
 
         Produces the keys required by Backend validation (ORO-243):
         ground_truth_rate, success_rate, format_score, field_matching.
+
+        Delegates to the shared compute_aggregate() from scoring.py.
         """
         total = (
             self._total_problems
@@ -410,51 +411,19 @@ class ProgressReporter:
             else max(len(self._problem_scores), 1)
         )
 
-        # Compute ground_truth_rate: fraction with gt >= 1
-        gt_successes = sum(
-            1 for s in self._problem_score_dicts.values() if s.get("gt", 0) >= 1
-        )
-        ground_truth_rate = gt_successes / total
+        results = [
+            {"category": self._problem_categories.get(pid, "product"), "score_dict": sd}
+            for pid, sd in self._problem_score_dicts.items()
+        ]
 
-        # Compute success_rate: category-aware
-        # product: rule >= 1, shop: rule >= 1 AND shop >= 1, voucher: rule >= 1 AND budget >= 1
-        success_count = 0
-        for pid, sd in self._problem_score_dicts.items():
-            cat = self._problem_categories.get(pid, "product")
-            rule_ok = sd.get("rule", 0) >= 1
-            if cat == "product" and rule_ok:
-                success_count += 1
-            elif cat == "shop" and rule_ok and sd.get("shop", 0) >= 1:
-                success_count += 1
-            elif cat == "voucher" and rule_ok and sd.get("budget", 0) >= 1:
-                success_count += 1
-        success_rate = success_count / total
-
-        # Compute format_score: average format across scored problems (0 for unscored)
-        format_total = sum(
-            sd.get("format", 0) for sd in self._problem_score_dicts.values()
-        )
-        format_score = format_total / total
-
-        # Compute field_matching: average rule score across scored problems (0 for unscored)
-        rule_total = sum(sd.get("rule", 0) for sd in self._problem_score_dicts.values())
-        field_matching = rule_total / total
-
-        self._aggregate_score = {
-            "ground_truth_rate": min(ground_truth_rate, 1.0),
-            "success_rate": min(success_rate, 1.0),
-            "format_score": min(format_score, 1.0),
-            "field_matching": min(field_matching, 1.0),
-            "total_problems": total,
-            "successful_problems": success_count,
-            "scored_problems": len(self._problem_scores),
-        }
+        self._aggregate_score = compute_aggregate(results, total)
 
         logging.info(
-            f"Aggregate score computed: success_rate={success_rate:.4f}, "
-            f"gt_rate={ground_truth_rate:.4f}, format={format_score:.4f}, "
-            f"field_matching={field_matching:.4f} "
-            f"({success_count}/{total} problems succeeded, "
+            f"Aggregate score computed: success_rate={self._aggregate_score['success_rate']:.4f}, "
+            f"gt_rate={self._aggregate_score['ground_truth_rate']:.4f}, "
+            f"format={self._aggregate_score['format_score']:.4f}, "
+            f"field_matching={self._aggregate_score['field_matching']:.4f} "
+            f"({self._aggregate_score['successful_problems']}/{total} problems succeeded, "
             f"{len(self._problem_scores)} scored)"
         )
 

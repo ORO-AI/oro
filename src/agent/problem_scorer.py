@@ -10,12 +10,7 @@ for local Java/Pyserini installation.
 import os
 import logging
 
-try:
-    import ujson as json
-except ImportError:
-    import json
 from collections import defaultdict
-from pathlib import Path
 from typing import Optional
 
 import requests
@@ -361,41 +356,3 @@ class ProblemScorer:
             for field in FIELDS:
                 score[field] /= len(reward)
         score["budget"] = budget_match
-
-    def write_progress(self, problem_id: str, score: Optional[dict], output_file: Path):
-        """Write problem score to progress file in JSONL format.
-
-        This writes a single line to the output file that ProgressReporter
-        can parse and send to the Backend API.
-
-        Args:
-            problem_id: Unique identifier for this problem
-            score: Score dictionary from score_problem(), or None if scoring failed
-            output_file: Path to output JSONL file
-        """
-        # Determine status from score
-        if score is None:
-            status = "FAILED"
-        elif self.task == "product":
-            status = "SUCCESS" if score.get("rule", 0) >= 1 else "FAILED"
-        elif self.task == "shop":
-            status = (
-                "SUCCESS"
-                if score.get("rule", 0) >= 1 and score.get("shop", 0) >= 1
-                else "FAILED"
-            )
-        elif self.task == "voucher":
-            status = (
-                "SUCCESS"
-                if score.get("rule", 0) >= 1 and score.get("budget", 0) >= 1
-                else "FAILED"
-            )
-        else:
-            status = "FAILED"
-
-        # Build progress entry
-        progress_entry = {"problem_id": problem_id, "status": status, "score": score}
-
-        # Append to file (create if doesn't exist)
-        with open(output_file, "a") as f:
-            f.write(json.dumps(progress_entry) + "\n")

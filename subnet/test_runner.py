@@ -22,6 +22,7 @@ os.environ.setdefault("SEARCH_SERVER_URL", SEARCH_SERVER_URL)
 # ProblemScorer uses HTTP calls to search-server — no pyserini/Java needed
 sys.path.insert(0, "/app/src/agent")
 from problem_scorer import ProblemScorer  # noqa: E402
+from scoring import is_problem_successful, compute_aggregate  # noqa: E402
 
 from subnet.sandbox import (  # noqa: E402
     SANDBOX_IMAGE,
@@ -90,11 +91,11 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
 
             task = task_for_query[query]
             score = scorers[task].score_problem(query=query, output=output)
-            scores.append({"score": score, "task": task, "query": query})
+            scores.append({"score_dict": score, "category": task, "query": query})
 
             gt = score.get("gt", 0)
             rule = score.get("rule", 0)
-            status = "PASS" if gt >= 1 else "FAIL"
+            status = "PASS" if is_problem_successful(score, task) else "FAIL"
             short_query = query[:55] + "..." if len(query) > 55 else query
             print(f"  [{status}] {task:8s} gt={gt:.2f} rule={rule:.2f} | {short_query}")
 
@@ -102,28 +103,24 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         print("Warning: No problems scored", file=sys.stderr)
         return -1.0
 
-    # Aggregate scores
-    gt_rate = sum(1 for s in scores if s["score"].get("gt", 0) >= 1) / len(scores)
-    success_rate = sum(1 for s in scores if s["score"].get("rule", 0) >= 1) / len(
-        scores
-    )
+    agg = compute_aggregate(scores, total_problems=len(problems))
 
     # Per-category breakdown
-    categories = sorted(set(s["task"] for s in scores))
+    categories = sorted(set(s["category"] for s in scores))
     if len(categories) > 1:
         print()
         for cat in categories:
-            cat_scores = [s for s in scores if s["task"] == cat]
-            cat_gt = sum(1 for s in cat_scores if s["score"].get("gt", 0) >= 1) / len(
-                cat_scores
-            )
-            print(f"  {cat:8s}: gt={cat_gt:.3f} ({len(cat_scores)} problems)")
+            cat_scores = [s for s in scores if s["category"] == cat]
+            cat_pass = sum(1 for s in cat_scores if is_problem_successful(s["score_dict"], cat))
+            print(f"  {cat:8s}: {cat_pass}/{len(cat_scores)} passed ({len(cat_scores)} problems)")
 
     print()
-    print(f"Ground truth rate: {gt_rate:.3f}")
-    print(f"Success rate:      {success_rate:.3f}")
+    print(f"Ground truth rate: {agg['ground_truth_rate']:.3f}")
+    print(f"Success rate:      {agg['success_rate']:.3f}")
+    print(f"Format score:      {agg['format_score']:.3f}")
+    print(f"Field matching:    {agg['field_matching']:.3f}")
 
-    return gt_rate
+    return agg["success_rate"]
 
 
 def run_test(
