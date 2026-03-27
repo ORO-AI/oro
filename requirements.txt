@@ -8,4 +8,4 @@ duckduckgo_search==8.1.1
 colorama==0.4.6
 googlesearch-python==1.3.0
 bittensor==10.1.0
-oro-sdk==0.6.18
+oro-sdk==1.0.1
