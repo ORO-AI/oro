@@ -1,6 +1,6 @@
 services:
   search-server:
-    image: ghcr.io/oro-ai/oro/search-server:latest
+    image: ghcr.io/oro-ai/oro/search-server:stable
     build:
       context: .
       dockerfile: docker/search-server/Dockerfile
@@ -25,7 +25,7 @@ services:
     restart: unless-stopped
 
   proxy:
-    image: ghcr.io/oro-ai/oro/proxy:latest
+    image: ghcr.io/oro-ai/oro/proxy:stable
     build:
       context: .
       dockerfile: docker/proxy/Dockerfile
@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
 
   sandbox:
-    image: ghcr.io/oro-ai/oro/sandbox:latest
+    image: ghcr.io/oro-ai/oro/sandbox:stable
     build:
       context: .
       dockerfile: docker/sandbox/Dockerfile
@@ -83,7 +83,7 @@ services:
 
   # Production validator — full evaluation loop with Backend API
   validator:
-    image: ghcr.io/oro-ai/oro/validator:latest
+    image: ghcr.io/oro-ai/oro/validator:stable
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
@@ -103,7 +103,7 @@ services:
     environment:
       - DOCKER_CONTEXT=default
       - HOST_PROJECT_DIR=${PWD}
-      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:latest}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:stable}
       - SANDBOX_NETWORK=sandbox-network
       - SEARCH_SERVER_URL=http://search-server:5632
       - WALLET_NAME=${WALLET_NAME:-default}
@@ -155,7 +155,7 @@ services:
 
   # Local testing — run agent against test problems, print score, exit
   test:
-    image: ghcr.io/oro-ai/oro/validator:latest
+    image: ghcr.io/oro-ai/oro/validator:stable
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
@@ -172,7 +172,7 @@ services:
       - ./logs:/app/logs
     environment:
       - HOST_PROJECT_DIR=${PWD}
-      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:latest}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:stable}
       - SANDBOX_NETWORK=sandbox-network
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
     entrypoint: ["python", "-m", "subnet.test_runner"]
