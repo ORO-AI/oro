@@ -283,6 +283,15 @@ class Validator:
                     timeout=self.config.sandbox_timeout,
                 )
 
+            # Always log sandbox output for debugging
+            if stderr_log.exists():
+                stderr_content = stderr_log.read_text()
+                if stderr_content.strip():
+                    log_fn = logging.error if result.returncode != 0 else logging.info
+                    log_fn(
+                        f"Sandbox stderr for eval_run {eval_run_id}:\n{stderr_content}"
+                    )
+
             if stdout_log.exists():
                 stdout_content = stdout_log.read_text()
                 if stdout_content.strip():
@@ -294,12 +303,6 @@ class Validator:
                 logging.error(
                     f"Sandbox execution failed for eval_run {eval_run_id} (exit code: {result.returncode})"
                 )
-                if stderr_log.exists():
-                    stderr_content = stderr_log.read_text()
-                    if stderr_content.strip():
-                        logging.error(
-                            f"Sandbox stderr for eval_run {eval_run_id}:\n{stderr_content}"
-                        )
                 # Partial success: sandbox exits non-zero when some problems
                 # fail/timeout, but still writes successful results to the
                 # output file.  Return the file so those results are scored.
