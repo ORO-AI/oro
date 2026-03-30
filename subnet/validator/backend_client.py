@@ -217,10 +217,15 @@ class BackendClient:
                 status_code=status,
             )
 
-        # Error cases - extract detail from parsed error
-        detail = f"HTTP {status}"
+        # Error cases - extract detail from parsed error, fall back to body
+        detail = None
         if response.parsed is not None and hasattr(response.parsed, "detail"):
             detail = response.parsed.detail
+        elif hasattr(response, "content") and response.content:
+            body = response.content[:500].decode("utf-8", errors="replace")
+            detail = f"HTTP {status}: {body}"
+        if not detail:
+            detail = f"HTTP {status}"
 
         raise BackendError(
             f"{operation}: {detail}",
@@ -258,8 +263,11 @@ class BackendClient:
         except httpx.ConnectError as e:
             raise BackendError(f"{operation}: Connection error: {e}")
         except sdk_errors.UnexpectedStatus as e:
+            body = ""
+            if hasattr(e, "content") and e.content:
+                body = f": {e.content[:500].decode('utf-8', errors='replace')}"
             raise BackendError(
-                f"{operation}: Unexpected status {e.status_code}",
+                f"{operation}: Unexpected status {e.status_code}{body}",
                 status_code=e.status_code,
             )
 
