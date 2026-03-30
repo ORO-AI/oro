@@ -321,6 +321,10 @@ class ProgressReporter:
         if not self._scorers:
             return
 
+        # Sanitize null bytes — agents can produce \x00 in output which
+        # PostgreSQL rejects with CharacterNotInRepertoireError
+        line = line.replace("\x00", "")
+
         try:
             dialogue = json.loads(line.strip())
             if not isinstance(dialogue, list) or not dialogue:
