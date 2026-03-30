@@ -9,6 +9,9 @@ http {
     # Limit request body size (prevents memory exhaustion from oversized payloads)
     client_max_body_size 10m;
 
+    # Allow large LLM responses through njs subrequests (default 4KB is too small)
+    subrequest_output_buffer_size 256k;
+
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
