@@ -59,6 +59,10 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         reward = p.get("reward")
         category = p.get("category", "Product").lower()
         if query and reward:
+            # Attach precomputed title embeddings to the reward dict if available
+            title_embeddings = p.get("reward_title_embeddings")
+            if title_embeddings:
+                reward["_title_embeddings"] = title_embeddings
             rewards[query] = reward
             task_for_query[query] = category
             voucher = p.get("voucher")
