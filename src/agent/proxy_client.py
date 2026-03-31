@@ -98,9 +98,10 @@ class ProxyClient:
         self.retry_delay = retry_delay
         self.api_key = api_key or os.getenv("CHUTES_ACCESS_TOKEN")
         self.inference_stats = InferenceStats()
-        stats_file = os.environ.get("INFERENCE_STATS_FILE")
-        if stats_file:
-            atexit.register(self.inference_stats.append_to_file, stats_file)
+        stats_file = os.environ.get(
+            "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
+        )
+        atexit.register(self.inference_stats.append_to_file, stats_file)
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
