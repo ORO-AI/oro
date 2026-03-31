@@ -412,8 +412,13 @@ class ProgressReporter:
     # ─── Helpers ────────────────────────────────────────────────────────
 
     def _read_inference_stats(self, problem_id: str) -> tuple[int, int]:
-        """Read inference stats from the shared JSONL sidecar file."""
+        """Read inference stats from the shared JSONL sidecar file.
+
+        Stats are written incrementally with cumulative counts.
+        Returns the last matching line's totals for the given problem.
+        """
         stats_path = self.output_file.parent / "inference_stats.jsonl"
+        last_failed, last_total = 0, 0
         try:
             with open(stats_path) as f:
                 for line in f:
@@ -422,12 +427,11 @@ class ProgressReporter:
                         continue
                     entry = json.loads(line)
                     if str(entry.get("problem_id")) == str(problem_id):
-                        return entry.get("inference_failed", 0), entry.get(
-                            "inference_total", 0
-                        )
+                        last_failed = entry.get("inference_failed", 0)
+                        last_total = entry.get("inference_total", 0)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
-        return 0, 0
+        return last_failed, last_total
 
     def _report_progress(self, progress: ProblemProgressUpdate) -> None:
         """Report a single problem's progress to Backend."""

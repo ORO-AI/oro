@@ -60,51 +60,66 @@ class TestProxyClientAuth:
 
 
 class TestInferenceStats:
-    def test_to_dict(self):
-        stats = InferenceStats()
-        stats.record_success()
-        stats.record_success()
-        stats.record_failure()
-        assert stats.to_dict() == {
-            "inference_success": 2,
-            "inference_failed": 1,
-            "inference_total": 3,
-        }
+    """Tests for incremental inference stats writing."""
 
-    def test_append_to_file(self):
-        stats = InferenceStats()
-        stats.record_success()
-        stats.record_failure()
+    def test_writes_cumulative_after_each_call(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
-            with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-123"}'}):
-                stats.append_to_file(path)
+            with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-1"}'}):
+                stats = InferenceStats(stats_file=path)
+                stats.record_success()
+                stats.record_failure()
+                stats.record_success()
+
             with open(path) as f:
-                entry = json.loads(f.readline())
-            assert entry["problem_id"] == "p-123"
-            assert entry["inference_success"] == 1
-            assert entry["inference_failed"] == 1
-            assert entry["inference_total"] == 2
+                lines = [json.loads(line) for line in f if line.strip()]
+
+            assert len(lines) == 3
+            assert lines[0]["inference_total"] == 1
+            assert lines[1]["inference_total"] == 2
+            assert lines[2] == {
+                "problem_id": "p-1",
+                "inference_success": 2,
+                "inference_failed": 1,
+                "inference_total": 3,
+            }
         finally:
             os.unlink(path)
 
-    def test_append_multiple_problems(self):
+    def test_no_file_does_not_crash(self):
+        stats = InferenceStats(stats_file=None)
+        stats.record_success()
+        stats.record_failure()
+
+    def test_problem_id_from_env(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
-            for pid, successes, failures in [("a", 3, 1), ("b", 0, 2)]:
-                stats = InferenceStats()
-                for _ in range(successes):
-                    stats.record_success()
-                for _ in range(failures):
-                    stats.record_failure()
-                with patch.dict("os.environ", {"PROBLEM_DATA": json.dumps({"problem_id": pid})}):
-                    stats.append_to_file(path)
+            with patch.dict(
+                "os.environ", {"PROBLEM_DATA": '{"problem_id": "uuid-123"}'}
+            ):
+                stats = InferenceStats(stats_file=path)
+                stats.record_success()
+
             with open(path) as f:
-                lines = [json.loads(line) for line in f if line.strip()]
-            assert len(lines) == 2
-            assert lines[0]["problem_id"] == "a"
-            assert lines[1]["problem_id"] == "b"
+                entry = json.loads(f.readline())
+            assert entry["problem_id"] == "uuid-123"
+        finally:
+            os.unlink(path)
+
+    def test_missing_problem_data_uses_unknown(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            env = os.environ.copy()
+            env.pop("PROBLEM_DATA", None)
+            with patch.dict("os.environ", env, clear=True):
+                stats = InferenceStats(stats_file=path)
+                stats.record_failure()
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+            assert entry["problem_id"] == "unknown"
         finally:
             os.unlink(path)
