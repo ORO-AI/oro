@@ -398,20 +398,9 @@ class ProgressReporter:
                 else problem_id,
                 status=status,
                 score=score,
+                inference_failure_count=inf_failures if inf_total > 0 else None,
+                inference_total=inf_total if inf_total > 0 else None,
             )
-            if inf_total > 0:
-                from oro_sdk.models import (
-                    ProblemProgressUpdateScoreComponentsSummaryType0,
-                )
-
-                update.score_components_summary = (
-                    ProblemProgressUpdateScoreComponentsSummaryType0.from_dict(
-                        {
-                            "inference_failure_count": inf_failures,
-                            "inference_total": inf_total,
-                        }
-                    )
-                )
             self._report_progress(update)
 
         except json.JSONDecodeError:
