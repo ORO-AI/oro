@@ -89,6 +89,8 @@ def main():
 
     # Set environment variables for agent
     os.environ["SANDBOX_PROXY_URL"] = config.sandbox_proxy_url
+    if config.output_file:
+        os.environ["SANDBOX_OUTPUT_FILE"] = config.output_file
 
     # Load problems
     logger.info(f"Loading problems from {config.problem_file}")

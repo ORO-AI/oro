@@ -28,3 +28,5 @@ resources/documents.jsonl
 .specstory/
 CLAUDE.md
 subnet/logs/
+data/single_problem.json
+data/test_agent.py

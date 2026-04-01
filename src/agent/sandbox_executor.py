@@ -145,9 +145,10 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
 def _read_inference_stats(path: str, problem_id: str) -> tuple:
     """Read inference stats for a problem from the shared JSONL file.
 
-    Each line is a JSON object with problem_id, inference_success, inference_failed, inference_total.
-    Returns (failure_count, total) for the matching problem_id.
+    Multiple problems append to the same file (one line per inference call,
+    cumulative counts). Returns the last matching entry's (failure_count, total).
     """
+    last_failed, last_total = 0, 0
     try:
         with open(path) as f:
             for line in f:
@@ -156,10 +157,11 @@ def _read_inference_stats(path: str, problem_id: str) -> tuple:
                     continue
                 entry = json.loads(line)
                 if str(entry.get("problem_id")) == str(problem_id):
-                    return entry.get("inference_failed", 0), entry.get("inference_total", 0)
+                    last_failed = entry.get("inference_failed", 0)
+                    last_total = entry.get("inference_total", 0)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    return 0, 0
+    return last_failed, last_total
 
 
 def _run_in_process(
@@ -395,7 +397,9 @@ def execute_problems_parallel(
                 except Exception as e:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
-                    logger.error(f"Unexpected error retrieving result for '{query}': {e}")
+                    logger.error(
+                        f"Unexpected error retrieving result for '{query}': {e}"
+                    )
                     results.append(
                         ProblemResult(
                             query=query,
@@ -454,5 +458,3 @@ def format_results(results: List[ProblemResult]) -> Dict:
             for r in results
         ],
     }
-
-
