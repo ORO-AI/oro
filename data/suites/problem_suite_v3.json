@@ -1,0 +1,1571 @@
+[
+  {
+    "query": "Looking for a hosport brand waist bag for motorcycles, priced from 180 to 505 PHP.",
+    "reward": {
+      "product_id": "5035687794",
+      "title": [
+        "\u3010Arrive 1-3 Days\u3011Waterproof Waist Leg Bag Motorcycle EVA Hard Shell Cell/Mobile Phone Purse Packs"
+      ],
+      "attributes": [
+        {
+          "brand": [
+            "hosport"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "between": [
+            180,
+            505
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 1"
+  },
+  {
+    "query": "Looking for a blue button flex replacement for Oppo A5S",
+    "reward": {
+      "product_id": "3891025403",
+      "title": [
+        "Power volume button flex for oppo A5S"
+      ],
+      "sku_options": [
+        {
+          "different": "button blue"
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 2"
+  },
+  {
+    "query": "Show me headlight covers where the cost is above 85 PHP.",
+    "reward": {
+      "product_id": "3552553721",
+      "title": [
+        "Toyota Corolla Altis 2008 2009 2010 Headlight Head Light Taillight Tail Light Cover Matte Black"
+      ],
+      "price": [
+        {
+          "greater than": [
+            85,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 3"
+  },
+  {
+    "query": "Looking for a waterproof foam roller in the yoga category with LazFlash deals.",
+    "reward": {
+      "product_id": "4656986397",
+      "title": [
+        "30-45CM Yoga Training Foam Roller Yoga Column Deep Tissue Massager Soothing Muscles Gym Roller"
+      ],
+      "attributes": [
+        {
+          "sport_features": [
+            "waterproof"
+          ]
+        }
+      ],
+      "service": [
+        "flashsale"
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 4"
+  },
+  {
+    "query": "Show me badminton nets that come pre-strung and cost between 1191 and 2233 PHP.",
+    "reward": {
+      "product_id": "4360840584",
+      "title": [
+        "Portable Folding Badminton Net Rack Tennis Net Rack Indoor And Outdoor Adjustable Steel Tube Bracket"
+      ],
+      "attributes": [
+        {
+          "racquet_stringing": [
+            "strung"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "between": [
+            1191,
+            2233
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 5"
+  },
+  {
+    "query": "Show me lancol battery testers priced from 1593 to 3846 PHP.",
+    "reward": {
+      "product_id": "4554762199",
+      "title": [
+        "TF03K Coulomb Meter Vehicle Battery Capacity Tester Battery Coulometer for Electric vehicle /Balance Car/Cleaning Machine 8-120V 50A 100A 350A 500A"
+      ],
+      "attributes": [
+        {
+          "brand": [
+            "lancol"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "between": [
+            1593,
+            3846
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 6"
+  },
+  {
+    "query": "Looking for car sponge pads, pack of 10, priced from 15 to 37 pesos.",
+    "reward": {
+      "product_id": "5061956159",
+      "title": [
+        "10pcs Microfiber Wax Applicator with Finger Bag / Wax Foam Cleaning Pad / Car Detailing Sponge Foam Polishing / Car Waxing Polish Sponges Car Detailing Tools"
+      ],
+      "sku_options": [
+        {
+          "quantity": "10pcs"
+        }
+      ],
+      "price": [
+        {
+          "between": [
+            15,
+            37
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "easy",
+    "title": "Product 7"
+  },
+  {
+    "query": "Show me basic calculators in orange (1 piece) that run on batteries and cost over 176 PHP.",
+    "reward": {
+      "product_id": "2966226187",
+      "title": [
+        "bnesos Stationary School Supplies #JN-600 Candy Color Calculator"
+      ],
+      "sku_options": [
+        {
+          "color": "orange 1pcs"
+        }
+      ],
+      "attributes": [
+        {
+          "calculator_power_source": [
+            "battery"
+          ]
+        },
+        {
+          "calculator_type": [
+            "basic"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "greater than": [
+            176,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 8"
+  },
+  {
+    "query": "Looking for ballpoint pens, 0.5mm tip, pack of 10, suitable for students and office use.",
+    "reward": {
+      "product_id": "4515493247",
+      "title": [
+        "Gel Pen 0.5mm Black With a Signature Pen Carbon Pen Ink Pen Student School Office Stationery"
+      ],
+      "sku_options": [
+        {
+          "quantity": "10pcs/set"
+        }
+      ],
+      "attributes": [
+        {
+          "stationery_line_point": [
+            "0.5mm"
+          ]
+        },
+        {
+          "stationery_pen_type": [
+            "ball pens"
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 9"
+  },
+  {
+    "query": "Looking for a dimmable LED daylight garden light that supports cash on delivery.",
+    "reward": {
+      "product_id": "3849259619",
+      "title": [
+        "3W COB Lawn Garden Flood Light Yard Patio Path Spotlight Lamp with Base Waterproof Cool White 12V Pool Fish Tan Lamp Street Lights Outdoor Garden Light Warm/Cool white Swimming Pool Light"
+      ],
+      "attributes": [
+        {
+          "light_bulb_colour": [
+            "daylight"
+          ]
+        },
+        {
+          "light_bulb_type": [
+            "led"
+          ]
+        },
+        {
+          "light_effects": [
+            "dimmable"
+          ]
+        }
+      ],
+      "service": [
+        "COD"
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 10"
+  },
+  {
+    "query": "Find shops offering both a plastic cartoon-style hair brush without stones, available with LazFlash and priced above 6 PHP, and a polyester cartoon-patterned wallet in color 'a'.",
+    "reward": [
+      {
+        "product_id": "3705568282",
+        "title": [
+          "Anime Kuromi Makeup Mirror Massage Airbag Comb Cartoon Aesthetic Hair Brush Kawaii Hair Accessories for Close Friends Students Teens Girls Kids"
+        ],
+        "attributes": [
+          {
+            "main_stone": [
+              "no stones"
+            ]
+          },
+          {
+            "fa_general_styles": [
+              "cartoon"
+            ]
+          },
+          {
+            "material_type": [
+              "plastic"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ],
+        "price": [
+          {
+            "greater than": [
+              6,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3552405614",
+        "title": [
+          "Snoopy Cute Cartoon Short Wallet Card Holder Girls Coin Purse Anime Key Bag Card Case Front Pocket Wallet"
+        ],
+        "sku_options": [
+          {
+            "color_family": "a"
+          }
+        ],
+        "attributes": [
+          {
+            "material": [
+              "polyester"
+            ]
+          },
+          {
+            "fa_pattern": [
+              "cartoon"
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 1"
+  },
+  {
+    "query": "Find shops offering patterned face towels made from Egyptian-quality cotton, with one option priced between 17 and 49 pesos and another between 144 and 189 pesos. Both should be hypoallergenic, quick-drying, and soft.",
+    "reward": [
+      {
+        "product_id": "4393841743",
+        "title": [
+          "Colored Face Towel 100% Cotton 13x13 inches Fine Quality Cotton Hypo-Allergenic Anti-Microbial Quick Dry"
+        ],
+        "attributes": [
+          {
+            "towel_fabric": [
+              "egyptian-quality cotton"
+            ]
+          },
+          {
+            "towel_size": [
+              "face towel"
+            ]
+          },
+          {
+            "patterned": [
+              "patterned"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              17,
+              49
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3940878955",
+        "title": [
+          "Hotel Premium Quality 100% Cotton Face Towel (13 x 13 inches)    Soft & Fluffy Thick 2Ply Absorbent Quick Dry Towels"
+        ],
+        "attributes": [
+          {
+            "towel_fabric": [
+              "egyptian-quality cotton"
+            ]
+          },
+          {
+            "towel_size": [
+              "face towel"
+            ]
+          },
+          {
+            "patterned": [
+              "patterned"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              144,
+              189
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 2"
+  },
+  {
+    "query": "Find a shop offering both a wall-mounted kitchen cabinet priced above 410 PHP and an Intel 14-inch gaming laptop (official standard version) with LazMall perks, priced from 79 to 1126 PHP.",
+    "reward": [
+      {
+        "product_id": "4875813205",
+        "title": [
+          "Under the solid wood hanging cabinet seasoning rack kitchen wall cabinet upside-down cabinet toilet storage and storage glass door cabinet."
+        ],
+        "price": [
+          {
+            "greater than": [
+              410,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4560833876",
+        "title": [
+          "Intel laptop ultra-thin 14-inch DNF League of Legends eats chicken CF portable gaming laptop"
+        ],
+        "sku_options": [
+          {
+            "variation": "official standard"
+          }
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "between": [
+              79,
+              1126
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 3"
+  },
+  {
+    "query": "I'm looking for a shop that sells both a large canvas tote bag in the 'as show' color, with a simple pattern, free shipping, and priced between 139 and 239 pesos, and also a magic toy from LazMall, costing more than 14 pesos. Can you help me find a store offering both these items?",
+    "reward": [
+      {
+        "product_id": "5101132094",
+        "title": [
+          "YIJIAN1984918 Large Capacity Printed Tote Bag Canvas Sweet Handbag with Lace Bow Shoulder Bag"
+        ],
+        "sku_options": [
+          {
+            "color_family": "as show"
+          }
+        ],
+        "attributes": [
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "between": [
+              139,
+              239
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4847288860",
+        "title": [
+          "\u3010COD+IN STOCK\u3011 Plastic Magic Box Magic Purple Trick Performance Magic Show Props Cool Magic Kits for Kids Teens"
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "greater than": [
+              14,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 4"
+  },
+  {
+    "query": "I'm looking for a shop that offers both a yellow s silicone pot holder for pans with free delivery and priced above 64 PHP, and a gray dispenser for cups (component type: dispensers) costing more than 9 pesos. Please show me stores that have both these items available.",
+    "reward": [
+      {
+        "product_id": "4966025695",
+        "title": [
+          "NASAMI 1Pcs Silicone Pot Holder Cast Iron Hot Skillet Handle Cover Potholder Pan Sleeve"
+        ],
+        "sku_options": [
+          {
+            "color_family": "yellow s"
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "greater than": [
+              64,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4837021959",
+        "title": [
+          "NASAMI Disposable Paper Cups Dispensers Plastic Cup Holders For Water Dispenser Wall Mounted Automatic Cups Storage Rack Cup Containers"
+        ],
+        "sku_options": [
+          {
+            "color_family": "gray"
+          }
+        ],
+        "attributes": [
+          {
+            "component_type": [
+              "dispensers"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              9,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 5"
+  },
+  {
+    "query": "I'm looking for a shop that sells headphones. For the first product, I want silver color, dynamic driver type, 5v input voltage, type c plug, and power usage between 1 and 500. For the second product, I need noise isolating features, type c plug, available with LazMall and LazFlash services, and the price should be from 791 to 1430 PHP.",
+    "reward": [
+      {
+        "product_id": "4275388903",
+        "title": [
+          "SoundMAGIC E80D Type C Wired Earbuds Digital USB C in Ear Headphones with Microphone HiFi Stereo Audiophile Earphones Noise Isolating in Ear Headphones Comfortable Fit Super"
+        ],
+        "sku_options": [
+          {
+            "color_family": "silver"
+          }
+        ],
+        "attributes": [
+          {
+            "headphone_driver_type": [
+              "dynamic"
+            ]
+          },
+          {
+            "input_voltage": [
+              "5v"
+            ]
+          },
+          {
+            "plug_type": [
+              "type c"
+            ]
+          },
+          {
+            "power_consumption": [
+              "1-500"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "1617374273",
+        "title": [
+          "SoundMAGIC ES30D Digital USB C Headphones Type C Earbuds with Microphone HiFi Stereo  Earphones Powerful Bass Noise Isolating Compatible with Android Device Black"
+        ],
+        "attributes": [
+          {
+            "headphone_features": [
+              "noise isolating"
+            ]
+          },
+          {
+            "plug_type": [
+              "type c"
+            ]
+          }
+        ],
+        "service": [
+          "official",
+          "flashsale"
+        ],
+        "price": [
+          {
+            "between": [
+              791,
+              1430
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 6"
+  },
+  {
+    "query": "Find shops offering both a men's vest and a short sleeve shirt. For the vest: size 5XL, loose fit, made of lace, free delivery, and price from 101 to 2042 PHP. For the shirt: size S, regular fit, brand OEM, and price above 428 PHP.",
+    "reward": [
+      {
+        "product_id": "4861686934",
+        "title": [
+          "NEW Japan UNIQLO Youjia Mens Light Down Jacket 2024 New Fashion Casual Vest Waistcoat Loose Version Japanese New style"
+        ],
+        "sku_options": [
+          {
+            "size": "int:5xl"
+          }
+        ],
+        "attributes": [
+          {
+            "pants_fit_type": [
+              "loose"
+            ]
+          },
+          {
+            "clothing_material": [
+              "lace"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "between": [
+              101,
+              2042
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4862165390",
+        "title": [
+          "Genuine NEW UNIQLO Fitting Room Mens Clothing Womens Lovers Oxford Spinning Shirt Coat Short Sleeve Business Casual White Shirt 457787 original NEW"
+        ],
+        "sku_options": [
+          {
+            "size": "int:s"
+          }
+        ],
+        "attributes": [
+          {
+            "top_fit_types": [
+              "regular"
+            ]
+          },
+          {
+            "brand": [
+              "oem"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              428,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "easy",
+    "title": "Shop 7"
+  },
+  {
+    "query": "Find shops offering black Yamaha scooters above 1513 PHP, white Yamaha scooters priced from 1889 to 3315 PHP, and black Yamaha motorcycles over 1383 PHP.",
+    "reward": [
+      {
+        "product_id": "1502492086",
+        "title": [
+          "Yamaha Aerox"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black"
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              1513,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "1502464112",
+        "title": [
+          "Yamaha Aerox S"
+        ],
+        "sku_options": [
+          {
+            "color_family": "white"
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              1889,
+              3315
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "1502698255",
+        "title": [
+          "Yamaha Sniper"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black"
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              1383,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 8"
+  },
+  {
+    "query": "Looking for a shop offering these items: First, a hair care product for color protection, priced from 126 to 210 PHP. Second, a cream hair dye from Bremod, with free shipping, costing between 34 and 111 PHP. Third, a permanent hair color set, price above 8 PHP. Please show shops that have all these products.",
+    "reward": [
+      {
+        "product_id": "2855950773",
+        "title": [
+          "Bremod Peroxide Oxi Developer Oxidizing Cream 1000ml"
+        ],
+        "attributes": [
+          {
+            "concerns_hair_care": [
+              "color protection"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              126,
+              210
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "2716234770",
+        "title": [
+          "BREMOD 3.0 DARK BROWN Hair color with Oxidizer Cream (100ml)"
+        ],
+        "attributes": [
+          {
+            "formulation_hair_color": [
+              "cream"
+            ]
+          },
+          {
+            "brand": [
+              "bremod"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "between": [
+              34,
+              111
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3318135976",
+        "title": [
+          "5.17 BREMOD MOCHA BROWN HAIR COLOR SET WITH OXIDIZING 100ml"
+        ],
+        "attributes": [
+          {
+            "type_hair_color": [
+              "permanent"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              8,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 9"
+  },
+  {
+    "query": "I'm looking for a shop that sells these items: First, a lip balm in the trio color family, classified as mass market, sold as a single piece, with LazMall perks like guaranteed authenticity, easy returns, fast shipping, plus free delivery, and costs over 587 pesos. Second, a soothing gel mist with aloe vera as the main ingredient, suitable for oily skin, in the original series, regular size, from a Korean brand, and sold as a single item. Third, a hair oil with 20ml volume, considered premium, and priced above 1586 pesos. Please show shops offering all these products.",
+    "reward": [
+      {
+        "product_id": "4954183790",
+        "title": [
+          "LANEIGE Lip Glowy Balm Moisturize & Nourish"
+        ],
+        "sku_options": [
+          {
+            "color_family": "trio"
+          }
+        ],
+        "attributes": [
+          {
+            "brand_classification": [
+              "mass"
+            ]
+          },
+          {
+            "units_hb": [
+              "single item"
+            ]
+          }
+        ],
+        "service": [
+          "official",
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "greater than": [
+              587,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "242843346",
+        "title": [
+          "NATURE REPUBLIC ALOE VERA 92% SOOTHING GEL MIST 150ML OLD"
+        ],
+        "attributes": [
+          {
+            "ingredient_preference": [
+              "aloe vera"
+            ]
+          },
+          {
+            "skin_type": [
+              "oily"
+            ]
+          },
+          {
+            "units_hb": [
+              "single item"
+            ]
+          },
+          {
+            "series": [
+              "original"
+            ]
+          },
+          {
+            "travel_size": [
+              "regular size"
+            ]
+          },
+          {
+            "brand": [
+              "korea"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5047702458",
+        "title": [
+          "Gisou Honey Infused Hair Oil"
+        ],
+        "sku_options": [
+          {
+            "volume": "20ml"
+          }
+        ],
+        "attributes": [
+          {
+            "brand_classification": [
+              "premium"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              1586,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 10"
+  },
+  {
+    "query": "Show me processed cheese options that are a healthier choice.\n\nMy budget is only `82`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `63`.\n3. It provides a percentage discount of `34%` with a cap of `28`.",
+    "reward": [
+      {
+        "product_id": "1586232491",
+        "title": [
+          "MAGNOLIA Cheezee Regular 160g Processed Cheese with Vitamins and Zinc (Set of 2)"
+        ],
+        "attributes": [
+          {
+            "dietary_needs": [
+              "healthier choice"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 63,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.34,
+      "cap": 28,
+      "price_after_voucher": 74.0,
+      "budget": 82
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 1"
+  },
+  {
+    "query": "Looking for a cream for oily skin that's a single travel size item, and also a beige silicone baby bowl from babypro.\n\nMy budget is only `235`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `121`.\n3. It provides a fixed discount of `49`.",
+    "reward": [
+      {
+        "product_id": "2115821520",
+        "title": [
+          "SNAILWHITE CC Sunscreen SPF 50+/PA+++ 6ml"
+        ],
+        "attributes": [
+          {
+            "skin_type": [
+              "oily"
+            ]
+          },
+          {
+            "travel size": [
+              "travel size"
+            ]
+          },
+          {
+            "pack type": [
+              "single item"
+            ]
+          },
+          {
+            "product form": [
+              "cream"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4169031957",
+        "title": [
+          "Baby Pro Silicone Suction Food Bowl for Baby BPA Free"
+        ],
+        "sku_options": [
+          {
+            "color_family": "beige"
+          }
+        ],
+        "attributes": [
+          {
+            "nursery_material_type": [
+              "silicone"
+            ]
+          },
+          {
+            "brand": [
+              "babypro"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 121,
+      "discount_type": "fixed",
+      "face_value": 49,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 217.0,
+      "budget": 235
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 2"
+  },
+  {
+    "query": "Looking for a dry dog shampoo with free delivery and LazFlash deal, and also a single unit of Kracie brand conditioner.\n\nMy budget is only `652`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `606`.\n3. It provides a fixed discount of `174`.",
+    "reward": [
+      {
+        "product_id": "4261007507",
+        "title": [
+          "Saint Roche Premium Mother Nature Scent Dry Dog Shampoo 128g - mog and marley"
+        ],
+        "service": [
+          "freeShipping",
+          "flashsale"
+        ]
+      },
+      {
+        "product_id": "334086393",
+        "title": [
+          "DEAR BEAUTE Himawari Gloss & Repair Oil in Conditioner"
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "kracie"
+            ]
+          },
+          {
+            "units_hb": [
+              "single item"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 606,
+      "discount_type": "fixed",
+      "face_value": 174,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 631.5,
+      "budget": 652
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 3"
+  },
+  {
+    "query": "Show me phone cases for oppo a16 that have a built-in stand and support cash on delivery. Also, I'm looking for fishing lures that are 120mm in size.\n\nMy budget is only `606`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `167`.\n3. It provides a fixed discount of `56`.",
+    "reward": [
+      {
+        "product_id": "4456482217",
+        "title": [
+          "Kuromi Casing OPPO A16 A1601 A16e A16K A16s Phone Case OPPO A17 A17k A18 A31 2020 A32 Casing Cartoon Dolls Kuromi Korean-Style 3D Phone Case Cover With Strap Lanyard"
+        ],
+        "sku_options": [
+          {
+            "compatibility_by_model": "oppo a16"
+          }
+        ],
+        "attributes": [
+          {
+            "case_function": [
+              "built-in stand"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      },
+      {
+        "product_id": "4751289683",
+        "title": [
+          "Original FAT120 Medium Minnow Lure 6m Deep Sea Fishing Artificial Bait for Skipjack Tuna Outdoor Camping Travel Gear"
+        ],
+        "attributes": [
+          {
+            "lures_size": [
+              "120mm"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 167,
+      "discount_type": "fixed",
+      "face_value": 56,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 583.0,
+      "budget": 606
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 4"
+  },
+  {
+    "query": "I'm looking for blush press-on nails with a floral design, and also a lightweight bike helmet in large size that supports pay on delivery. Can you help me find these products?\n\nMy budget is only `1625`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `1394`.\n3. It provides a fixed discount of `190`.",
+    "reward": [
+      {
+        "product_id": "5131790113",
+        "title": [
+          "Blush Press on Nails with Flower Printed Charming Comfortable to Wear Manicure Nails for Shopping Traveling Dating HAR-PH"
+        ]
+      },
+      {
+        "product_id": "2572531749",
+        "title": [
+          "ROCKBROS Bike Helmet EPS Safety Cycling Helmet Lightweight Ultralight Professional Cycling Helmet Unisex Bike Accessories(M:55-59cm L:58-61cm)"
+        ],
+        "sku_options": [
+          {
+            "size": "l"
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 1394,
+      "discount_type": "fixed",
+      "face_value": 190,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 1539.37,
+      "budget": 1625
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 5"
+  },
+  {
+    "query": "Looking for a thick seat cushion pad for office or home chairs\n\nMy budget is only `263`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `257`.\n3. It provides a percentage discount of `35%` with a cap of `172`.",
+    "reward": [
+      {
+        "product_id": "5074563636",
+        "title": [
+          "Seat Cushion Back Rest Pad Thickened 40*40 One-Piece for Office and Home Chair"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 257,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.35,
+      "cap": 172,
+      "price_after_voucher": 259.35,
+      "budget": 263
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 6"
+  },
+  {
+    "query": "Looking for a silver cigarette case, style 2, in the rechargeable lighter category.\n\nMy budget is only `209`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `22`.\n3. It provides a percentage discount of `23%` with a cap of `15`.",
+    "reward": [
+      {
+        "product_id": "4972021735",
+        "title": [
+          "USB Rechargeable Cigarett Lighter Capacity FOCUS Cigarett Case Flip High Capacity with Detachable Accessories 20pcs Whole Cigarett"
+        ],
+        "sku_options": [
+          {
+            "variation1": "silver",
+            "variation3": "style 2"
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 22,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.23,
+      "cap": 15,
+      "price_after_voucher": 196.0,
+      "budget": 209
+    },
+    "category": "Voucher",
+    "difficulty": "easy",
+    "title": "Voucher 7"
+  },
+  {
+    "query": "Find a solar tank cover, a ceramic casing bundle, a Nubia smartphone with 16GB RAM, 512GB storage, black color, 1.5k display, and LazFlash deal, and a large blue cotton-linen women's tote bag with free delivery.\n\nMy budget is only `36407`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `14308`.\n3. It provides a fixed discount of `4107`.",
+    "reward": [
+      {
+        "product_id": "4554958531",
+        "title": [
+          "[COD] Kubota Solar Tank Cover Model L 3408/3608/4508/4708/5018 Code TC402-42022"
+        ]
+      },
+      {
+        "product_id": "1723518437",
+        "title": [
+          "Porise ceramic casing bundles"
+        ]
+      },
+      {
+        "product_id": "4797210715",
+        "title": [
+          "Global Version Nubia Z70 Ultra NX733J 12+256GB/16+512GB/24+1TB"
+        ],
+        "sku_options": [
+          {
+            "variation": "16g 512g black"
+          }
+        ],
+        "attributes": [
+          {
+            "resolution": [
+              "1.5k"
+            ]
+          },
+          {
+            "display_size_mobile": [
+              "1.5k"
+            ]
+          },
+          {
+            "brand": [
+              "nubia"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ]
+      },
+      {
+        "product_id": "4818988262",
+        "title": [
+          "Trendy Large Capacity Commuter Womens Bag 2024 New Fashion Single Shoulder Tote Bag Ethnic Style Student Handheld Class Bag"
+        ],
+        "sku_options": [
+          {
+            "color classification": "blue"
+          }
+        ],
+        "attributes": [
+          {
+            "material": [
+              "cotton and linen"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 14308,
+      "discount_type": "fixed",
+      "face_value": 4107,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 34349.6,
+      "budget": 36407
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 8"
+  },
+  {
+    "query": "I'm looking for black shorts in size large, suitable for sports or the beach. Also, I need a set of 2 coffee cleaning brushes in '2pcs a' color, made of plastic, from the brand Bincoo, and specifically for use as coffee filters.\n\nMy budget is only `295`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `267`.\n3. It provides a percentage discount of `20%` with a cap of `147`.",
+    "reward": [
+      {
+        "product_id": "5030401731",
+        "title": [
+          "quick-drying shorts clear prints easy to wearSuitable for sports beaches and other occasions(Naruto)"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black",
+            "size": "int:l"
+          }
+        ]
+      },
+      {
+        "product_id": "4341674187",
+        "title": [
+          "BINCOO Coffee Brush Coffee Machine Grinder Cleaning Brush Bar Brush Coffee Powder Cleaning Tool"
+        ],
+        "sku_options": [
+          {
+            "color_family": "2pcs a"
+          }
+        ],
+        "attributes": [
+          {
+            "coffee_accessory_type": [
+              "coffee filters"
+            ]
+          },
+          {
+            "cookware_material": [
+              "plastic"
+            ]
+          },
+          {
+            "brand": [
+              "bincoo"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 267,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.2,
+      "cap": 147,
+      "price_after_voucher": 285.6,
+      "budget": 295
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 9"
+  },
+  {
+    "query": "Looking for smartphones with these features: For the first, a pearl white Realme with Android OS, 6000 mAh battery, 50 MP rear camera, GPS, 12GB RAM, Type C charging, 32 MP selfie camera, and OLED display. For the second, a gold Infinix running Android, 6.7-inch screen, 4G support, 1080p video, 13 MP single rear camera, GPS, dual SIM, and IPS LCD display. For the third, a titanium grey Infinix with 6.7-inch IPS LCD, Bluetooth, 4GB RAM, 8 MP front camera, dual rear cameras, 4G, 2-pin charger, and 1080p video. Show me options matching these details.\n\nMy budget is only `35722`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `34801`.\n3. It provides a fixed discount of `5179`.",
+    "reward": [
+      {
+        "product_id": "5061184868",
+        "title": [
+          "Realme 14 Pro Plus 5G 12gb 512gb"
+        ],
+        "sku_options": [
+          {
+            "color_family": "pearl white"
+          }
+        ],
+        "attributes": [
+          {
+            "operating_system": [
+              "android"
+            ]
+          },
+          {
+            "battery_capacity": [
+              "6000 mah"
+            ]
+          },
+          {
+            "camera_back": [
+              "50 mp"
+            ]
+          },
+          {
+            "phone_features": [
+              "gps"
+            ]
+          },
+          {
+            "ram_memory": [
+              "12gb"
+            ]
+          },
+          {
+            "brand": [
+              "realme"
+            ]
+          },
+          {
+            "plug_type": [
+              "type c"
+            ]
+          },
+          {
+            "camera_front": [
+              "32 mp"
+            ]
+          },
+          {
+            "screen_type": [
+              "oled"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4829784804",
+        "title": [
+          "Infinix Smart 9 4gb 128gb"
+        ],
+        "sku_options": [
+          {
+            "color_family": "gold"
+          }
+        ],
+        "attributes": [
+          {
+            "display_size_mobile": [
+              "6.7 inches"
+            ]
+          },
+          {
+            "operating_system": [
+              "android"
+            ]
+          },
+          {
+            "network_connections": [
+              "4g"
+            ]
+          },
+          {
+            "video_resolution": [
+              "1080p"
+            ]
+          },
+          {
+            "camera_back": [
+              "13 mp"
+            ]
+          },
+          {
+            "number_of_camera": [
+              "single"
+            ]
+          },
+          {
+            "phone_features": [
+              "gps"
+            ]
+          },
+          {
+            "sim_slots": [
+              "2"
+            ]
+          },
+          {
+            "screen_type": [
+              "ips lcd"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4671701169",
+        "title": [
+          "Infinix Hot 50i 4gb 256gb"
+        ],
+        "sku_options": [
+          {
+            "color_family": "titanium grey"
+          }
+        ],
+        "attributes": [
+          {
+            "display_size_mobile": [
+              "6.7 inches"
+            ]
+          },
+          {
+            "screen_type": [
+              "ips lcd"
+            ]
+          },
+          {
+            "phone_features": [
+              "bluetooth"
+            ]
+          },
+          {
+            "ram_memory": [
+              "4gb"
+            ]
+          },
+          {
+            "camera_front": [
+              "8 mp"
+            ]
+          },
+          {
+            "number_of_camera": [
+              "dual"
+            ]
+          },
+          {
+            "network_connections": [
+              "4g"
+            ]
+          },
+          {
+            "plug_type": [
+              "2 pin"
+            ]
+          },
+          {
+            "video_resolution": [
+              "1080p"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 34801,
+      "discount_type": "fixed",
+      "face_value": 5179,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 34018.0,
+      "budget": 35722
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 10"
+  }
+]

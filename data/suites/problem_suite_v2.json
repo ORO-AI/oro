@@ -1,0 +1,2311 @@
+[
+  {
+    "query": "Show me rrj brand denim jeans for men that are casual style, regular fit, mid-rise waist, full length, made from denim material, with a 29-inch waist, and priced above 1010 pesos.",
+    "reward": {
+      "product_id": "5105155132",
+      "title": [
+        "RRJ Mens Basic Denim Regular Fitting Mid-Rise Blue Wash with Details Fabric Trendy Fashion Casual High Quality Denim Pants for Men 175298 (Dark Shade)"
+      ],
+      "sku_options": [
+        {
+          "size": "waist:29"
+        }
+      ],
+      "attributes": [
+        {
+          "waist_type": [
+            "mid"
+          ]
+        },
+        {
+          "pants_length": [
+            "full length"
+          ]
+        },
+        {
+          "jeans_fit_type": [
+            "regular"
+          ]
+        },
+        {
+          "brand": [
+            "rrj"
+          ]
+        },
+        {
+          "fa_general_styles": [
+            "casual"
+          ]
+        },
+        {
+          "clothing_material": [
+            "denim"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "greater than": [
+            1010,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 1"
+  },
+  {
+    "query": "Show me gold plated rings for women with a heart-shaped design, no stones, size 6, free shipping, and priced above 106 PHP.",
+    "reward": {
+      "product_id": "4322779644",
+      "title": [
+        "14k US Ring Lifetime Use For Women"
+      ],
+      "sku_options": [
+        {
+          "ring_size": "6"
+        }
+      ],
+      "attributes": [
+        {
+          "main_stone": [
+            "no stones"
+          ]
+        },
+        {
+          "material_type": [
+            "gold plated"
+          ]
+        },
+        {
+          "diamond_shape": [
+            "heart"
+          ]
+        }
+      ],
+      "service": [
+        "freeShipping"
+      ],
+      "price": [
+        {
+          "greater than": [
+            106,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 2"
+  },
+  {
+    "query": "Show me silicone phone cases for Apple devices, especially those that fit the iPhone 16 Pro Max, have anti-drop features, and cost more than 11 PHP.",
+    "reward": {
+      "product_id": "4808958670",
+      "title": [
+        "Angel Eyes Steed iPhone Case Womens Heart Shaped Protective Cover for Apple 12 pro Max 13 New Se3 Sticker Soft Silicone Shell"
+      ],
+      "sku_options": [
+        {
+          "material_composition": "silicone",
+          "compatibility_by_model": "iphone 16 pro max"
+        }
+      ],
+      "attributes": [
+        {
+          "case_material": [
+            "silicone"
+          ]
+        },
+        {
+          "brand_compatibility": [
+            "apple"
+          ]
+        },
+        {
+          "case_function": [
+            "anti-fall"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "greater than": [
+            11,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 3"
+  },
+  {
+    "query": "Show me adult dog food for any size dogs with free delivery, priced from 88 to 99 pesos.",
+    "reward": {
+      "product_id": "3018975357",
+      "title": [
+        "Whooppy ADULT dog food for all breeds (Beef flavor) 1kg Repacked"
+      ],
+      "attributes": [
+        {
+          "dog_life_stage": [
+            "adult"
+          ]
+        },
+        {
+          "animal_pets": [
+            "dog"
+          ]
+        },
+        {
+          "dog_size": [
+            "all size"
+          ]
+        }
+      ],
+      "service": [
+        "freeShipping"
+      ],
+      "price": [
+        {
+          "between": [
+            88,
+            99
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 4"
+  },
+  {
+    "query": "Show me black silk short sleeve tops in size large, perfect for any occasion, with LazMall and LazFlash deals, and priced above 119 PHP.",
+    "reward": {
+      "product_id": "5005049092",
+      "title": [
+        "CHIKOOL 2025 Summer New Back Waist Short T-Shirt Women Sweet And Spicy Korean Round Neck Loose Hot Girl Short Sleeve Top"
+      ],
+      "sku_options": [
+        {
+          "color_family": "black",
+          "size": "int:l"
+        }
+      ],
+      "attributes": [
+        {
+          "sleeves": [
+            "short sleeve"
+          ]
+        },
+        {
+          "clothing_material": [
+            "silk"
+          ]
+        },
+        {
+          "occasion": [
+            "suitable for all occasions"
+          ]
+        }
+      ],
+      "service": [
+        "official",
+        "flashsale"
+      ],
+      "price": [
+        {
+          "greater than": [
+            119,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 5"
+  },
+  {
+    "query": "Looking for a summer dress in size large, shift style, from Plains and Prints, with LazMall perks like authenticity and easy returns, and priced above 1435 PHP.",
+    "reward": {
+      "product_id": "4363551325",
+      "title": [
+        "MONKEY SHORT SLEEVE DRESS - Summer Dresses"
+      ],
+      "sku_options": [
+        {
+          "size": "int:l"
+        }
+      ],
+      "attributes": [
+        {
+          "dress_shape": [
+            "shift dresses"
+          ]
+        },
+        {
+          "brand": [
+            "plains and prints"
+          ]
+        }
+      ],
+      "service": [
+        "official"
+      ],
+      "price": [
+        {
+          "greater than": [
+            1435,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "hard",
+    "title": "Product 6"
+  },
+  {
+    "query": "Show me itYaguy brand rear lights for Toyota Fortuner that are on LazFlash deals and cost between 717 and 1493 pesos.",
+    "reward": {
+      "product_id": "4113989812",
+      "title": [
+        "For Toyota Fortuner 2015 - 2023 Rear Bumper Light / LED Brake Light LED Rear Fog Lamp Bumper Light for Toyota Fortuner Tail Light waterproof LED LIGHT Fortuner Bumper light with Signal Light"
+      ],
+      "attributes": [
+        {
+          "brand": [
+            "ityaguy"
+          ]
+        }
+      ],
+      "service": [
+        "flashsale"
+      ],
+      "price": [
+        {
+          "between": [
+            717,
+            1493
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 7"
+  },
+  {
+    "query": "Looking for a red treasury tag clip with a price above 1 PHP.",
+    "reward": {
+      "product_id": "4718897078",
+      "title": [
+        "id retractable holder"
+      ],
+      "sku_options": [
+        {
+          "color_family": "red"
+        }
+      ],
+      "attributes": [
+        {
+          "stationery_clip_type": [
+            "treasury tag"
+          ]
+        }
+      ],
+      "price": [
+        {
+          "greater than": [
+            1,
+            null
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 8"
+  },
+  {
+    "query": "Looking for a Hyundai steering rack and pinion assembly that supports cash on delivery and features LazFlash deals, with a price ranging from 1519 to 18258 PHP.",
+    "reward": {
+      "product_id": "4566158712",
+      "title": [
+        "Brand New Steering Rack and Pinion Assembly for Hyundai Grand Starex 2006-2018 57700-4H100 48002"
+      ],
+      "attributes": [
+        {
+          "make": [
+            "hyundai"
+          ]
+        }
+      ],
+      "service": [
+        "COD",
+        "flashsale"
+      ],
+      "price": [
+        {
+          "between": [
+            1519,
+            18258
+          ]
+        }
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 9"
+  },
+  {
+    "query": "Looking for a Daewoo climate control panel that comes with LazMall perks like guaranteed authenticity and quick returns, plus free delivery.",
+    "reward": {
+      "product_id": "4119905183",
+      "title": [
+        "Car AC Heater Control Panel 96615408 Air Conditioner Climate Switch For Daewoo Lacetti Chevrolet Nubira Optra Excelle"
+      ],
+      "attributes": [
+        {
+          "make": [
+            "daewoo"
+          ]
+        }
+      ],
+      "service": [
+        "official",
+        "freeShipping"
+      ]
+    },
+    "category": "Product",
+    "difficulty": "medium",
+    "title": "Product 10"
+  },
+  {
+    "query": "I'm looking for a shop that offers these items: First, an air filter for Nissan Frontier 4x2 TD27 from 1992 onwards, with a price above 80 pesos. Second, a right side amber corner lamp for Mitsubishi Lancer (Pizza Pie) 1997-1998 that is compatible with all Mitsubishi models. Third, a small water plug made of PVC, categorized under water pumps, from the brand 'no brand xx'. Lastly, a multipack of auto peanut bulbs (12v 10w, 11mmX44mm) for universal vehicles, available with LazFlash deals and priced over 55 pesos. Please show me shops that have all these products.",
+    "reward": [
+      {
+        "product_id": "2111322958",
+        "title": [
+          "Air Filter DA-226 for Nissan Frontier 4x2 TD27 1992-up"
+        ],
+        "price": [
+          {
+            "greater than": [
+              80,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "566336459",
+        "title": [
+          "Mitsubishi Lancer (Pizza Pie) 1997 - 1998 Right Side Amber Corner Lamp"
+        ],
+        "attributes": [
+          {
+            "car_model": [
+              "fits all mitsubishi models"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3148384919",
+        "title": [
+          "Water plug Small"
+        ],
+        "attributes": [
+          {
+            "plumbing_parts_type": [
+              "water pumps"
+            ]
+          },
+          {
+            "material": [
+              "pvc"
+            ]
+          },
+          {
+            "brand": [
+              "no brand xx"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "301182272",
+        "title": [
+          "Auto Peanut Bulb 12v 10w 11mmX44mm universal Use"
+        ],
+        "attributes": [
+          {
+            "make": [
+              "universal"
+            ]
+          },
+          {
+            "multipack or bundle": [
+              "multipack"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ],
+        "price": [
+          {
+            "greater than": [
+              55,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 1"
+  },
+  {
+    "query": "I'm looking for a shop that sells these items: First, a black elbow support brace from oem, priced between 63 and 226 pesos. Second, a large-capacity travel bag for any gender, also by oem, that's waterproof and costs more than 123 pesos. Third, a swimming tube accessory for pool cleaning from oem, available with LazMall service, priced between 40 and 135 pesos. Lastly, a medium-sized leg brace for the leg area, brand oem. Can you help me find a store offering all these products?",
+    "reward": [
+      {
+        "product_id": "4018354248",
+        "title": [
+          "CADY Professional Elbow Support Brace Adjustable Compression Tennis Elbow Brace Strap Tendonitis Sports Recovery Reduce Inflammation and Swelling"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black"
+          }
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "oem"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              63,
+              226
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4111579047",
+        "title": [
+          "70L Large Capacity Hand-Carrying Short Travel Man Womens Business Travel Bag gym bag sports large-capacity travel bag portable shoulder bag portable duffel bag Bags Travel Bag Waterproof Handbag Travel Bag Man Women Multifunctional Bag"
+        ],
+        "attributes": [
+          {
+            "recommended_gender": [
+              "neutral"
+            ]
+          },
+          {
+            "brand": [
+              "oem"
+            ]
+          },
+          {
+            "waterproof": [
+              "waterproof"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              123,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4036350429",
+        "title": [
+          "100G Magic Pool Cleaning Effervescent Chlorine Tablets Cage Disonfectant Swimming Pool Clarifier Chemical Floating Dispenser Floating Auto Chlorine Bromine Pills Dispenser"
+        ],
+        "attributes": [
+          {
+            "water_sports_equipment": [
+              "swimming tube"
+            ]
+          },
+          {
+            "brand": [
+              "oem"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "between": [
+              40,
+              135
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4021104611",
+        "title": [
+          "CADY delivery knee immobilizer splint leg brace 1pc black adjustable for women men marvelous"
+        ],
+        "sku_options": [
+          {
+            "size": "m"
+          }
+        ],
+        "attributes": [
+          {
+            "pad_applicable_area": [
+              "leg"
+            ]
+          },
+          {
+            "brand": [
+              "oem"
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 2"
+  },
+  {
+    "query": "Find shops offering these products: (1) cotton slacks for summer in XXL, any random color, full length, made of polyester; (2) men's cropped shorts in XL, black, priced above 183 PHP; (3) ice silk sweatpants in dark gray, 8XL, straight fit, plain pattern, cash on delivery available, price between 87 and 401 PHP; (4) men's lightweight suit set in L, black, brand is \u2764\ufe0fno brand\u2764\ufe0f, price from 4 to 12 PHP.",
+    "reward": [
+      {
+        "product_id": "4907048470",
+        "title": [
+          "Summer cotton youth slacks-micro-elastic-solid color waist elastic-lace-wear-resistant-anti-fouling cargo pants"
+        ],
+        "sku_options": [
+          {
+            "color": "random limit of one",
+            "size": "xxl"
+          }
+        ],
+        "attributes": [
+          {
+            "pants_length": [
+              "full length"
+            ]
+          },
+          {
+            "fa_season": [
+              "summer"
+            ]
+          },
+          {
+            "clothing_material": [
+              "polyester"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5019521588",
+        "title": [
+          "Summer Mens Hong Kong Style Cropped Shorts - Retro Plaid | Plus size casual beach pants | Loose straight leg design"
+        ],
+        "sku_options": [
+          {
+            "size": "xl",
+            "color": "black"
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              183,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5089582632",
+        "title": [
+          "Mens Ice Silk Sweatpants - Summer Thin - Loose - Elastic - Plus Size Overweight - Straight Saggy Slacks"
+        ],
+        "sku_options": [
+          {
+            "color": "dark gray",
+            "size": "8xl"
+          }
+        ],
+        "attributes": [
+          {
+            "pants_fit_type": [
+              "straight"
+            ]
+          },
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ],
+        "price": [
+          {
+            "between": [
+              87,
+              401
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4895428638",
+        "title": [
+          "Summer Ice Silk Mens Wear - Ultra Thin Casual Sunscreen Set - A Lightweight Suit Coat"
+        ],
+        "sku_options": [
+          {
+            "size": "l",
+            "color": "black"
+          }
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "\u2764\ufe0fno brand\u2764\ufe0f"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              4,
+              12
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 3"
+  },
+  {
+    "query": "Find a shop offering these items: a natural dry cat food for urinary tract health in 1kg repacked size, priced above 473 PHP; a grain-free soft dog food for adult dogs supporting hip and joint wellness, over 437 PHP; food grade diatomaceous earth, more than 648 PHP; and a 250ml extra virgin coconut oil for pets with LazFlash deals. All products should be available from the same seller.",
+    "reward": [
+      {
+        "product_id": "5110067955",
+        "title": [
+          "Special Cat Dry Cat Food Urinary Adult 1kg 1.5Kg 7kg Original Packaging Repacked"
+        ],
+        "sku_options": [
+          {
+            "size": "1kg repacked"
+          }
+        ],
+        "attributes": [
+          {
+            "food_feature": [
+              "natural"
+            ]
+          },
+          {
+            "health_benefit": [
+              "urinary tract control"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              473,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5110226426",
+        "title": [
+          "Zenith Grain-Free Soft Moist Dog Food Lamb Meat & Potato - for Adults 300g"
+        ],
+        "attributes": [
+          {
+            "dog_life_stage": [
+              "adult"
+            ]
+          },
+          {
+            "health_benefit": [
+              "hip&joint"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              437,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5110274389",
+        "title": [
+          "Diatoms Diatomaceous Earth Food Grade 1 KG"
+        ],
+        "price": [
+          {
+            "greater than": [
+              648,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5110316189",
+        "title": [
+          "cocopet(250ml) extra virgin coconut oil for pets ( VCO for pets) food supplement improve coat and furprevents fungal and yeast infectionbalances metabolismbalances thyroid issuesimproves digestion and nutrient absorptionweight control heal cuts"
+        ],
+        "service": [
+          "flashsale"
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 4"
+  },
+  {
+    "query": "I'm looking for a shop that offers several items. First, I want a liquid product suitable for all ages, priced above 491 pesos. Next, I need something from the Mycogalli250 Tilimicosin Phosphate line. Also, I'm interested in a 50 ml antibacterial solution for chickens that can be paid for with cash on delivery. Lastly, I want an anti-bacterial disinfectant with free shipping, costing between 245 and 649 pesos. Can you help me find a store that has all these?",
+    "reward": [
+      {
+        "product_id": "4774294975",
+        "title": [
+          "Coryza Buster"
+        ],
+        "attributes": [
+          {
+            "product_form": [
+              "liquid"
+            ]
+          },
+          {
+            "life_stages": [
+              "all life stage"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              491,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4590247257",
+        "title": [
+          "Mycogalli250 Tilimicosin Phosphate"
+        ]
+      },
+      {
+        "product_id": "4576977785",
+        "title": [
+          "Micosin\u00ae MICOSIN ANTI BACTERIAL"
+        ],
+        "sku_options": [
+          {
+            "size": "50 ml"
+          }
+        ],
+        "attributes": [
+          {
+            "animal_type": [
+              "chicken"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      },
+      {
+        "product_id": "4576975613",
+        "title": [
+          "SAFE DISINFECTANT SOLUTION"
+        ],
+        "attributes": [
+          {
+            "special_feature": [
+              "anti-bacterial"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "between": [
+              245,
+              649
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 5"
+  },
+  {
+    "query": "I'm looking for a shop that offers these items: First, an ethernet cable for desktops, 3 meters long, priced between 72 and 127 pesos. Second, an ethernet cable for Nokia devices, 30 meters in length, with a 20-meter option, available through LazMall and costing more than 73 pesos. Third, a MikroTik brand device with 100mbps connectivity and a maximum download speed between 100 and 499 mbps, for over 408 pesos. Lastly, a black wireless security camera with a single unit, comes with a 64GB SD card, and is priced from 120 to 1992 pesos. Can you show me shops that sell all these products together?",
+    "reward": [
+      {
+        "product_id": "5082329503",
+        "title": [
+          "[3M] CAT6 RJ45 10000 Mbps Ethernet LAN Cable"
+        ],
+        "attributes": [
+          {
+            "compatible_devices": [
+              "desktops"
+            ]
+          },
+          {
+            "cl_cable_type": [
+              "ethernet"
+            ]
+          },
+          {
+            "cable_length": [
+              "3 meters"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              72,
+              127
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5077317692",
+        "title": [
+          "COMLINK CAT6 10M 20M 30M Outdoor LAN Cable | UTP Patch Cable"
+        ],
+        "sku_options": [
+          {
+            "length": "20 meters"
+          }
+        ],
+        "attributes": [
+          {
+            "compatible_devices": [
+              "nokia"
+            ]
+          },
+          {
+            "cl_cable_type": [
+              "ethernet"
+            ]
+          },
+          {
+            "cable_length": [
+              "30"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "greater than": [
+              73,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5035502956",
+        "title": [
+          "MikroTik HapLite with Config for Starlink"
+        ],
+        "attributes": [
+          {
+            "connectivity_speed": [
+              "100mbps"
+            ]
+          },
+          {
+            "maximum_download_speed": [
+              "100-499 mbps"
+            ]
+          },
+          {
+            "brand": [
+              "mikrotik"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              408,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5074656081",
+        "title": [
+          "TP-Link Tapo C200 With SD Card | CCTV | Pan/Tilt Home Security Wi-Fi Camera | With Mic and Speaker"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black",
+            "variations": "with 64gb sd card"
+          }
+        ],
+        "attributes": [
+          {
+            "security_camera_feature": [
+              "wireless"
+            ]
+          },
+          {
+            "no_of_cameras_included": [
+              "1"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              120,
+              1992
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "hard",
+    "title": "Shop 6"
+  },
+  {
+    "query": "Looking for a shop that offers these items: (1) a preschool educational toy in stage 2 style, priced from 16 to 129 PHP; (2) a badminton racket for adults, available with LazMall services like guaranteed authenticity and easy returns, priced between 45 and 270 PHP; (3) a foldable storage box for household use, with a price range of 80 to 249 PHP. Please show shops that have all these products.",
+    "reward": [
+      {
+        "product_id": "4365145420",
+        "title": [
+          "Magic Tracing Workbook Preschool Educational Toys Erasable Pen Logical Thinking Training Dot to Dot"
+        ],
+        "sku_options": [
+          {
+            "style": "stage 2"
+          }
+        ],
+        "price": [
+          {
+            "between": [
+              16,
+              129
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4341554063",
+        "title": [
+          "Badminton Racket Iron Alloy Split Double Racket Entertainment Training Students Durable Racket Suit"
+        ],
+        "attributes": [
+          {
+            "age_group": [
+              "adults"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "between": [
+              45,
+              270
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4401910915",
+        "title": [
+          "Linen Non Woven Fabric  Plain Color Household Use Foldable Clothing Storage Box Wardrobe Organizer"
+        ],
+        "price": [
+          {
+            "between": [
+              80,
+              249
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 7"
+  },
+  {
+    "query": "Find a shop offering all of these: a light blue fruit tea in tea bags from loyd, cupboard storage, with free shipping; a dove deodorant serum single item with LazFlash deal, priced between 64 and 194 PHP; and a light pink multi-pack bar soap set for normal skin, regular size, with moisturizing benefits.",
+    "reward": [
+      {
+        "product_id": "4916672193",
+        "title": [
+          "LOYD COLD INFUSION TEA LIME LEMON MINT 12 TEABAGS"
+        ],
+        "sku_options": [
+          {
+            "model": "no model",
+            "color_family": "light blue"
+          }
+        ],
+        "attributes": [
+          {
+            "tea_type": [
+              "fruit"
+            ]
+          },
+          {
+            "brand": [
+              "loyd"
+            ]
+          },
+          {
+            "storage_type_gr": [
+              "cupboard"
+            ]
+          },
+          {
+            "tea_format": [
+              "tea bags"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ]
+      },
+      {
+        "product_id": "5065366728",
+        "title": [
+          "Dove Deodorant Serum Collagen 45mL"
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "dove"
+            ]
+          },
+          {
+            "units_hb": [
+              "single item"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ],
+        "price": [
+          {
+            "between": [
+              64,
+              194
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5105974030",
+        "title": [
+          "(Bundle) Lux Soft Touch Bar Soap 80g Set of 3 \u203c\ufe0f3PCS BAR SOAP\u203c\ufe0f"
+        ],
+        "attributes": [
+          {
+            "body_benefits": [
+              "moisturizing"
+            ]
+          },
+          {
+            "skin_type": [
+              "normal"
+            ]
+          },
+          {
+            "travel_size": [
+              "regular size"
+            ]
+          },
+          {
+            "units_hb": [
+              "multi-pack"
+            ]
+          },
+          {
+            "color_family": [
+              "light pink"
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 8"
+  },
+  {
+    "query": "I'm looking for a shop that offers several items. First, I want a pink spiral notebook with free shipping and priced above 40 pesos. Next, I need a padded business form, specifically a delivery receipt, with a price over 20 pesos. Lastly, I'm searching for a spiral notebook that comes with LazMall service and costs between 47 and 81 pesos. Please show me shops that have all these products.",
+    "reward": [
+      {
+        "product_id": "4477738195",
+        "title": [
+          "Cattleya AA-0012 6x8.5\" Get Your Boots On Notebook"
+        ],
+        "sku_options": [
+          {
+            "color": "pink"
+          }
+        ],
+        "attributes": [
+          {
+            "stationery_notebook_type": [
+              "spiral notebook"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ],
+        "price": [
+          {
+            "greater than": [
+              40,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4608314579",
+        "title": [
+          "[100 Sheets] Business Form - Delivery Receipt/Resibo Padded (2 Copies) (50 Sets)"
+        ],
+        "attributes": [
+          {
+            "stationery_note_feature": [
+              "padded"
+            ]
+          }
+        ],
+        "price": [
+          {
+            "greater than": [
+              20,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4477662072",
+        "title": [
+          "Cattleya Spiral Notebook Inner Peace (AA-007) by 80s"
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "between": [
+              47,
+              81
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 9"
+  },
+  {
+    "query": "Find shops offering disinfectant granules where one product is sold per drum, another is available per kilo in a box with LazMall benefits and costs over 47 pesos, and a third is also per kilo with LazMall perks and priced above 3 pesos.",
+    "reward": [
+      {
+        "product_id": "3162194838",
+        "title": [
+          "For Disinfect \"CHLORINE Granules\" (per drum)"
+        ]
+      },
+      {
+        "product_id": "3063178543",
+        "title": [
+          "Chlorine Granules Super-Chlor per kilo"
+        ],
+        "attributes": [
+          {
+            "packaging_type": [
+              "box"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "greater than": [
+              47,
+              null
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3945962399",
+        "title": [
+          "CHLORINE granules  (kilo) for disinfectant/remove stain"
+        ],
+        "service": [
+          "official"
+        ],
+        "price": [
+          {
+            "greater than": [
+              3,
+              null
+            ]
+          }
+        ]
+      }
+    ],
+    "category": "Shop",
+    "difficulty": "medium",
+    "title": "Shop 10"
+  },
+  {
+    "query": "Looking for snacks and dried fruits. First, I want cheese-flavored crackers in a multipack refill pouch, suitable for a healthier lifestyle, and available with a big limited-time LazFlash deal. Next, I need halal dates in a single refill pouch, cupboard-storable, with free shipping and cash on delivery options. Also searching for organic cheese-flavored crackers with cash on delivery. Lastly, I want halal dates (fruit and nut type) that are cupboard-friendly, with LazMall authenticity and fast delivery.\n\nMy budget is only `488`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `206`.\n3. It provides a fixed discount of `43`.",
+    "reward": [
+      {
+        "product_id": "888674731",
+        "title": [
+          "Moringa Malunggay Crackers by Ujays Rich in Antioxidants Healthy Snacks Chips Chicharon Crisps 100 g"
+        ],
+        "sku_options": [
+          {
+            "flavor": "cheese"
+          }
+        ],
+        "attributes": [
+          {
+            "dietary_needs": [
+              "healthier choice"
+            ]
+          },
+          {
+            "packaging_type": [
+              "refill pouch"
+            ]
+          },
+          {
+            "pack_type": [
+              "multipack"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ]
+      },
+      {
+        "product_id": "2849648975",
+        "title": [
+          "Saudi Dates Fruits Vacuum Sealed Khalas Barni Medjool Mabrom Iftar Tamar Kurma Khajoor Rutab Snack Dried"
+        ],
+        "attributes": [
+          {
+            "packaging_type": [
+              "refill pouch"
+            ]
+          },
+          {
+            "dietary_needs": [
+              "halal"
+            ]
+          },
+          {
+            "dried_fruit,_nuts_&_seeds_types": [
+              "dates"
+            ]
+          },
+          {
+            "pack_type": [
+              "single"
+            ]
+          },
+          {
+            "storage_type_gr": [
+              "cupboard"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping",
+          "COD"
+        ]
+      },
+      {
+        "product_id": "4727220334",
+        "title": [
+          "Ujays Malunggay Crackers Natural Non Acidic No Sugar Moringa Healthy Chips Chicharon Crisps Organic 100grams per pack"
+        ],
+        "sku_options": [
+          {
+            "flavor": "cheese"
+          }
+        ],
+        "attributes": [
+          {
+            "dietary_needs": [
+              "organic"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      },
+      {
+        "product_id": "1304114925",
+        "title": [
+          "Saudi Dates Fruits 1 kilo 500g Vacuum Sealed Not Pitted Khalas Dates Tamar Rutab Kurma Khajur Ajwa Iftar Medjool Medjoul"
+        ],
+        "attributes": [
+          {
+            "dietary_needs": [
+              "halal"
+            ]
+          },
+          {
+            "fruit_type": [
+              "dates"
+            ]
+          },
+          {
+            "nut_type": [
+              "dates"
+            ]
+          },
+          {
+            "storage_type_gr": [
+              "cupboard"
+            ]
+          },
+          {
+            "dried_fruit,_nuts_&_seeds_types": [
+              "dates"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 206,
+      "discount_type": "fixed",
+      "face_value": 43,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 465.0,
+      "budget": 488
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 1"
+  },
+  {
+    "query": "I'm looking for some women's clothing. First, I want light blue straight-leg jeans in size large, with an elastic waist, made of polyester, plain design, and available with LazMall services. Next, I'm interested in a black floral chiffon cardigan in 4XL, with short sleeves, shawl collar, plus size, and suitable for casual occasions. Also, I need white cropped culottes in 4XL, plain pattern, elastic waist, cotton material, plus size, Korean style, from OEM, and with LazMall services. Lastly, I'm searching for blue wide-leg jeans for women, plain pattern, elastic waist, and from OEM.\n\nMy budget is only `1018`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `405`.\n3. It provides a percentage discount of `42%` with a cap of `403`.",
+    "reward": [
+      {
+        "product_id": "4120896041",
+        "title": [
+          "Female Denim Pants Solid Plus Size Summer Korean Style Women Clothing Casual Elastic High Waist Straight Leg Thin Lady Jeans"
+        ],
+        "sku_options": [
+          {
+            "size": "int:l",
+            "color_family": "light blue"
+          }
+        ],
+        "attributes": [
+          {
+            "jeans_fit_type": [
+              "straight"
+            ]
+          },
+          {
+            "waist_type": [
+              "elasticated waist"
+            ]
+          },
+          {
+            "clothing_material": [
+              "polyester"
+            ]
+          },
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ]
+      },
+      {
+        "product_id": "3082689581",
+        "title": [
+          "New Summer Cardigan for Women Chiffon Korean Style Ladies Blouse Short Sleeve Thin Plus Size Flower Print Female Shawl"
+        ],
+        "sku_options": [
+          {
+            "color_family": "black 02",
+            "size": "int:4xl"
+          }
+        ],
+        "attributes": [
+          {
+            "occasion": [
+              "casual"
+            ]
+          },
+          {
+            "sleeves type": [
+              "short sleeve"
+            ]
+          },
+          {
+            "size class": [
+              "plus size"
+            ]
+          },
+          {
+            "pattern": [
+              "floral"
+            ]
+          },
+          {
+            "collar type": [
+              "shawl collar"
+            ]
+          },
+          {
+            "clothing material": [
+              "chiffon"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "3765424224",
+        "title": [
+          "Womens Cotton Pants Skirt Summer Korean Style Solid Ladies Shorts Casual Oversized Elasticated Waist Split Female Culottes"
+        ],
+        "sku_options": [
+          {
+            "color_family": "white",
+            "size": "int:4xl"
+          }
+        ],
+        "attributes": [
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          },
+          {
+            "pants_length": [
+              "cropped"
+            ]
+          },
+          {
+            "pants_fit_type": [
+              "culottes"
+            ]
+          },
+          {
+            "size_class": [
+              "plus size"
+            ]
+          },
+          {
+            "brand": [
+              "oem"
+            ]
+          },
+          {
+            "waist_type": [
+              "elasticated waist"
+            ]
+          },
+          {
+            "fa_general_styles": [
+              "korean"
+            ]
+          },
+          {
+            "clothing_material": [
+              "cotton"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ]
+      },
+      {
+        "product_id": "4786425030",
+        "title": [
+          "New Tencel Wide Leg Jeans Women Summer Korean Style Ladies Clothing Casual Large Size Drawstring Female Ice Silk Denim Pants"
+        ],
+        "sku_options": [
+          {
+            "color_family": "blue"
+          }
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "oem"
+            ]
+          },
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          },
+          {
+            "waist_type": [
+              "elasticated waist"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 405,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.42,
+      "cap": 403,
+      "price_after_voucher": 1010.23,
+      "budget": 1018
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 2"
+  },
+  {
+    "query": "Show me bullet-style security cameras from Xiaomi with night vision. Also, I'm looking for Honda Dio motorcycle parts, specifically disk type TPOST for Honda. Do you have Biolane moisturizing 2-in-1 cleansers for hair and body? Lastly, I want a single 100g Deoproce soap suitable for any skin type, and I prefer options with cash on delivery.\n\nMy budget is only `3558`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `1062`.\n3. It provides a percentage discount of `50%` with a cap of `536`.",
+    "reward": [
+      {
+        "product_id": "4467428530",
+        "title": [
+          "Xiaomi Outdoor Camera CW300/2K Megapixel Camera 360 Degree Color Night Vision Light CCTV 2.5K IP66Waterproof"
+        ],
+        "attributes": [
+          {
+            "security_camera_style": [
+              "bullet"
+            ]
+          },
+          {
+            "brand": [
+              "xiaomi"
+            ]
+          },
+          {
+            "night_mode": [
+              "yes"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4703950846",
+        "title": [
+          "DISK TYPE TPOST ( JAPAN SPEC ) FOR HONDA DIO 1 2 3 AF18 AF27 AF28 AF34 AF35"
+        ],
+        "sku_options": [
+          {
+            "motorcycle_model": "honda dio"
+          }
+        ],
+        "attributes": [
+          {
+            "motorcycle_make": [
+              "honda"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4220487422",
+        "title": [
+          "Biolane 2 in 1 Body and Hair Cleanser (Gel Lavant) 200ml"
+        ],
+        "attributes": [
+          {
+            "hair_benefit": [
+              "moisturizing"
+            ]
+          },
+          {
+            "brand": [
+              "biolane"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "2723771503",
+        "title": [
+          "Deoproce Snail Recovery Soap 100g"
+        ],
+        "attributes": [
+          {
+            "skin_type": [
+              "suitable for all skin types"
+            ]
+          },
+          {
+            "units_hb": [
+              "single item"
+            ]
+          },
+          {
+            "volume": [
+              "100"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 1062,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.5,
+      "cap": 536,
+      "price_after_voucher": 3512.0,
+      "budget": 3558
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 3"
+  },
+  {
+    "query": "Looking for a dog leash for dogs, a personal steamer water refill with anti-bacterial properties, a pumice stone toilet cleaner in a 1-pack, and a hitch cover for towing hitches.\n\nMy budget is only `4447`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `3536`.\n3. It provides a percentage discount of `22%` with a cap of `3015`.",
+    "reward": [
+      {
+        "product_id": "4643999376",
+        "title": [
+          "SHINE HAI Retractable Hands Free Dog Leash with Dual Bungees for 2 Dogs Adjustable Waist Belt Reflective Stitching Leash for Running Walking Hiking Jogging Biking Black - Gray"
+        ],
+        "attributes": [
+          {
+            "animal_pets": [
+              "dogs"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5005990549",
+        "title": [
+          "Mypurmist Ultrapure Sterile Water for Personal Steamers - Cleanest water vapor free from allergens irritants and pollutants - Double distilled + ultra-filtered - 20 Refills | Up to 100 Sessions"
+        ],
+        "attributes": [
+          {
+            "special_feature": [
+              "anti-bacterial"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "4636741613",
+        "title": [
+          "Powerstone Pumice Stone Toilet Bowl Cleaner with Handle (1-pack) - A Solution for Hard Water Stains on Toilets Grills Tiles Grout & Pools"
+        ],
+        "sku_options": [
+          {
+            "color_family": "1 count (pack of 1)"
+          }
+        ]
+      },
+      {
+        "product_id": "5007035420",
+        "title": [
+          "Toyota Hitch Cover - PT228-35960HP"
+        ],
+        "attributes": [
+          {
+            "towing_products_type": [
+              "hitches"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 3536,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.22,
+      "cap": 3015,
+      "price_after_voucher": 4057.4898,
+      "budget": 4447
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 4"
+  },
+  {
+    "query": "Find phone cases matching these filters: For the first, color is sky blue, material is tpu, theme is solid, and it comes with LazMall benefits. For the second, color is gold, fits samsung galaxy a20, brand is samsung, made of silicone, type is case, theme is pattern, and has LazFlash deals. For the third, fits oppo a37, color is black, theme is solid, and material is silicone. For the fourth, fits realme c25, color is black, function is shockproof, case material is liquid silicone, model is realme c12, material is silicone, and it includes LazMall perks.\n\nMy budget is only `355`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `41`.\n3. It provides a fixed discount of `20`.",
+    "reward": [
+      {
+        "product_id": "1231950632",
+        "title": [
+          "For Samsung Galaxy A7 2018 case new slim soft phone case for samsung a7 2018 SM-A750F case fashion silicone tpu case cover"
+        ],
+        "sku_options": [
+          {
+            "color_family": "sky blue"
+          }
+        ],
+        "attributes": [
+          {
+            "case_material": [
+              "tpu"
+            ]
+          },
+          {
+            "phonecase_theme": [
+              "solid"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ]
+      },
+      {
+        "product_id": "324604047",
+        "title": [
+          "Case For Samsung Galaxy A20 New 3D Marlboro Design Soft Rubber Phone Case for Samsung A 20 Case Fashion Soft Silicone Phone Case Cover"
+        ],
+        "sku_options": [
+          {
+            "color_family": "gold",
+            "compatibility_by_model": "samsung galaxy a20"
+          }
+        ],
+        "attributes": [
+          {
+            "brand_compatibility": [
+              "samsung"
+            ]
+          },
+          {
+            "material": [
+              "silicone"
+            ]
+          },
+          {
+            "type_case_cover": [
+              "case"
+            ]
+          },
+          {
+            "phonecase_theme": [
+              "pattern"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ]
+      },
+      {
+        "product_id": "2186644279",
+        "title": [
+          "Case For Oppo A37 Matte Slim Soft Silicone TPU Phone Cover for Oppo A 37 A37M A37F A37W Fashion Plain Back Case Cover"
+        ],
+        "sku_options": [
+          {
+            "compatibility_by_model": "oppo a37",
+            "color_family": "black"
+          }
+        ],
+        "attributes": [
+          {
+            "phonecase_theme": [
+              "solid"
+            ]
+          },
+          {
+            "material": [
+              "silicone"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "1726480896",
+        "title": [
+          "Case For Realme C12 Realme C15 Realme C25 Realme C25s New 3D Marlboro Design Fashion Soft Rubber Case for RealmeC12 RealmeC15 RealmeC25 RealmeC25s Soft Silicone Case Cover"
+        ],
+        "sku_options": [
+          {
+            "compatibility_by_model": "realme c25",
+            "color_family": "black"
+          }
+        ],
+        "attributes": [
+          {
+            "case_function": [
+              "shockproof"
+            ]
+          },
+          {
+            "case_material": [
+              "liquid silicone"
+            ]
+          },
+          {
+            "model": [
+              "realme c12"
+            ]
+          },
+          {
+            "material": [
+              "silicone"
+            ]
+          }
+        ],
+        "service": [
+          "official"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 41,
+      "discount_type": "fixed",
+      "face_value": 20,
+      "discount": null,
+      "cap": null,
+      "price_after_voucher": 338.0,
+      "budget": 355
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 5"
+  },
+  {
+    "query": "I'm looking for women's sandals in three styles. First, a purple slider sandal, size EU 38, with a slip-on closure, released in 2022. Second, a brown flip-flop slipper, size EU 41, made of rubber and from the brand Fashion Angel. Third, a white clog slipper, size EU 38, with a plain design, suitable for casual summer wear, also by Fashion Angel.\n\nMy budget is only `393`, but I have a voucher with the following rules:\n1. The voucher only applies to the products from the same shop.\n2. It is valid only when the total price of the products exceeds `280`.\n3. It provides a percentage discount of `23%` with a cap of `258`.",
+    "reward": [
+      {
+        "product_id": "2795191247",
+        "title": [
+          "AM - NEW KOREAN FASHION DESIGN ANKLE BUCKLE SLIP ON SANDALS FOR WOMEN IGH QUALITY"
+        ],
+        "sku_options": [
+          {
+            "size": "eu: 38",
+            "color_family": "purple"
+          }
+        ],
+        "attributes": [
+          {
+            "sandal_type": [
+              "slider"
+            ]
+          },
+          {
+            "shoes_closuretype": [
+              "slip-on"
+            ]
+          },
+          {
+            "fa_create_year": [
+              "2022"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "2794832902",
+        "title": [
+          "6.6 SALE FLIPFLOP ONE FINGER ALIDES SLIP ON SLIPPER FR WOMEN HIGH QUALITY"
+        ],
+        "sku_options": [
+          {
+            "size": "eu: 41",
+            "color_family": "brown"
+          }
+        ],
+        "attributes": [
+          {
+            "material_filter": [
+              "rubber"
+            ]
+          },
+          {
+            "brand": [
+              "fashion angel"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "2794650749",
+        "title": [
+          "AM - ADDS CLOG SLIP ON RUBBER SLIPPER FOR WOMEN HIGH QUALITY"
+        ],
+        "sku_options": [
+          {
+            "size": "eu: 38",
+            "color_family": "white"
+          }
+        ],
+        "attributes": [
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          },
+          {
+            "occasion": [
+              "casual"
+            ]
+          },
+          {
+            "fa_season": [
+              "summer"
+            ]
+          },
+          {
+            "brand": [
+              "fashion angel"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "shop",
+      "threshold": 280,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.23,
+      "cap": 258,
+      "price_after_voucher": 382.69,
+      "budget": 393
+    },
+    "category": "Voucher",
+    "difficulty": "hard",
+    "title": "Voucher 6"
+  },
+  {
+    "query": "I'm looking for a ginseng product that comes in a bag, is a single pack, certified organic, and in loose leaf form. It should also allow payment by cash on delivery. Additionally, I'm interested in a pickleball paddle made from carbon fiber that includes free shipping.\n\nMy budget is only `847`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `975`.\n3. It provides a percentage discount of `44%` with a cap of `906`.",
+    "reward": [
+      {
+        "product_id": "4903574719",
+        "title": [
+          "Ginseng root Ji Lin 6years"
+        ],
+        "attributes": [
+          {
+            "packaging_type": [
+              "bag"
+            ]
+          },
+          {
+            "pack_type": [
+              "single"
+            ]
+          },
+          {
+            "organic": [
+              "yes"
+            ]
+          },
+          {
+            "tea_format": [
+              "loose leaf"
+            ]
+          }
+        ],
+        "service": [
+          "COD"
+        ]
+      },
+      {
+        "product_id": "5088726186",
+        "title": [
+          "Sweet Spot Sanded Carbon Fiber Pickleball Paddle - Precision Training Racket with Tournament Mini Hitting Zone for Control & Accuracy"
+        ],
+        "attributes": [
+          {
+            "racquet_material": [
+              "carbon fiber"
+            ]
+          }
+        ],
+        "service": [
+          "freeShipping"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 975,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.44,
+      "cap": 906,
+      "price_after_voucher": 793.7384000000002,
+      "budget": 847
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 7"
+  },
+  {
+    "query": "Looking for a honda click 125i accessory with honda as the motorcycle make, and also searching for an oem brand lumbar support belt.\n\nMy budget is only `1661`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `870`.\n3. It provides a percentage discount of `27%` with a cap of `847`.",
+    "reward": [
+      {
+        "product_id": "2401753706",
+        "title": [
+          "HONDA CLICK V2 FRONT STICKER KOBE LOGO ej cycle"
+        ],
+        "sku_options": [
+          {
+            "motorcycle_make": "honda"
+          }
+        ],
+        "attributes": [
+          {
+            "motorcycle_make": [
+              "honda"
+            ]
+          },
+          {
+            "motorcycle_model": [
+              "honda click 125i"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "5089648580",
+        "title": [
+          "Waist Auxiliary Suspension Traction Belt Horizontal Horizontal Bar Lumbar Stretcher Disc Herniation Traction Artifact Exercise Sling\u8170\u95f4\u690e\u76d8\u7a81\u51fa\u7275\u5f15\u5e26"
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "oem"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 870,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.27,
+      "cap": 847,
+      "price_after_voucher": 1519.3563,
+      "budget": 1661
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 8"
+  },
+  {
+    "query": "I'm looking for a peach maxi dress with a plain design, round neckline, sleeveless cut, and Korean style. Also, I want an antique door handle that comes with LazMall's authenticity and return guarantees.\n\nMy budget is only `229`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `162`.\n3. It provides a percentage discount of `44%` with a cap of `125`.",
+    "reward": [
+      {
+        "product_id": "3621895377",
+        "title": [
+          "Fashion Casual Elegant Lace  Dress  with belt lace"
+        ],
+        "sku_options": [
+          {
+            "color_family": "peach"
+          }
+        ],
+        "attributes": [
+          {
+            "dress_shape": [
+              "maxi dresses"
+            ]
+          },
+          {
+            "fa_pattern": [
+              "plain"
+            ]
+          },
+          {
+            "collar_type": [
+              "round-neck"
+            ]
+          },
+          {
+            "fa_general_styles": [
+              "korean"
+            ]
+          },
+          {
+            "sleeves": [
+              "sleeveless"
+            ]
+          }
+        ]
+      },
+      {
+        "product_id": "2272440970",
+        "title": [
+          "DOOR PULLS ANTIQUE HANDLE 1pc"
+        ],
+        "service": [
+          "official"
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 162,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.44,
+      "cap": 125,
+      "price_after_voucher": 211.0,
+      "budget": 229
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 9"
+  },
+  {
+    "query": "I'm looking for a bear collectible figure in champagne color, size 28cm 400%, suitable for mainland China, and available with LazFlash deals. Also, I want a fast charging power adapter for Android from the hall of brand.\n\nMy budget is only `776`, but I have a voucher with the following rules:\n1. The voucher applies to all products.\n2. It is valid only when the total price of the products exceeds `597`.\n3. It provides a percentage discount of `18%` with a cap of `327`.",
+    "reward": [
+      {
+        "product_id": "4173824879",
+        "title": [
+          "Violent Bear 400% Bearbrick Collectible Figure Living Room Decor Action Toy Soft Plush Block Bear Trendy Plaything Bear"
+        ],
+        "sku_options": [
+          {
+            "color classification": "champagne",
+            "size": "28cm 400%"
+          }
+        ],
+        "attributes": [
+          {
+            "recommended_gender": [
+              "mainland china"
+            ]
+          }
+        ],
+        "service": [
+          "flashsale"
+        ]
+      },
+      {
+        "product_id": "3570048600",
+        "title": [
+          "1Hora Charger Type C 18W Fast Charging Power Adapter QC 3.0 USB + 3A Cable For Android"
+        ],
+        "attributes": [
+          {
+            "brand": [
+              "hall of brand"
+            ]
+          }
+        ]
+      }
+    ],
+    "voucher": {
+      "voucher_type": "platform",
+      "threshold": 597,
+      "discount_type": "percentage",
+      "face_value": null,
+      "discount": 0.18,
+      "cap": 327,
+      "price_after_voucher": 749.48,
+      "budget": 776
+    },
+    "category": "Voucher",
+    "difficulty": "medium",
+    "title": "Voucher 10"
+  }
+]
