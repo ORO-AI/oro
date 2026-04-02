@@ -29,6 +29,7 @@ class CompletionRequest:
     score_components: Optional[dict] = field(default_factory=dict)
     results_s3_key: str = ""
     failure_reason: Optional[str] = None
+    sandbox_metadata: Optional[dict] = None
 
     def to_dict(self) -> dict:
         """Serialize to dict for JSON persistence."""
@@ -41,6 +42,8 @@ class CompletionRequest:
         }
         if self.failure_reason:
             d["failure_reason"] = self.failure_reason
+        if self.sandbox_metadata:
+            d["sandbox_metadata"] = self.sandbox_metadata
         return d
 
     @classmethod
@@ -53,4 +56,5 @@ class CompletionRequest:
             score_components=data.get("score_components", {}),
             results_s3_key=data.get("results_s3_key", ""),
             failure_reason=data.get("failure_reason"),
+            sandbox_metadata=data.get("sandbox_metadata"),
         )
