@@ -694,6 +694,7 @@ class Validator:
             finally:
                 progress_reporter.stop_monitoring()
                 progress_reporter.report_unscored_as_timed_out()
+                progress_reporter.flush_progress()
 
             if not sandbox_output:
                 self._complete_with_failure(
