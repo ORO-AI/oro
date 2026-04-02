@@ -23,6 +23,7 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 from bittensor.utils.btlogging import logging
 
 from src.agent.scoring import is_problem_successful, compute_aggregate
+from subnet.sandbox import attach_title_embeddings
 from .backend_client import BackendClient
 
 if TYPE_CHECKING:
@@ -118,14 +119,7 @@ class ProgressReporter:
                     category = "product"
 
                 if query and reward:
-                    title_embeddings = problem.get("reward_title_embeddings")
-                    if title_embeddings:
-                        if isinstance(reward, dict):
-                            reward["_title_embeddings"] = title_embeddings
-                        elif isinstance(reward, list):
-                            for item in reward:
-                                if isinstance(item, dict):
-                                    item["_title_embeddings"] = title_embeddings
+                    attach_title_embeddings(reward, problem.get("reward_title_embeddings"))
                     category_rewards.setdefault(category, {})[query] = reward
 
                 if category == "voucher":

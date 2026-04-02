@@ -75,6 +75,22 @@ def load_problems(problem_path: Path) -> list[dict]:
     return problems
 
 
+def attach_title_embeddings(reward, title_embeddings) -> None:
+    """Attach precomputed title embeddings to reward dict(s) in-place.
+
+    Rewards can be a single dict (Product) or a list of dicts (Shop/Voucher).
+    Modifies the reward structure directly — no return value.
+    """
+    if not title_embeddings:
+        return
+    if isinstance(reward, dict):
+        reward["_title_embeddings"] = title_embeddings
+    elif isinstance(reward, list):
+        for item in reward:
+            if isinstance(item, dict):
+                item["_title_embeddings"] = title_embeddings
+
+
 def build_sandbox_command(
     *,
     agent_host_path: str,

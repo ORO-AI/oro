@@ -30,6 +30,7 @@ from subnet.sandbox import (  # noqa: E402
     host_path,
     load_problems,
     build_sandbox_command,
+    attach_title_embeddings,
 )
 
 # Default test problem file — problem suite v1 (90 problems)
@@ -59,6 +60,8 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         reward = p.get("reward")
         category = p.get("category", "Product").lower()
         if query and reward:
+            # Attach precomputed title embeddings to the reward dict(s)
+            attach_title_embeddings(reward, p.get("reward_title_embeddings"))
             rewards[query] = reward
             task_for_query[query] = category
             voucher = p.get("voucher")

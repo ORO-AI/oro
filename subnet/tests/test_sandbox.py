@@ -5,7 +5,7 @@ import os
 from unittest import mock
 
 
-from subnet.sandbox import host_path, load_problems, build_sandbox_command
+from subnet.sandbox import host_path, load_problems, build_sandbox_command, attach_title_embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -238,3 +238,47 @@ class TestBuildSandboxCommand:
         # Writable /tmp with noexec (Python tempfile needs /tmp)
         tmpfs_idx = cmd.index("--tmpfs")
         assert "/tmp:rw,noexec,nosuid,size=256m" in cmd[tmpfs_idx + 1]
+
+
+# ---------------------------------------------------------------------------
+# attach_title_embeddings()
+# ---------------------------------------------------------------------------
+
+
+class TestAttachTitleEmbeddings:
+    """Tests for attach_title_embeddings() shared utility."""
+
+    def test_dict_reward_gets_embeddings(self):
+        reward = {"product_id": "123", "title": "Test"}
+        embeddings = [0.1, 0.2, 0.3]
+        attach_title_embeddings(reward, embeddings)
+        assert reward["_title_embeddings"] == [0.1, 0.2, 0.3]
+
+    def test_list_reward_all_dicts_get_embeddings(self):
+        reward = [{"product_id": "1"}, {"product_id": "2"}]
+        embeddings = [0.4, 0.5]
+        attach_title_embeddings(reward, embeddings)
+        assert reward[0]["_title_embeddings"] == [0.4, 0.5]
+        assert reward[1]["_title_embeddings"] == [0.4, 0.5]
+
+    def test_list_reward_skips_non_dict_items(self):
+        reward = [{"product_id": "1"}, "not-a-dict", None]
+        embeddings = [0.1]
+        attach_title_embeddings(reward, embeddings)
+        assert reward[0]["_title_embeddings"] == [0.1]
+        assert reward[1] == "not-a-dict"
+
+    def test_none_embeddings_is_noop(self):
+        reward = {"product_id": "123"}
+        attach_title_embeddings(reward, None)
+        assert "_title_embeddings" not in reward
+
+    def test_empty_list_embeddings_is_noop(self):
+        reward = {"product_id": "123"}
+        attach_title_embeddings(reward, [])
+        assert "_title_embeddings" not in reward
+
+    def test_non_dict_non_list_reward_is_noop(self):
+        reward = "just-a-string"
+        attach_title_embeddings(reward, [0.1, 0.2])
+        # No crash, no mutation possible on a string
