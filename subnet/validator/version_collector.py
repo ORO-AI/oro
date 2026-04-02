@@ -19,9 +19,7 @@ SERVICE_CONTAINERS = [
 ]
 
 # Sandbox image to inspect (pulled but not always running)
-SANDBOX_IMAGE = os.environ.get(
-    "SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest"
-)
+SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 
 # Short name mapping for output keys
 CONTAINER_KEY_MAP = {
@@ -93,17 +91,26 @@ def _get_image_digest(image_name: str) -> Optional[str]:
 def _get_validator_digest() -> Optional[str]:
     """Get the image digest of the validator's own container.
 
-    Inside Docker, the hostname equals the container ID.
+    The hostname does not always match the container ID (e.g. after
+    Watchtower recreates the container). Instead, inspect the validator
+    image directly — it's always available since we're running inside it.
     """
+    for image_ref in [
+        "ghcr.io/oro-ai/oro/validator:stable",
+        "ghcr.io/oro-ai/oro/validator:latest",
+    ]:
+        digest = _get_image_digest(image_ref)
+        if digest:
+            return digest
+
+    # Fallback: try hostname-based lookup (works on some Docker setups)
     container_id = socket.gethostname()
-    if not container_id:
-        return None
+    if container_id:
+        image = _run_docker_inspect(container_id, "{{.Config.Image}}")
+        if image:
+            return _get_image_digest(image)
 
-    # Get the image used by this container, then its digest
-    image = _run_docker_inspect(container_id, "{{.Config.Image}}")
-    if image:
-        return _get_image_digest(image)
-
+    logger.warning("Could not determine validator digest")
     return None
 
 
