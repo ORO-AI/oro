@@ -232,13 +232,20 @@ class Validator:
         eval_run_id: str,
         problem_file: Optional[Path] = None,
         chutes_access_token: Optional[str] = None,
-    ) -> Optional[Path]:
-        """Run sandbox with downloaded agent, return output file path."""
+    ) -> tuple[Optional[Path], dict]:
+        """Run sandbox with downloaded agent, return output file path and metadata.
+
+        Returns:
+            Tuple of (output file path or None, sandbox metadata dict).
+            The metadata dict contains exit_code, duration_seconds, and stderr_tail.
+        """
         eval_dir = self._eval_dir(eval_run_id)
         output_file = eval_dir / "output.jsonl"
 
         stdout_log = eval_dir / "sandbox_stdout.log"
         stderr_log = eval_dir / "sandbox_stderr.log"
+
+        metadata: dict = {"exit_code": None, "duration_seconds": None, "stderr_tail": None}
 
         workspace_dir = Path(self.config.workspace_dir)
         ws = str(workspace_dir)
@@ -272,6 +279,7 @@ class Validator:
         logging.info(f"Sandbox command: {' '.join(log_cmd)}")
 
         try:
+            start_time = time.time()
             with (
                 open(stdout_log, "w") as stdout_file,
                 open(stderr_log, "w") as stderr_file,
@@ -282,11 +290,14 @@ class Validator:
                     stderr=stderr_file,
                     timeout=self.config.sandbox_timeout,
                 )
+            metadata["duration_seconds"] = round(time.time() - start_time, 1)
+            metadata["exit_code"] = result.returncode
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
                 stderr_content = stderr_log.read_text()
                 if stderr_content.strip():
+                    metadata["stderr_tail"] = stderr_content[-500:]
                     log_fn = logging.error if result.returncode != 0 else logging.info
                     log_fn(
                         f"Sandbox stderr for eval_run {eval_run_id}:\n{stderr_content}"
@@ -311,14 +322,14 @@ class Validator:
                         f"Sandbox exited with errors but output file exists for {eval_run_id}, "
                         "continuing with partial results"
                     )
-                    return output_file
-                return None
+                    return output_file, metadata
+                return None, metadata
 
             if output_file.exists():
                 logging.info(
                     f"Sandbox completed successfully for eval_run {eval_run_id}"
                 )
-                return output_file
+                return output_file, metadata
             else:
                 logging.error(
                     f"Output file not found after sandbox execution: {output_file}"
@@ -327,9 +338,15 @@ class Validator:
                     stderr_content = stderr_log.read_text()
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
-                return None
+                return None, metadata
 
         except subprocess.TimeoutExpired:
+            metadata["duration_seconds"] = round(time.time() - start_time, 1)
+            metadata["exit_code"] = -1
+            if stderr_log.exists():
+                stderr_content = stderr_log.read_text()
+                if stderr_content.strip():
+                    metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(
                 f"Sandbox suite timeout ({self.config.sandbox_timeout}s) hit for eval_run {eval_run_id}, "
                 "checking for partial results"
@@ -339,11 +356,11 @@ class Validator:
                     f"Suite timed out but output file exists for {eval_run_id}, "
                     "continuing with partial results"
                 )
-                return output_file
-            return None
+                return output_file, metadata
+            return None, metadata
         except Exception as e:
             logging.error(f"Error running sandbox for eval_run {eval_run_id}: {e}")
-            return None
+            return None, metadata
 
     def _check_for_updates(self):
         """Trigger Watchtower update check and pull sandbox image.
@@ -668,7 +685,7 @@ class Validator:
             progress_reporter.start_monitoring()
 
             try:
-                sandbox_output = self.run_sandbox(
+                sandbox_output, sandbox_metadata = self.run_sandbox(
                     agent_path,
                     eval_run_id_str,
                     problem_file,
@@ -680,7 +697,8 @@ class Validator:
 
             if not sandbox_output:
                 self._complete_with_failure(
-                    eval_run_id, TerminalStatus.FAILED, "Sandbox execution failed"
+                    eval_run_id, TerminalStatus.FAILED, "Sandbox execution failed",
+                    sandbox_metadata=sandbox_metadata,
                 )
                 return
 
@@ -711,12 +729,16 @@ class Validator:
                 score=score,
                 score_components=aggregate,
                 results_s3_key=results_s3_key,
+                sandbox_metadata=sandbox_metadata,
             )
 
         except Exception as e:
             logging.error(f"Evaluation cycle failed: {e}")
             traceback.print_exc()
-            self._complete_with_failure(eval_run_id, TerminalStatus.FAILED, str(e))
+            self._complete_with_failure(
+                eval_run_id, TerminalStatus.FAILED, str(e),
+                sandbox_metadata=sandbox_metadata if 'sandbox_metadata' in locals() else None,
+            )
         finally:
             heartbeat_mgr.stop()
             if not heartbeat_mgr.is_healthy():
@@ -856,6 +878,7 @@ class Validator:
         score: float,
         results_s3_key: str = "",
         score_components: Optional[Dict[str, Any]] = None,
+        sandbox_metadata: Optional[dict] = None,
     ) -> None:
         """Complete an evaluation run, with retry queue fallback.
 
@@ -865,6 +888,7 @@ class Validator:
             score: Evaluation score.
             results_s3_key: S3 key for logs.
             score_components: Optional dict with detailed score breakdown.
+            sandbox_metadata: Optional dict with sandbox execution metadata.
         """
         if score_components is None:
             score_components = {"success_rate": score}
@@ -876,6 +900,7 @@ class Validator:
                 score=score,
                 score_components=score_components,
                 results_s3_key=results_s3_key,
+                sandbox_metadata=sandbox_metadata,
             )
             logging.info(
                 f"Completed {eval_run_id}: {result.status}, "
@@ -899,6 +924,7 @@ class Validator:
                         validator_score=score,
                         score_components=score_components,
                         results_s3_key=results_s3_key,
+                        sandbox_metadata=sandbox_metadata,
                     )
                 )
             else:
@@ -909,6 +935,7 @@ class Validator:
         eval_run_id: UUID,
         status: TerminalStatus,
         reason: str,
+        sandbox_metadata: Optional[dict] = None,
     ) -> None:
         """Report a failed evaluation to Backend, with retry queue fallback.
 
@@ -916,6 +943,7 @@ class Validator:
             eval_run_id: The evaluation run ID (UUID).
             status: Terminal status (TerminalStatus enum).
             reason: Failure reason for logging.
+            sandbox_metadata: Optional dict with sandbox execution metadata.
         """
         logging.error(f"Evaluation {eval_run_id} failed: {reason}")
         logging.info(f"Reporting failure to Backend with status={status.value}...")
@@ -924,6 +952,7 @@ class Validator:
                 eval_run_id=eval_run_id,
                 status=status,
                 failure_reason=reason,
+                sandbox_metadata=sandbox_metadata,
             )
             logging.info(
                 f"Successfully completed failed run {eval_run_id}: "
@@ -945,6 +974,7 @@ class Validator:
                         eval_run_id=eval_run_id,
                         status=status,
                         failure_reason=reason,
+                        sandbox_metadata=sandbox_metadata,
                     )
                 )
             else:

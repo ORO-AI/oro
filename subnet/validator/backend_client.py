@@ -413,6 +413,7 @@ class BackendClient:
         score_components: Optional[dict] = None,
         results_s3_key: str = "",
         failure_reason: Optional[str] = None,
+        sandbox_metadata: Optional[dict] = None,
     ) -> CompleteRunResponse:
         """Complete an evaluation run.
 
@@ -423,6 +424,8 @@ class BackendClient:
             score_components: Breakdown of score components (required for SUCCESS).
             results_s3_key: S3 key where logs were uploaded.
             failure_reason: Reason for failure (sent for non-SUCCESS statuses).
+            sandbox_metadata: Optional dict with sandbox execution metadata
+                (exit_code, duration_seconds, stderr_tail).
 
         Returns:
             CompleteRunResponse with final status and eligibility.
@@ -446,6 +449,7 @@ class BackendClient:
                 validator_score=score,
                 score_components=sdk_score_components,
                 results_s3_key=results_s3_key if results_s3_key else UNSET,
+                sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
             )
         else:
             # For FAILED/TIMED_OUT, include failure reason
@@ -453,6 +457,7 @@ class BackendClient:
                 terminal_status=status,
                 results_s3_key=results_s3_key if results_s3_key else UNSET,
                 failure_reason=failure_reason if failure_reason else UNSET,
+                sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
             )
 
         return self._call_api(
