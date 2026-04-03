@@ -81,6 +81,7 @@ class ProgressReporter:
         self._scorers: Dict[str, Any] = {}
         self._retry_queue = retry_queue
         self._failed_reports: List[ProblemProgressUpdate] = []
+        self._reported_ids: set[str] = set()  # problem IDs confirmed reported to backend
 
         # Build problem_id -> problem lookup
         self._id_to_problem: Dict[str, Dict[str, Any]] = {}
@@ -157,6 +158,7 @@ class ProgressReporter:
         self._file_position = 0
         self._results = {}
         self._failed_reports = []
+        self._reported_ids = set()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -176,22 +178,56 @@ class ProgressReporter:
             if self._thread.is_alive():
                 logging.warning(f"Scoring thread did not finish within {join_timeout}s")
 
-        # Retry any failed progress reports
-        if self._failed_reports:
+    def flush_progress(self, max_retries: int = 3, retry_delay: float = 2.0) -> int:
+        """Ensure all progress reports have been delivered to the backend.
+
+        Retries any failed reports up to max_retries times with delay between
+        attempts. Returns the number of problems successfully reported.
+
+        Must be called after stop_monitoring() and report_unscored_as_timed_out().
+        """
+        for attempt in range(max_retries):
+            if not self._failed_reports:
+                break
+
             still_failed = []
             for progress in self._failed_reports:
                 try:
                     self.backend_client.report_progress(self.eval_run_id, [progress])
+                    self._reported_ids.add(str(progress.problem_id))
                     logging.info(f"Retry succeeded for {progress.problem_id}")
                 except Exception:
                     still_failed.append(progress)
 
-            if still_failed and self._retry_queue:
-                for progress in still_failed:
-                    self._retry_queue.add_progress(self.eval_run_id, progress)
+            self._failed_reports = still_failed
+
+            if still_failed and attempt < max_retries - 1:
                 logging.warning(
-                    f"{len(still_failed)} progress report(s) queued for retry"
+                    f"Retry {attempt + 1}/{max_retries}: "
+                    f"{len(still_failed)} progress report(s) still pending"
                 )
+                import time
+                time.sleep(retry_delay)
+
+        # Any remaining failures go to the persistent retry queue
+        if self._failed_reports and self._retry_queue:
+            for progress in self._failed_reports:
+                self._retry_queue.add_progress(self.eval_run_id, progress)
+            logging.warning(
+                f"{len(self._failed_reports)} progress report(s) queued for disk retry"
+            )
+
+        reported = len(self._reported_ids)
+        total = self._total_problems
+        if reported < total:
+            logging.warning(
+                f"Progress flush incomplete: {reported}/{total} problems "
+                f"confirmed reported to backend"
+            )
+        else:
+            logging.info(f"All {total} problems confirmed reported to backend")
+
+        return reported
 
     def get_aggregate_score(self) -> Optional[Dict[str, Any]]:
         """Compute aggregate score on demand from _results.
@@ -431,6 +467,7 @@ class ProgressReporter:
         """Report a single problem's progress to Backend."""
         try:
             self.backend_client.report_progress(self.eval_run_id, [progress])
+            self._reported_ids.add(str(progress.problem_id))
             logging.info(
                 f"Reported progress for {progress.problem_id}: "
                 f"{progress.status}, score={progress.score:.4f}"
