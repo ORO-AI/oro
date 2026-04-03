@@ -37,28 +37,27 @@ def rule_score_reward(product: dict, reward: dict) -> tuple[float, Counter, Coun
 
     is_ground_truth = ground_truth_reward(product, reward) == 1
 
-    # title — use precomputed embeddings if available, otherwise encode both
-    model = _get_sentence_model()
-    precomputed = reward.get("_title_embeddings", {})
-    if "title" in reward and (model is not None or precomputed):
-        for title in reward["title"]:
-            if title in precomputed and model is not None:
-                # Only encode the agent's product title; reuse cached GT embedding
-                product_emb = model.encode([product["title"]])
-                gt_emb = [precomputed[title]]
-            elif model is not None:
-                # Fallback: encode both
-                both = model.encode([product["title"], title])
-                product_emb = [both[0]]
-                gt_emb = [both[1]]
-            else:
-                continue
-            sim = model.similarity(product_emb, gt_emb)[0][0]
-            total_count += 1
-            total_counter["title"] += 1
-            if sim >= 0.7:
-                hit_count += 1
-                hit_counter["title"] += 1
+    # title — skip expensive embedding computation on GT match (returns 1 anyway)
+    if not is_ground_truth:
+        model = _get_sentence_model()
+        precomputed = reward.get("_title_embeddings", {})
+        if "title" in reward and (model is not None or precomputed):
+            # Encode the agent's product title once, reuse across all GT titles
+            product_emb = model.encode([product["title"]]) if model is not None else None
+            if product_emb is not None:
+                for title in reward["title"]:
+                    if title in precomputed:
+                        gt_emb = [precomputed[title]]
+                    elif model is not None:
+                        gt_emb = model.encode([title])
+                    else:
+                        continue
+                    sim = model.similarity(product_emb, gt_emb)[0][0]
+                    total_count += 1
+                    total_counter["title"] += 1
+                    if sim >= 0.7:
+                        hit_count += 1
+                        hit_counter["title"] += 1
     # price
     if "price" in reward:
         price = product["price"]
