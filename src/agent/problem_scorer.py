@@ -15,7 +15,7 @@ from typing import Optional
 
 import requests
 
-from rewards.orm import ground_truth_reward, rule_score_reward, length_reward
+from rewards.orm import batch_encode_titles, ground_truth_reward, rule_score_reward, length_reward
 from rewards.prm import format_reward
 from util.message import Message, OUTPUT_ROLES
 
@@ -215,13 +215,14 @@ class ProblemScorer:
                 result.append(pid)
         return result
 
-    def _set_eval_score(self, product: dict, score: dict, reward: dict) -> float:
+    def _set_eval_score(self, product: dict, score: dict, reward: dict, product_title_emb=None) -> float:
         """Update score dict with product evaluation metrics.
 
         Args:
             product: Product data from search index
             score: Score dictionary to update
             reward: Ground truth reward data
+            product_title_emb: Pre-encoded product title embedding (optional)
 
         Returns:
             The rule score for this product (0.0 to 1.0)
@@ -230,7 +231,7 @@ class ProblemScorer:
 
         score["gt"] += ground_truth_reward(product, reward)
 
-        rule_score, total_counter, hit_counter = rule_score_reward(product, reward)
+        rule_score, total_counter, hit_counter = rule_score_reward(product, reward, product_title_emb=product_title_emb)
         score["rule"] += rule_score
 
         for field in FIELDS:
@@ -273,16 +274,33 @@ class ProblemScorer:
         shop_ids = set()
         product_id_list = self._extract_recommended_product(output)
 
+        # Fetch all products and identify non-GT matches for batch encoding
+        products = []
         for i, sub_reward in enumerate(reward):
             if i >= len(product_id_list):
+                products.append(None)
                 continue
-            product_id = product_id_list[i]
+            products.append(get_product(product_id_list[i]))
 
-            product = get_product(product_id)
+        # Batch encode non-GT product titles in one call
+        non_gt_indices = []
+        non_gt_titles = []
+        for i, (product, sub_reward) in enumerate(zip(products, reward)):
+            if product is not None and ground_truth_reward(product, sub_reward) != 1:
+                non_gt_indices.append(i)
+                non_gt_titles.append(product["title"])
+
+        embeddings = batch_encode_titles(non_gt_titles)
+        emb_map: dict[int, object] = {}
+        for idx, emb in zip(non_gt_indices, embeddings):
+            emb_map[idx] = emb
+
+        for i, sub_reward in enumerate(reward):
+            product = products[i] if i < len(products) else None
             if not product:
                 continue
 
-            rule_score = self._set_eval_score(product, score, sub_reward)
+            rule_score = self._set_eval_score(product, score, sub_reward, product_title_emb=emb_map.get(i))
             if rule_score > 0:
                 num_hits += 1
                 shop_ids.add(product["shop_id"])
@@ -311,16 +329,33 @@ class ProblemScorer:
         shop_ids = set()
         product_id_list = self._extract_recommended_product(output)
 
+        # Fetch all products and identify non-GT matches for batch encoding
+        products = []
         for i, sub_reward in enumerate(reward):
             if i >= len(product_id_list):
+                products.append(None)
                 continue
-            product_id = product_id_list[i]
+            products.append(get_product(product_id_list[i]))
 
-            product = get_product(product_id)
+        # Batch encode non-GT product titles in one call
+        non_gt_indices = []
+        non_gt_titles = []
+        for i, (product, sub_reward) in enumerate(zip(products, reward)):
+            if product is not None and ground_truth_reward(product, sub_reward) != 1:
+                non_gt_indices.append(i)
+                non_gt_titles.append(product["title"])
+
+        embeddings = batch_encode_titles(non_gt_titles)
+        emb_map: dict[int, object] = {}
+        for idx, emb in zip(non_gt_indices, embeddings):
+            emb_map[idx] = emb
+
+        for i, sub_reward in enumerate(reward):
+            product = products[i] if i < len(products) else None
             if not product:
                 continue
 
-            rule_score = self._set_eval_score(product, score, sub_reward)
+            rule_score = self._set_eval_score(product, score, sub_reward, product_title_emb=emb_map.get(i))
             if rule_score > 0:
                 num_hits += 1
                 total_price += product["price"]

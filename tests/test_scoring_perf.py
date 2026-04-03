@@ -1,18 +1,20 @@
 """Tests for scoring performance optimizations in rule_score_reward."""
 
 from collections import Counter
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from src.agent.rewards.orm import rule_score_reward
+from src.agent.problem_scorer import ProblemScorer
 
 
 # -- Helpers --
 
-def _make_product(product_id="prod-1", title="Cool Widget", price=25.0):
+def _make_product(product_id="prod-1", title="Cool Widget", price=25.0, shop_id="shop-1"):
     return {
         "product_id": product_id,
         "title": title,
         "price": price,
+        "shop_id": shop_id,
         "service": ["fast-shipping"],
         "sku_options": {},
         "attributes": {},
@@ -109,3 +111,78 @@ class TestNonGTScoringFieldsCorrect:
         assert hit_counter["service"] == 1
         # 3 hits / 3 total (ignoring sku & attrs which add 0/0)
         assert score == 1.0
+
+
+def _make_output(product_ids: list[str]):
+    """Build minimal rollout output recommending the given product IDs."""
+    return [
+        {
+            "completion": {
+                "message": {
+                    "tool_call": [
+                        {
+                            "name": "recommend_product",
+                            "parameters": {"product_ids": ",".join(product_ids)},
+                        }
+                    ]
+                }
+            },
+            "extra_info": {"timestamp": 1.0},
+        }
+    ]
+
+
+class TestShopBatchEncodesTitles:
+    """For shop tasks, non-GT product titles are batch-encoded in one call."""
+
+    @patch("src.agent.problem_scorer.get_product")
+    @patch("rewards.orm._get_sentence_model")
+    def test_shop_batch_encodes_titles(self, mock_get_model, mock_get_product):
+        mock_model = MagicMock()
+
+        def encode_side_effect(inputs):
+            # Return one embedding per input
+            return [[0.1, 0.2]] * len(inputs)
+
+        mock_model.encode.side_effect = encode_side_effect
+        mock_model.similarity.return_value = [[0.95]]
+        mock_get_model.return_value = mock_model
+
+        # 3 products: first is GT match, other two are non-GT
+        products = {
+            "pid-gt": _make_product(product_id="pid-gt", title="GT Product"),
+            "pid-a": _make_product(product_id="pid-a", title="Product A"),
+            "pid-b": _make_product(product_id="pid-b", title="Product B"),
+        }
+        mock_get_product.side_effect = lambda pid: products.get(pid)
+
+        rewards_list = [
+            _make_reward(product_id="pid-gt", titles=["GT Product"]),
+            _make_reward(product_id="pid-x", titles=["Reward Title A"]),
+            _make_reward(product_id="pid-y", titles=["Reward Title B"]),
+        ]
+
+        query = "test-query"
+        scorer = ProblemScorer(
+            task="shop",
+            rewards={query: rewards_list},
+            vouchers={},
+        )
+
+        output = _make_output(["pid-gt", "pid-a", "pid-b"])
+        scorer.score_problem(query, output, model="human")
+
+        # The first model.encode call should be the batch call with both non-GT titles
+        first_encode_call = mock_model.encode.call_args_list[0]
+        batch_titles = first_encode_call[0][0]
+        assert batch_titles == ["Product A", "Product B"], (
+            f"Expected batch encode of 2 non-GT titles, got: {batch_titles}"
+        )
+
+        # The GT product (pid-gt) should NOT appear in any encode call
+        for c in mock_model.encode.call_args_list:
+            titles_arg = c[0][0]
+            if isinstance(titles_arg, list):
+                assert "GT Product" not in titles_arg, (
+                    "GT product title should not be encoded"
+                )
