@@ -254,17 +254,15 @@ class Validator:
         # its own agent, problems, and output — not other evaluations' files.
         eval_dir_host = host_path(str(eval_dir), workspace_dir=ws)
 
-        extra_volumes = [
-            (host_path(str(workspace_dir / "data"), workspace_dir=ws), "/app/data"),
-        ]
-
-        # Build docker run command — mount eval dir at /app/eval
+        # Build docker run command — mount eval dir at /app/logs
+        # NOTE: Do NOT mount data/ into the sandbox — it contains the problem
+        # suite with ground truth answers (product_ids). Agents could read it
+        # to cheat. The sandbox only needs the proxy for search/inference.
         cmd = build_sandbox_command(
             agent_host_path="",
             logs_host_path=eval_dir_host,
             problem_file_arg="/app/logs/problems.jsonl",
             output_path="/app/logs/output.jsonl",
-            extra_volumes=extra_volumes,
             chutes_access_token=chutes_access_token,
             agent_container_path="/app/logs/agent.py",
             max_workers=self.config.sandbox_max_workers,
