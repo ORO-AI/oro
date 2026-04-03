@@ -38,27 +38,36 @@ def rule_score_reward(product: dict, reward: dict) -> tuple[float, Counter, Coun
     is_ground_truth = ground_truth_reward(product, reward) == 1
 
     # title — use precomputed embeddings if available, otherwise encode both
-    model = _get_sentence_model()
-    precomputed = reward.get("_title_embeddings", {})
-    if "title" in reward and (model is not None or precomputed):
-        for title in reward["title"]:
-            if title in precomputed and model is not None:
-                # Only encode the agent's product title; reuse cached GT embedding
-                product_emb = model.encode([product["title"]])
-                gt_emb = [precomputed[title]]
-            elif model is not None:
-                # Fallback: encode both
-                both = model.encode([product["title"], title])
-                product_emb = [both[0]]
-                gt_emb = [both[1]]
-            else:
-                continue
-            sim = model.similarity(product_emb, gt_emb)[0][0]
-            total_count += 1
-            total_counter["title"] += 1
-            if sim >= 0.7:
-                hit_count += 1
-                hit_counter["title"] += 1
+    if is_ground_truth and "title" in reward:
+        # GT match: same product = same title, skip expensive embedding computation
+        n_titles = len(reward["title"])
+        total_count += n_titles
+        total_counter["title"] += n_titles
+        hit_count += n_titles
+        hit_counter["title"] += n_titles
+    elif "title" in reward:
+        model = _get_sentence_model()
+        precomputed = reward.get("_title_embeddings", {})
+        if model is not None or precomputed:
+            # Encode the product title once, reuse for all GT title comparisons
+            product_emb = None
+            for title in reward["title"]:
+                if title in precomputed and model is not None:
+                    if product_emb is None:
+                        product_emb = model.encode([product["title"]])
+                    gt_emb = [precomputed[title]]
+                elif model is not None:
+                    both = model.encode([product["title"], title])
+                    product_emb = [both[0]]
+                    gt_emb = [both[1]]
+                else:
+                    continue
+                sim = model.similarity(product_emb, gt_emb)[0][0]
+                total_count += 1
+                total_counter["title"] += 1
+                if sim >= 0.7:
+                    hit_count += 1
+                    hit_counter["title"] += 1
     # price
     if "price" in reward:
         price = product["price"]
