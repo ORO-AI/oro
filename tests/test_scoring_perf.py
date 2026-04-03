@@ -1,7 +1,6 @@
 """Tests for scoring performance optimizations in rule_score_reward."""
 
-from collections import Counter
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 from src.agent.rewards.orm import rule_score_reward
 from src.agent.problem_scorer import ProblemScorer
