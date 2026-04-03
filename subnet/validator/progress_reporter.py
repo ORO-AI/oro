@@ -60,7 +60,7 @@ class ProgressReporter:
         workspace_dir: Path,
         poll_interval: float = 1.0,
         retry_queue: Optional["LocalRetryQueue"] = None,
-        scoring_timeout: float = 300.0,
+        scoring_timeout: float = 900.0,
     ):
         self.backend_client = backend_client
         self.eval_run_id = eval_run_id
