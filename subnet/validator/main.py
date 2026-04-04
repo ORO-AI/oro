@@ -492,7 +492,16 @@ class Validator:
                         self.retry_queue.process_pending()
 
                 except BackendError as e:
-                    if e.is_transient:
+                    if e.is_banned:
+                        # Banned validators should poll infrequently — the ban won't
+                        # be lifted for a while and frequent polling wastes resources.
+                        ban_sleep = 300  # 5 minutes
+                        logging.warning(
+                            f"Validator is banned: {e}. "
+                            f"Sleeping {ban_sleep}s before retrying."
+                        )
+                        time.sleep(ban_sleep)
+                    elif e.is_transient:
                         sleep_time = self.backoff.next()
                         logging.warning(f"Backend unavailable: {e}")
                         logging.info(f"Backing off for {sleep_time:.1f}s")

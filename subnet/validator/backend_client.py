@@ -82,6 +82,11 @@ class BackendError(Exception):
         return self.status_code in (401, 403)
 
     @property
+    def is_banned(self) -> bool:
+        """Return True if this is a ban response (403 with 'banned' in message)."""
+        return self.status_code == 403 and "banned" in self.message.lower()
+
+    @property
     def is_conflict(self) -> bool:
         """Return True if this is a conflict error (409)."""
         return self.status_code == 409
