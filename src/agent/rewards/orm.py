@@ -23,13 +23,21 @@ def _get_sentence_model():
     return _sentence_model
 
 
+def batch_encode_titles(titles: list[str]) -> list:
+    """Batch encode multiple titles in one model.encode() call."""
+    model = _get_sentence_model()
+    if model is None or not titles:
+        return []
+    return list(model.encode(titles))
+
+
 def ground_truth_reward(product: dict, reward: dict) -> float:
     if product["product_id"] == reward["product_id"]:
         return 1
     return 0
 
 
-def rule_score_reward(product: dict, reward: dict) -> tuple[float, Counter, Counter]:
+def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tuple[float, Counter, Counter]:
     total_count = 0
     hit_count = 0
     total_counter = Counter()
@@ -38,27 +46,38 @@ def rule_score_reward(product: dict, reward: dict) -> tuple[float, Counter, Coun
     is_ground_truth = ground_truth_reward(product, reward) == 1
 
     # title — use precomputed embeddings if available, otherwise encode both
-    model = _get_sentence_model()
-    precomputed = reward.get("_title_embeddings", {})
-    if "title" in reward and (model is not None or precomputed):
-        for title in reward["title"]:
-            if title in precomputed and model is not None:
-                # Only encode the agent's product title; reuse cached GT embedding
-                product_emb = model.encode([product["title"]])
-                gt_emb = [precomputed[title]]
+    if is_ground_truth and "title" in reward:
+        # GT match: same product = same title, skip expensive embedding computation
+        n_titles = len(reward["title"])
+        total_count += n_titles
+        total_counter["title"] += n_titles
+        hit_count += n_titles
+        hit_counter["title"] += n_titles
+    elif "title" in reward:
+        model = _get_sentence_model()
+        precomputed = reward.get("_title_embeddings", {})
+        if model is not None or precomputed:
+            # Use pre-encoded embedding if provided, otherwise encode now
+            if product_title_emb is not None:
+                product_emb = [product_title_emb]
             elif model is not None:
-                # Fallback: encode both
-                both = model.encode([product["title"], title])
-                product_emb = [both[0]]
-                gt_emb = [both[1]]
+                product_emb = model.encode([product["title"]])
             else:
-                continue
-            sim = model.similarity(product_emb, gt_emb)[0][0]
-            total_count += 1
-            total_counter["title"] += 1
-            if sim >= 0.7:
-                hit_count += 1
-                hit_counter["title"] += 1
+                product_emb = None
+            if product_emb is not None:
+                for title in reward["title"]:
+                    if title in precomputed:
+                        gt_emb = [precomputed[title]]
+                    elif model is not None:
+                        gt_emb = model.encode([title])
+                    else:
+                        continue
+                    sim = model.similarity(product_emb, gt_emb)[0][0]
+                    total_count += 1
+                    total_counter["title"] += 1
+                    if sim >= 0.7:
+                        hit_count += 1
+                        hit_counter["title"] += 1
     # price
     if "price" in reward:
         price = product["price"]
