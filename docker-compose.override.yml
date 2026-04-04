@@ -1,8 +1,0 @@
-services:
-  validator:
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./.docker-config.json:/root/.docker/config.json:ro
-      - ${HOME}/.bittensor/wallets:/root/.bittensor/wallets:ro
-      - ./logs:/app/logs
-      - validator-data:/root/.validator
