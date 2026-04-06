@@ -7,9 +7,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
-from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 from oro_sdk.models.terminal_status import TerminalStatus
-from oro_sdk.types import Unset
 
 from .backend_client import BackendClient, BackendError
 from .models import CompletionRequest
@@ -72,26 +70,6 @@ class LocalRetryQueue:
         self._save(data)
         logging.info(f"Added {completion.eval_run_id} to retry queue")
 
-    def add_progress(self, eval_run_id: UUID, progress: ProblemProgressUpdate) -> None:
-        """Add a failed progress report to the retry queue."""
-        data = self._load()
-        entry = {
-            "type": "progress",
-            "eval_run_id": str(eval_run_id),
-            "problem_id": str(progress.problem_id),
-            "status": progress.status.value,
-            "added_at": datetime.now().isoformat(),
-            "retry_count": 0,
-        }
-        if not isinstance(progress.score, Unset):
-            entry["score"] = progress.score
-        if not isinstance(progress.logs_s3_key, Unset):
-            entry["logs_s3_key"] = progress.logs_s3_key
-        data["pending"].append(entry)
-        self._save(data)
-        logging.info(
-            f"Added progress report for {progress.problem_id} (run {eval_run_id}) to retry queue"
-        )
 
     def get_pending_count(self) -> int:
         """Get number of pending retries."""
@@ -99,7 +77,7 @@ class LocalRetryQueue:
         return len(data["pending"])
 
     def process_pending(self) -> None:
-        """Attempt to process all pending completions and progress reports."""
+        """Attempt to process all pending completions."""
         data = self._load()
         remaining = []
 
@@ -109,8 +87,6 @@ class LocalRetryQueue:
             try:
                 if entry_type == "completion":
                     self._process_completion(entry)
-                elif entry_type == "progress":
-                    self._process_progress(entry)
                 else:
                     logging.warning(f"Unknown entry type '{entry_type}', dropping")
             except _TransientRetry:
@@ -165,45 +141,3 @@ class LocalRetryQueue:
                 f"Unexpected error for completion {entry['eval_run_id']}, dropping: {e}"
             )
 
-    def _process_progress(self, entry: dict) -> None:
-        """Process a progress retry entry. Raises _TransientRetry on transient error."""
-        progress = ProblemProgressUpdate(
-            problem_id=UUID(entry["problem_id"]),
-            status=ProblemStatus(entry["status"]),
-        )
-        if "score" in entry:
-            progress.score = entry["score"]
-        if "logs_s3_key" in entry:
-            progress.logs_s3_key = entry["logs_s3_key"]
-
-        eval_run_id = UUID(entry["eval_run_id"])
-
-        try:
-            self.backend_client.report_progress(eval_run_id, [progress])
-            logging.info(
-                f"Retry succeeded for progress {entry['problem_id']} "
-                f"(run {entry['eval_run_id']})"
-            )
-        except BackendError as e:
-            if e.is_not_run_owner:
-                logging.warning(
-                    f"Lost ownership of {entry['eval_run_id']}, removing progress entry"
-                )
-            elif e.is_eval_run_not_found:
-                logging.warning(
-                    f"Run {entry['eval_run_id']} not found, removing progress entry"
-                )
-            elif e.is_transient:
-                logging.warning(
-                    f"Retry {entry['retry_count'] + 1}/{self.max_retries} failed "
-                    f"for progress {entry['problem_id']}: {e}"
-                )
-                raise _TransientRetry()
-            else:
-                logging.error(
-                    f"Non-retryable error for progress {entry['problem_id']}, dropping: {e}"
-                )
-        except Exception as e:
-            logging.error(
-                f"Unexpected error for progress {entry['problem_id']}, dropping: {e}"
-            )
