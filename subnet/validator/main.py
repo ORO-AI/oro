@@ -687,7 +687,6 @@ class Validator:
                 output_file=output_file,
                 problems=problems,
                 workspace_dir=workspace_dir,
-                retry_queue=self.retry_queue,
             )
             progress_reporter.start_monitoring()
 
@@ -699,9 +698,8 @@ class Validator:
                     chutes_access_token=chutes_access_token,
                 )
             finally:
-                progress_reporter.stop_monitoring()
-                progress_reporter.report_unscored_as_timed_out()
-                progress_reporter.flush_progress()
+                progress_reporter.signal_sandbox_done()
+                progress_reporter.wait_for_completion()
 
             if not sandbox_output:
                 self._complete_with_failure(

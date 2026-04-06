@@ -1,10 +1,10 @@
-"""File watcher for reporting per-problem progress to Backend.
+"""File watcher for scoring problems and reporting progress to Backend.
 
 Architecture:
-  - Single dict (_results) is the source of truth for all problem state
-  - Background thread tails output file during sandbox run for real-time progress
-  - stop_monitoring(deadline) lets the thread keep scoring until all done or timeout
-  - Aggregate is always computed on-demand from _results — never cached separately
+  - Single loop reads output file, scores problems, batch-reports to backend
+  - _results dict is the sole source of truth for problem state
+  - Loop exits when all problems are confirmed or hard timeout expires
+  - Aggregate score is computed on-demand from _results
 """
 
 import json
@@ -15,7 +15,7 @@ import traceback
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
@@ -25,9 +25,6 @@ from bittensor.utils.btlogging import logging
 from src.agent.scoring import is_problem_successful, compute_aggregate
 from subnet.sandbox import attach_title_embeddings
 from .backend_client import BackendClient
-
-if TYPE_CHECKING:
-    from .retry_queue import LocalRetryQueue
 
 
 @dataclass
@@ -44,11 +41,12 @@ class ProblemResult:
 
 
 class ProgressReporter:
-    """Monitors sandbox output file, scores problems, and reports to Backend.
+    """Monitors sandbox output, scores problems, and reports to Backend.
 
-    Tails the output JSONL file, scores each problem using ProblemScorer
-    as it completes, reports individual scores to Backend, and computes
-    aggregate score on demand from a single results dict.
+    Single loop architecture:
+    - While sandbox runs: tail output file, score problems, batch-report
+    - After sandbox exits: continue scoring with hard timeout
+    - Exit when confirmed == total_problems or timeout expires
     """
 
     def __init__(
@@ -59,7 +57,6 @@ class ProgressReporter:
         problems: List[Dict[str, Any]],
         workspace_dir: Path,
         poll_interval: float = 1.0,
-        retry_queue: Optional["LocalRetryQueue"] = None,
         scoring_timeout: float = 900.0,
     ):
         self.backend_client = backend_client
@@ -71,6 +68,7 @@ class ProgressReporter:
         self.scoring_timeout = scoring_timeout
 
         self._stop_event = threading.Event()
+        self._hard_deadline: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
         self._file_position = 0
         self._lock = threading.Lock()
@@ -79,9 +77,7 @@ class ProgressReporter:
         self._results: Dict[str, ProblemResult] = {}
         self._total_problems = len(problems)
         self._scorers: Dict[str, Any] = {}
-        self._retry_queue = retry_queue
-        self._failed_reports: List[ProblemProgressUpdate] = []
-        self._reported_ids: set[str] = set()  # problem IDs confirmed reported to backend
+        self._last_reported_count = 0  # track when to batch report
 
         # Build problem_id -> problem lookup
         self._id_to_problem: Dict[str, Dict[str, Any]] = {}
@@ -153,88 +149,35 @@ class ProgressReporter:
     # ─── Public API ─────────────────────────────────────────────────────
 
     def start_monitoring(self) -> None:
-        """Start the file watcher background thread."""
+        """Start the background monitoring loop."""
         self._stop_event.clear()
+        self._hard_deadline = None
         self._file_position = 0
         self._results = {}
-        self._failed_reports = []
-        self._reported_ids = set()
+        self._last_reported_count = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop_monitoring(self) -> None:
-        """Signal the thread to finish scoring, then wait for it.
-
-        The thread will keep reading and scoring until all problems are done
-        or the scoring timeout expires. This replaces the old retry loop.
-        """
-        # Tell the thread the sandbox is done — it should finish up
+    def signal_sandbox_done(self) -> None:
+        """Signal that the sandbox has exited. Starts the hard timeout clock."""
         self._stop_event.set()
 
-        # Wait for the thread to finish (scoring timeout + buffer)
-        join_timeout = self.scoring_timeout + 30
+    def wait_for_completion(self, timeout: Optional[float] = None) -> None:
+        """Block until the monitoring loop exits.
+
+        The loop exits when all problems are confirmed reported to the backend,
+        or when the hard timeout expires (remaining marked as TIMED_OUT).
+        """
+        join_timeout = timeout or (self.scoring_timeout + 60)
         if self._thread is not None:
             self._thread.join(timeout=join_timeout)
             if self._thread.is_alive():
-                logging.warning(f"Scoring thread did not finish within {join_timeout}s")
-
-    def flush_progress(self, max_retries: int = 3, retry_delay: float = 2.0) -> int:
-        """Ensure all progress reports have been delivered to the backend.
-
-        Retries any failed reports up to max_retries times with delay between
-        attempts. Returns the number of problems successfully reported.
-
-        Must be called after stop_monitoring() and report_unscored_as_timed_out().
-        """
-        for attempt in range(max_retries):
-            if not self._failed_reports:
-                break
-
-            still_failed = []
-            for progress in self._failed_reports:
-                try:
-                    self.backend_client.report_progress(self.eval_run_id, [progress])
-                    self._reported_ids.add(str(progress.problem_id))
-                    logging.info(f"Retry succeeded for {progress.problem_id}")
-                except Exception:
-                    still_failed.append(progress)
-
-            self._failed_reports = still_failed
-
-            if still_failed and attempt < max_retries - 1:
                 logging.warning(
-                    f"Retry {attempt + 1}/{max_retries}: "
-                    f"{len(still_failed)} progress report(s) still pending"
+                    f"Monitoring thread did not finish within {join_timeout}s"
                 )
-                import time
-                time.sleep(retry_delay)
-
-        # Any remaining failures go to the persistent retry queue
-        if self._failed_reports and self._retry_queue:
-            for progress in self._failed_reports:
-                self._retry_queue.add_progress(self.eval_run_id, progress)
-            logging.warning(
-                f"{len(self._failed_reports)} progress report(s) queued for disk retry"
-            )
-
-        reported = len(self._reported_ids)
-        total = self._total_problems
-        if reported < total:
-            logging.warning(
-                f"Progress flush incomplete: {reported}/{total} problems "
-                f"confirmed reported to backend"
-            )
-        else:
-            logging.info(f"All {total} problems confirmed reported to backend")
-
-        return reported
 
     def get_aggregate_score(self) -> Optional[Dict[str, Any]]:
-        """Compute aggregate score on demand from _results.
-
-        Always recomputed — never cached — so it always reflects
-        the current state of _results.
-        """
+        """Compute aggregate score on demand from _results."""
         total = self._total_problems if self._total_problems > 0 else 1
 
         with self._lock:
@@ -266,61 +209,78 @@ class ProgressReporter:
             return result.status
         return ProblemStatus.FAILED
 
-    def report_unscored_as_timed_out(self) -> None:
-        """Report problems that were never scored as TIMED_OUT."""
-        with self._lock:
-            scored_ids = set(self._results.keys())
-        all_ids = set(self._id_to_problem.keys())
-        unscored_ids = all_ids - scored_ids
-
-        if not unscored_ids:
-            return
-
-        logging.info(f"Reporting {len(unscored_ids)} unscored problems as TIMED_OUT")
-        for pid in unscored_ids:
-            try:
-                progress = ProblemProgressUpdate(
-                    problem_id=UUID(pid),
-                    status=ProblemStatus.TIMED_OUT,
-                    score=0.0,
-                )
-                self._report_progress(progress)
-            except Exception as e:
-                logging.warning(f"Failed to report timed-out problem {pid}: {e}")
-
-    # ─── Background thread ──────────────────────────────────────────────
+    # ─── Background loop ────────────────────────────────────────────────
 
     def _run(self) -> None:
-        """Background thread: tail file during sandbox, finish scoring after."""
-        # Phase 1: Tail file while sandbox is running (real-time progress)
-        while not self._stop_event.is_set():
-            self._read_and_score()
-            self._stop_event.wait(self.poll_interval)
+        """Single monitoring loop.
 
-        # Phase 2: Sandbox exited — keep scoring remaining output until done or timeout
-        deadline = time.time() + self.scoring_timeout
-        while time.time() < deadline:
-            self._read_and_score()
+        Tails the output file, scores problems, and batch-reports to backend.
+        When the sandbox exits (_stop_event set), starts a hard timeout.
+        Exits when all problems have results OR hard timeout expires.
+        """
+        while True:
+            # Read and score any new output lines (reports after each scored)
+            newly_scored = self._read_and_score()
+
+            # Check exit: all problems have results
             with self._lock:
-                scored = len(self._results)
-            if scored >= self._total_problems:
-                logging.info(f"All {self._total_problems} problems scored")
+                result_count = len(self._results)
+            if result_count >= self._total_problems:
+                self._batch_report()
+                logging.info(f"All {self._total_problems} problems completed")
                 break
-            # No output file at all = sandbox genuinely failed
-            if scored == 0 and not self.output_file.exists():
+
+            # Start hard timeout when sandbox exits
+            if self._stop_event.is_set() and self._hard_deadline is None:
+                self._hard_deadline = time.time() + self.scoring_timeout
+                logging.info(
+                    f"Sandbox exited, scoring timeout in {self.scoring_timeout}s"
+                )
+
+            # Check hard timeout
+            if self._hard_deadline is not None and time.time() >= self._hard_deadline:
+                self._mark_remaining_timed_out()
+                self._batch_report()
+                with self._lock:
+                    result_count = len(self._results)
+                logging.warning(
+                    f"Hard timeout expired with {result_count}/{self._total_problems} "
+                    f"scored, marked remaining as TIMED_OUT"
+                )
                 break
-            elapsed = int(self.scoring_timeout - (deadline - time.time()))
-            logging.info(
-                f"Scored {scored}/{self._total_problems} problems, "
-                f"waiting for remaining output ({elapsed}s elapsed)"
-            )
+
+            # No output file at all after sandbox exit = genuine failure
+            if (
+                self._hard_deadline is not None
+                and result_count == 0
+                and not self.output_file.exists()
+            ):
+                self._mark_remaining_timed_out()
+                self._batch_report()
+                logging.warning("No output file found after sandbox exit")
+                break
+
+            # Log progress periodically after sandbox exits
+            if self._hard_deadline is not None and newly_scored == 0:
+                elapsed = int(time.time() - (self._hard_deadline - self.scoring_timeout))
+                logging.info(
+                    f"Scored {result_count}/{self._total_problems} problems, "
+                    f"waiting for remaining output ({elapsed}s elapsed)"
+                )
+
             time.sleep(self.poll_interval)
 
-    def _read_and_score(self) -> None:
-        """Read new lines from the output file and score them."""
+    # ─── Scoring ────────────────────────────────────────────────────────
+
+    def _read_and_score(self) -> int:
+        """Read new lines from output file and score them.
+
+        Returns the number of newly scored problems.
+        """
+        newly_scored = 0
         try:
             if not self.output_file.exists():
-                return
+                return 0
 
             file_size = self.output_file.stat().st_size
             if file_size < self._file_position:
@@ -334,7 +294,13 @@ class ProgressReporter:
 
             for line in new_lines:
                 if line.strip():
-                    self._score_and_report(line)
+                    if self._score_line(line):
+                        newly_scored += 1
+                        # Batch report after each scored problem for real-time progress
+                        self._batch_report()
+                # Yield back to loop if hard deadline expired
+                if self._hard_deadline is not None and time.time() >= self._hard_deadline:
+                    break
 
         except (OSError, IOError) as e:
             logging.warning(f"Error reading output file: {e}")
@@ -342,41 +308,39 @@ class ProgressReporter:
         except Exception as e:
             logging.warning(f"Error processing output: {e}")
 
-    def _score_and_report(self, line: str) -> None:
-        """Score a single problem line and report to backend.
+        return newly_scored
 
-        This is the ONE place where scoring happens. Both the background
-        thread (real-time) and post-sandbox processing use this method.
+    def _score_line(self, line: str) -> bool:
+        """Score a single problem line and store result locally.
+
+        Returns True if a new problem was scored.
         """
         if not self._scorers:
-            return
+            return False
 
-        # Sanitize null bytes — agents can produce \x00 in output which
-        # PostgreSQL rejects with CharacterNotInRepertoireError
+        # Sanitize null bytes
         line = line.replace("\x00", "")
 
         try:
             dialogue = json.loads(line.strip())
             if not isinstance(dialogue, list) or not dialogue:
-                return
+                return False
 
-            # Extract problem_id and query
             extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
             problem_id = extra_info.get("problem_id")
             if not problem_id:
                 logging.warning("No problem_id in dialogue extra_info")
-                return
+                return False
 
             # Skip if already scored
             with self._lock:
                 if problem_id in self._results:
-                    return
+                    return False
 
-            # Look up problem metadata
             problem = self._id_to_problem.get(str(problem_id))
             if not problem:
                 logging.warning(f"Unknown problem_id: {problem_id}")
-                return
+                return False
 
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
@@ -384,9 +348,8 @@ class ProgressReporter:
             scorer = self._scorers.get(category)
             if not scorer:
                 logging.warning(f"No scorer for category '{category}'")
-                return
+                return False
 
-            # Score
             with self._lock:
                 scored_count = len(self._results) + 1
             logging.info(
@@ -399,10 +362,8 @@ class ProgressReporter:
             score = 1.0 if is_successful else 0.0
             status = ProblemStatus.SUCCESS if is_successful else ProblemStatus.FAILED
 
-            # Read inference stats
             inf_failures, inf_total = self._read_inference_stats(problem_id)
 
-            # Store result (single source of truth)
             result = ProblemResult(
                 problem_id=str(problem_id),
                 category=category,
@@ -420,33 +381,68 @@ class ProgressReporter:
                 f"Problem {completed}/{self._total_problems} scored: "
                 f"{score:.4f} (query: {query[:50]}...)"
             )
-
-            # Report to backend
-            update = ProblemProgressUpdate(
-                problem_id=UUID(problem_id)
-                if isinstance(problem_id, str)
-                else problem_id,
-                status=status,
-                score=score,
-                inference_failure_count=inf_failures if inf_total > 0 else None,
-                inference_total=inf_total if inf_total > 0 else None,
-            )
-            self._report_progress(update)
+            return True
 
         except json.JSONDecodeError:
             logging.warning(f"Failed to parse line: {line[:100]}...")
+            return False
         except Exception as e:
             logging.error(f"Error scoring problem: {e}")
             traceback.print_exc()
+            return False
+
+    # ─── Reporting ───────────────────────────────────────────────────────
+
+    def _batch_report(self) -> None:
+        """Send all accumulated results to backend in one request."""
+        with self._lock:
+            results = list(self._results.values())
+
+        if not results:
+            return
+
+        updates = []
+        for r in results:
+            update = ProblemProgressUpdate(
+                problem_id=UUID(r.problem_id),
+                status=r.status,
+                score=r.score,
+                inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
+                inference_total=r.inference_total if r.inference_total > 0 else None,
+            )
+            updates.append(update)
+
+        try:
+            self.backend_client.report_progress(self.eval_run_id, updates)
+            logging.info(
+                f"Batch reported {len(updates)}/{self._total_problems} problems"
+            )
+        except Exception as e:
+            logging.warning(f"Batch report failed ({len(updates)} problems): {e}")
+
+    def _mark_remaining_timed_out(self) -> None:
+        """Mark all unscored problems as TIMED_OUT in local results."""
+        with self._lock:
+            scored_ids = set(self._results.keys())
+
+        unscored = set(self._id_to_problem.keys()) - scored_ids
+        if not unscored:
+            return
+
+        logging.info(f"Marking {len(unscored)} unscored problems as TIMED_OUT")
+        with self._lock:
+            for pid in unscored:
+                self._results[pid] = ProblemResult(
+                    problem_id=pid,
+                    category=self._id_to_problem[pid].get("category", "product").lower(),
+                    status=ProblemStatus.TIMED_OUT,
+                    score=0.0,
+                )
 
     # ─── Helpers ────────────────────────────────────────────────────────
 
     def _read_inference_stats(self, problem_id: str) -> tuple[int, int]:
-        """Read inference stats from the shared JSONL sidecar file.
-
-        Stats are written incrementally with cumulative counts.
-        Returns the last matching line's totals for the given problem.
-        """
+        """Read inference stats from the shared JSONL sidecar file."""
         stats_path = self.output_file.parent / "inference_stats.jsonl"
         last_failed, last_total = 0, 0
         try:
@@ -462,16 +458,3 @@ class ProgressReporter:
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
         return last_failed, last_total
-
-    def _report_progress(self, progress: ProblemProgressUpdate) -> None:
-        """Report a single problem's progress to Backend."""
-        try:
-            self.backend_client.report_progress(self.eval_run_id, [progress])
-            self._reported_ids.add(str(progress.problem_id))
-            logging.info(
-                f"Reported progress for {progress.problem_id}: "
-                f"{progress.status}, score={progress.score:.4f}"
-            )
-        except Exception as e:
-            self._failed_reports.append(progress)
-            logging.warning(f"Failed to report progress for {progress.problem_id}: {e}")
