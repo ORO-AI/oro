@@ -1,5 +1,5 @@
 bittensor==10.1.0
-bittensor_wallet==4.0.2
+bittensor_wallet==4.0.1
 requests==2.32.5
 sentence-transformers==5.3.0
 ujson==5.12.0
