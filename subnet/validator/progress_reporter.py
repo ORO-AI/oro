@@ -211,16 +211,27 @@ class ProgressReporter:
 
     # ─── Background loop ────────────────────────────────────────────────
 
+    # How long to wait with no new output before giving up (seconds)
+    IDLE_TIMEOUT = 120.0
+
     def _run(self) -> None:
         """Single monitoring loop.
 
         Tails the output file, scores problems, and batch-reports to backend.
         When the sandbox exits (_stop_event set), starts a hard timeout.
-        Exits when all problems have results OR hard timeout expires.
+        Exits when:
+        - All problems have results, OR
+        - Hard timeout (scoring_timeout) expires, OR
+        - No new output for IDLE_TIMEOUT seconds after sandbox exit
         """
+        last_scored_at: Optional[float] = None
+
         while True:
             # Read and score any new output lines (reports after each scored)
             newly_scored = self._read_and_score()
+
+            if newly_scored > 0:
+                last_scored_at = time.time()
 
             # Check exit: all problems have results
             with self._lock:
@@ -233,9 +244,28 @@ class ProgressReporter:
             # Start hard timeout when sandbox exits
             if self._stop_event.is_set() and self._hard_deadline is None:
                 self._hard_deadline = time.time() + self.scoring_timeout
+                if last_scored_at is None:
+                    last_scored_at = time.time()
                 logging.info(
                     f"Sandbox exited, scoring timeout in {self.scoring_timeout}s"
                 )
+
+            # Check idle timeout: no new output after sandbox exit
+            if (
+                self._hard_deadline is not None
+                and last_scored_at is not None
+                and (time.time() - last_scored_at) >= self.IDLE_TIMEOUT
+            ):
+                idle_secs = int(time.time() - last_scored_at)
+                unscored = self._total_problems - result_count
+                self._mark_remaining_timed_out()
+                self._batch_report()
+                logging.warning(
+                    f"No new output for {idle_secs}s, marked "
+                    f"{unscored} remaining as TIMED_OUT "
+                    f"({result_count}/{self._total_problems} scored)"
+                )
+                break
 
             # Check hard timeout
             if self._hard_deadline is not None and time.time() >= self._hard_deadline:
