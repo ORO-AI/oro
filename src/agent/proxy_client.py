@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 120
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_DELAY = 2
+DEFAULT_RATE_LIMIT_RETRY_DELAY = 5
 
 
 class InferenceStats:
@@ -85,6 +86,7 @@ class ProxyClient:
         timeout: int = DEFAULT_TIMEOUT,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_delay: float = DEFAULT_RETRY_DELAY,
+        rate_limit_retry_delay: float = DEFAULT_RATE_LIMIT_RETRY_DELAY,
         api_key: Optional[str] = None,
     ):
         """
@@ -94,7 +96,9 @@ class ProxyClient:
             proxy_url: Base URL for the proxy (defaults to SANDBOX_PROXY_URL env var)
             timeout: Request timeout in seconds
             max_retries: Maximum number of retry attempts
-            retry_delay: Delay between retries in seconds
+            retry_delay: Base delay between retries in seconds (doubled each attempt)
+            rate_limit_retry_delay: Base delay for 429 retries in seconds (doubled each
+                attempt). Longer than retry_delay since rate limits need more time to clear.
             api_key: API key for inference requests (defaults to CHUTES_ACCESS_TOKEN env var).
                 When set, inference POST requests include an Authorization header.
         """
@@ -102,6 +106,7 @@ class ProxyClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.rate_limit_retry_delay = rate_limit_retry_delay
         self.api_key = api_key or os.getenv("CHUTES_ACCESS_TOKEN")
         stats_file = os.environ.get(
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
@@ -138,6 +143,10 @@ class ProxyClient:
         """
         Make an HTTP request with retry logic.
 
+        Rate-limited (429) responses use a separate retry counter with longer
+        backoff (5s base) so transient capacity issues don't exhaust the normal
+        retry budget.
+
         Args:
             request_func: Function that makes the HTTP request and returns a Response
             operation_name: Name of the operation for logging
@@ -150,16 +159,26 @@ class ProxyClient:
                 response = request_func()
                 if response.status_code == 200:
                     return response
-                logger.warning(
-                    f"{operation_name} returned status {response.status_code}, "
-                    f"retry {i + 1}/{self.max_retries}"
-                )
+                if response.status_code == 429:
+                    logger.warning(
+                        f"{operation_name} rate limited (429), "
+                        f"retry {i + 1}/{self.max_retries}"
+                    )
+                else:
+                    logger.warning(
+                        f"{operation_name} returned status {response.status_code}, "
+                        f"retry {i + 1}/{self.max_retries}"
+                    )
             except Exception as e:
                 logger.error(
                     f"{operation_name} error, retry {i + 1}/{self.max_retries}: {e}"
                 )
+                response = None
+
             if i < self.max_retries - 1:
-                delay = self.retry_delay * (2**i)
+                is_rate_limited = response is not None and response.status_code == 429
+                base_delay = self.rate_limit_retry_delay if is_rate_limited else self.retry_delay
+                delay = base_delay * (2 ** i)
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
