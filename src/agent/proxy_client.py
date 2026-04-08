@@ -29,6 +29,50 @@ DEFAULT_RETRY_DELAY = 2
 DEFAULT_RATE_LIMIT_RETRY_DELAY = 5
 
 
+class RequestLog:
+    """Thread-safe log of all proxy API calls.
+
+    Writes each request/response to a JSONL file so that the sandbox
+    executor can attach them to trajectory output. This ensures all
+    API calls are visible — even those that bypass the @Tool decorator.
+    """
+
+    def __init__(self, log_file: Optional[str] = None):
+        self._lock = threading.Lock()
+        self._log_file = log_file
+
+    def record(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict] = None,
+        status: Optional[int] = None,
+        duration_ms: float = 0,
+        response_summary: Optional[str] = None,
+    ) -> None:
+        if not self._log_file:
+            return
+        with self._lock:
+            try:
+                problem_data = os.environ.get("PROBLEM_DATA", "{}")
+                problem = json.loads(problem_data)
+                problem_id = problem.get("problem_id") or problem.get("id", "unknown")
+                entry = {
+                    "problem_id": str(problem_id),
+                    "method": method,
+                    "path": path,
+                    "params": params,
+                    "status": status,
+                    "duration_ms": round(duration_ms, 1),
+                    "response_summary": response_summary,
+                    "timestamp": int(time.time() * 1000),
+                }
+                with open(self._log_file, "a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            except (OSError, json.JSONDecodeError):
+                pass  # Best-effort
+
+
 class InferenceStats:
     """Thread-safe counter for inference call outcomes.
 
@@ -112,6 +156,10 @@ class ProxyClient:
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
         self.inference_stats = InferenceStats(stats_file)
+        request_log_file = os.environ.get(
+            "REQUEST_LOG_FILE", "/app/logs/request_log.jsonl"
+        )
+        self.request_log = RequestLog(request_log_file)
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -200,10 +248,24 @@ class ProxyClient:
         def make_request():
             return requests.get(url, timeout=self.timeout)
 
+        t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, f"GET {path}")
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        result = None
         if response:
-            return response.json()
-        return None
+            result = response.json()
+
+        self.request_log.record(
+            method="GET",
+            path=path,
+            params={k: v for k, v in (params or {}).items() if v is not None},
+            status=response.status_code if response else None,
+            duration_ms=duration_ms,
+            response_summary=_summarize_response(path, result),
+        )
+
+        return result
 
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
         """
@@ -233,15 +295,59 @@ class ProxyClient:
                 logger.error(f"Resource not found: {path}")
             return response
 
+        t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, f"POST {path}")
+        duration_ms = (time.monotonic() - t0) * 1000
+
         if "/inference/" in path:
             if response and response.status_code == 200:
                 self.inference_stats.record_success()
             else:
                 self.inference_stats.record_failure()
+
+        result = None
         if response and response.status_code == 200:
-            return response.json()
+            result = response.json()
+
+        self.request_log.record(
+            method="POST",
+            path=path,
+            params=_sanitize_post_params(path, json_data),
+            status=response.status_code if response else None,
+            duration_ms=duration_ms,
+            response_summary=_summarize_response(path, result),
+        )
+
+        return result
+
+
+def _summarize_response(path: str, result) -> Optional[str]:
+    """Produce a compact summary of the API response for logging."""
+    if result is None:
         return None
+    if "/find_product" in path:
+        if isinstance(result, list):
+            return f"{len(result)} products"
+        return "non-list response"
+    if "/view_product_information" in path:
+        if isinstance(result, list):
+            return f"{len(result)} details"
+        return "non-list response"
+    if "/inference/" in path:
+        if isinstance(result, dict) and result.get("choices"):
+            content = result["choices"][0].get("message", {}).get("content", "")
+            return f"{len(content)} chars"
+        return "no choices"
+    return None
+
+
+def _sanitize_post_params(path: str, json_data: Optional[Dict]) -> Optional[Dict]:
+    """Extract loggable params from POST body without capturing full LLM content."""
+    if not json_data:
+        return None
+    if "/inference/" in path:
+        return {"model": json_data.get("model"), "temperature": json_data.get("temperature")}
+    return json_data
 
 
 # Global instance for convenience

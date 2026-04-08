@@ -37,6 +37,7 @@ class ProblemResult:
     problem_id: Optional[str] = None  # UUID or identifier from problem metadata
     inference_failure_count: int = 0
     inference_total: int = 0
+    request_log: Optional[List[Dict]] = None  # All proxy API calls made during execution
 
 
 def load_problems(problem_file: str) -> List[Dict]:
@@ -164,11 +165,29 @@ def _read_inference_stats(path: str, problem_id: str) -> tuple:
     return last_failed, last_total
 
 
+def _read_request_log(path: str, problem_id: str) -> List[Dict]:
+    """Read all proxy API call entries for a problem from the request log."""
+    entries = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if str(entry.get("problem_id")) == str(problem_id):
+                    entries.append(entry)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return entries
+
+
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
     result_queue: multiprocessing.Queue,
     stats_file: Optional[str] = None,
+    request_log_file: Optional[str] = None,
 ) -> None:
     """Target function executed in a child process.
 
@@ -178,6 +197,8 @@ def _run_in_process(
     """
     if stats_file:
         os.environ["INFERENCE_STATS_FILE"] = stats_file
+    if request_log_file:
+        os.environ["REQUEST_LOG_FILE"] = request_log_file
     os.environ["PROBLEM_DATA"] = json.dumps(problem)
     try:
         agent_fn = _load_agent(agent_file)
@@ -216,16 +237,18 @@ def execute_single_problem(
     output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
     output_dir = os.path.dirname(output_file) if output_file else "/tmp"
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
+    request_log_file = os.path.join(output_dir, "request_log.jsonl")
     result_queue: multiprocessing.Queue = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue, stats_file),
+        args=(problem, agent_file, result_queue, stats_file, request_log_file),
     )
     process.start()
     process.join(timeout=timeout)
     execution_time = time.time() - start_time
 
-    if process.is_alive():
+    timed_out = process.is_alive()
+    if timed_out:
         logger.warning(
             f"Problem '{query}' exceeded timeout of {timeout}s, terminating process"
         )
@@ -234,7 +257,11 @@ def execute_single_problem(
         if process.is_alive():
             process.kill()
             process.join()
-        inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+
+    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+    req_log = _read_request_log(request_log_file, str(problem_id))
+
+    if timed_out:
         result_queue.close()
         return ProblemResult(
             query=query,
@@ -244,9 +271,9 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            request_log=req_log,
         )
 
-    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
     try:
         if not result_queue.empty():
             status, data = result_queue.get_nowait()
@@ -259,6 +286,7 @@ def execute_single_problem(
                     problem_id=problem_id,
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
+                    request_log=req_log,
                 )
             return ProblemResult(
                 query=query,
@@ -268,6 +296,7 @@ def execute_single_problem(
                 problem_id=problem_id,
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
+                request_log=req_log,
             )
         return ProblemResult(
             query=query,
@@ -277,6 +306,7 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            request_log=req_log,
         )
     finally:
         result_queue.close()
@@ -307,6 +337,10 @@ def _format_single_result(result: ProblemResult) -> Optional[str]:
             step.setdefault("extra_info", {})["query"] = result.query
         if result.problem_id and "problem_id" not in step.get("extra_info", {}):
             step.setdefault("extra_info", {})["problem_id"] = result.problem_id
+
+    # Attach request log to the last step so all API calls are visible
+    if result.request_log and dialogue_steps:
+        dialogue_steps[-1].setdefault("extra_info", {})["request_log"] = result.request_log
 
     return json.dumps(dialogue_steps)
 
