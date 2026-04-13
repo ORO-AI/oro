@@ -15,7 +15,8 @@ from typing import Any
 
 import requests
 
-from proxy_client import DEFAULT_RATE_LIMIT_RETRY_DELAY
+# Base delay for rate-limit retries (seconds). Matches ProxyClient convention.
+RATE_LIMIT_RETRY_DELAY = 5
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ def score_reasoning_quality(
                 )
                 model_idx += 1
                 # Exponential backoff matching ProxyClient rate limit delay
-                delay = DEFAULT_RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
+                delay = RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
                 time.sleep(delay)
                 continue
 
@@ -249,7 +250,7 @@ def score_reasoning_quality(
                 f"{resp.text[:200]}"
             )
             model_idx += 1
-            delay = DEFAULT_RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
+            delay = RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
             time.sleep(delay)
             continue
 
