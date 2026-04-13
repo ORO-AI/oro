@@ -241,7 +241,7 @@ def score_reasoning_quality(
                 )
                 model_idx += 1
                 # Exponential backoff matching ProxyClient rate limit delay
-                delay = RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
+                delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
                 time.sleep(delay)
                 continue
 
@@ -250,7 +250,7 @@ def score_reasoning_quality(
                 f"{resp.text[:200]}"
             )
             model_idx += 1
-            delay = RATE_LIMIT_RETRY_DELAY * (2 ** min(attempt, 3))
+            delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
             time.sleep(delay)
             continue
 

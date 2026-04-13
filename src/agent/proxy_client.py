@@ -178,7 +178,7 @@ class ProxyClient:
             if i < self.max_retries - 1:
                 is_rate_limited = response is not None and response.status_code == 429
                 base_delay = self.rate_limit_retry_delay if is_rate_limited else self.retry_delay
-                delay = base_delay * (2 ** i)
+                delay = min(base_delay * (2 ** i), 10)
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
