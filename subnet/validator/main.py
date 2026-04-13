@@ -18,6 +18,7 @@ from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
+from src.agent.scoring import blend_final_score
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
 from .version_collector import collect_service_versions
@@ -580,7 +581,8 @@ class Validator:
                     problem_ids.append(UUID(pid) if isinstance(pid, str) else pid)
 
             # Write sanitized problems to per-evaluation directory.
-            # Strip reward/voucher fields so the sandbox cannot read ground-truth answers.
+            # Strip ground-truth fields so the sandbox cannot read answers.
+            # reward_title_embeddings keys are verbatim product titles.
             eval_dir = self._eval_dir(eval_run_id_str)
             problem_file = eval_dir / "problems.jsonl"
             with open(problem_file, "w") as f:
@@ -588,7 +590,7 @@ class Validator:
                     sanitized = {
                         k: v
                         for k, v in problem.items()
-                        if k not in ("reward", "voucher")
+                        if k not in ("reward", "voucher", "reward_title_embeddings")
                     }
                     f.write(json.dumps(sanitized) + "\n")
 
@@ -680,13 +682,14 @@ class Validator:
             eval_dir = self._eval_dir(eval_run_id_str)
             output_file = eval_dir / "output.jsonl"
 
-            # Start progress reporter (will score problems and aggregate)
+            # Start progress reporter (scores problems AND judges reasoning per-problem)
             progress_reporter = ProgressReporter(
                 backend_client=self.backend_client,
                 eval_run_id=eval_run_id,
                 output_file=output_file,
                 problems=problems,
                 workspace_dir=workspace_dir,
+                chutes_access_token=chutes_access_token,
             )
             progress_reporter.start_monitoring()
 
@@ -709,7 +712,6 @@ class Validator:
                 return
 
             # Step 4: Get aggregate score from ProgressReporter
-            # (ProgressReporter scored each problem as it completed)
             aggregate = progress_reporter.get_aggregate_score()
 
             if aggregate is None:
@@ -720,10 +722,44 @@ class Validator:
                 )
                 return
 
-            score = aggregate.get("success_rate", 0.0)
-            logging.info(f"Aggregate score from ProgressReporter: {score:.4f}")
+            success_rate = aggregate.get("success_rate", 0.0)
 
-            # Step 5: Upload logs
+            # Step 4b: Get reasoning data (judged per-problem during scoring)
+            reasoning_result = progress_reporter.get_reasoning_data()
+
+            # If most judge calls failed, treat as infrastructure failure.
+            judge_total = reasoning_result["judge_inference_total"]
+            judge_failed = reasoning_result["judge_inference_failed"]
+            if judge_total >= 3 and judge_failed > judge_total / 2:
+                logging.warning(
+                    f"Reasoning judge failed on {judge_failed}/{judge_total} calls, "
+                    f"completing as FAILED so another validator can retry"
+                )
+                self._complete_with_failure(
+                    eval_run_id,
+                    TerminalStatus.FAILED,
+                    f"Reasoning judge infrastructure failure ({judge_failed}/{judge_total} calls failed)",
+                    sandbox_metadata=sandbox_metadata,
+                )
+                return
+
+            score = blend_final_score(success_rate, reasoning_result["reasoning_quality"])
+
+            aggregate["reasoning_quality"] = reasoning_result["reasoning_quality"]
+            aggregate["reasoning_coefficient"] = reasoning_result["reasoning_coefficient"]
+            aggregate["judge_inference_failed"] = reasoning_result["judge_inference_failed"]
+            aggregate["judge_inference_total"] = reasoning_result["judge_inference_total"]
+            aggregate["reasoning_scores"] = reasoning_result["reasoning_scores"]
+            aggregate["reasoning_details"] = reasoning_result["reasoning_details"]
+
+            logging.info(
+                f"Score: final={score:.4f} "
+                f"(success_rate={success_rate:.4f} * "
+                f"coefficient={reasoning_result['reasoning_coefficient']:.4f}, "
+                f"reasoning_quality={reasoning_result['reasoning_quality']:.4f})"
+            )
+
+            # Step 5: Upload logs (reasoning data appended to each problem's trajectory)
             results_s3_key = self._upload_logs(
                 eval_run_id, output_file, problem_ids, progress_reporter
             )

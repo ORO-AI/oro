@@ -81,3 +81,47 @@ def compute_aggregate(
         "successful_problems": success_count,
         "scored_problems": scored,
     }
+
+
+# Reasoning coefficient model: final_score = success_rate * coefficient
+# coefficient ranges from COEFF_FLOOR (zero reasoning) to 1.0 (good reasoning)
+# Agents scoring above COEFF_CEILING_THRESHOLD get full credit (coefficient 1.0)
+COEFF_FLOOR = 0.3
+COEFF_CEILING_THRESHOLD = 0.80
+
+
+def reasoning_coefficient(reasoning_quality: float) -> float:
+    """Compute the reasoning coefficient from reasoning quality.
+
+    Maps reasoning_quality to a coefficient:
+    - 0.0 -> COEFF_FLOOR (0.3)
+    - COEFF_CEILING_THRESHOLD (0.80) -> 1.0
+    - Anything above 0.80 -> 1.0 (full credit)
+
+    Args:
+        reasoning_quality: Average reasoning quality (0.0 - 1.0).
+
+    Returns:
+        Coefficient between COEFF_FLOOR and 1.0.
+    """
+    quality = max(0.0, min(1.0, reasoning_quality))
+    if quality >= COEFF_CEILING_THRESHOLD:
+        return 1.0
+    return round(COEFF_FLOOR + quality * (1.0 - COEFF_FLOOR) / COEFF_CEILING_THRESHOLD, 4)
+
+
+def blend_final_score(success_rate: float, reasoning_quality: float) -> float:
+    """Compute final score as success_rate * reasoning_coefficient.
+
+    A regex agent with zero reasoning gets at most success_rate * 0.3.
+    An agent with perfect reasoning gets full credit for its outcome score.
+
+    Args:
+        success_rate: Outcome-based success rate (0.0 - 1.0).
+        reasoning_quality: Aggregate reasoning quality (0.0 - 1.0).
+
+    Returns:
+        Final score (0.0 - 1.0).
+    """
+    coeff = reasoning_coefficient(reasoning_quality)
+    return round(success_rate * coeff, 4)
