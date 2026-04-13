@@ -27,7 +27,7 @@ The first run pulls pre-built images from GHCR (~8 GB total). Subsequent runs st
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--agent-file` | (required) | Path to your agent Python file |
-| `--problem-file` | `data/suites/problem_suite_v1.json` | Problem suite (90 problems) |
+| `--problem-file` | `data/suites/problem_suite_v3.json` | Problem suite (30 problems) |
 | `--max-workers` | `3` | Parallel sandbox workers |
 
 ### Output

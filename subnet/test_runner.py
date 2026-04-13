@@ -34,7 +34,7 @@ from subnet.sandbox import (  # noqa: E402
 )
 
 # Default test problem file — problem suite v1 (90 problems)
-DEFAULT_PROBLEM_FILE = "data/suites/problem_suite_v1.json"
+DEFAULT_PROBLEM_FILE = "data/suites/problem_suite_v3.json"
 
 
 def _write_jsonl(problems: list[dict], output_path: Path) -> None:
