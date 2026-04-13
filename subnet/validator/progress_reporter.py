@@ -23,6 +23,7 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 from bittensor.utils.btlogging import logging
 
 from src.agent.scoring import is_problem_successful, compute_aggregate
+from src.agent.reasoning_scorer import score_reasoning_quality
 from subnet.sandbox import attach_title_embeddings
 from .backend_client import BackendClient
 
@@ -38,6 +39,11 @@ class ProblemResult:
     score_dict: Dict[str, Any] = field(default_factory=dict)
     inference_failures: int = 0
     inference_total: int = 0
+    reasoning_score: float = 0.0
+    reasoning_explanation: str = ""
+    reasoning_model: str = ""
+    reasoning_inf_failed: int = 0
+    reasoning_inf_total: int = 0
 
 
 class ProgressReporter:
@@ -58,6 +64,7 @@ class ProgressReporter:
         workspace_dir: Path,
         poll_interval: float = 1.0,
         scoring_timeout: float = 900.0,
+        chutes_access_token: Optional[str] = None,
     ):
         self.backend_client = backend_client
         self.eval_run_id = eval_run_id
@@ -66,6 +73,7 @@ class ProgressReporter:
         self.workspace_dir = workspace_dir
         self.poll_interval = poll_interval
         self.scoring_timeout = scoring_timeout
+        self._chutes_access_token = chutes_access_token
 
         self._stop_event = threading.Event()
         self._hard_deadline: Optional[float] = None
@@ -77,6 +85,11 @@ class ProgressReporter:
         self._results: Dict[str, ProblemResult] = {}
         self._total_problems = len(problems)
         self._scorers: Dict[str, Any] = {}
+
+        # Circuit breaker for reasoning judge — stop after N consecutive
+        # total failures to avoid retry storms on bad tokens/infra issues.
+        self._consecutive_judge_failures = 0
+        self._judge_circuit_open = False
         self._last_reported_count = 0  # track when to batch report
 
         # Build problem_id -> problem lookup
@@ -200,6 +213,57 @@ class ProgressReporter:
         )
 
         return aggregate
+
+    def get_reasoning_data(self) -> Dict[str, Any]:
+        """Return per-problem reasoning data and aggregate for score_components."""
+        from src.agent.scoring import reasoning_coefficient
+
+        with self._lock:
+            results = list(self._results.values())
+
+        if not results:
+            return {
+                "reasoning_quality": 0.0,
+                "reasoning_coefficient": reasoning_coefficient(0.0),
+                "reasoning_scores": [],
+                "reasoning_details": [],
+                "judge_inference_failed": 0,
+                "judge_inference_total": 0,
+            }
+
+        total_score = sum(r.reasoning_score for r in results)
+        avg = round(total_score / len(results), 4) if results else 0.0
+        coeff = reasoning_coefficient(avg)
+        total_inf_failed = sum(r.reasoning_inf_failed for r in results)
+        total_inf_total = sum(r.reasoning_inf_total for r in results)
+
+        reasoning_scores = [
+            {"problem_id": r.problem_id, "score": r.reasoning_score}
+            for r in results
+        ]
+        reasoning_details = [
+            {
+                "problem_id": r.problem_id,
+                "score": r.reasoning_score,
+                "explanation": r.reasoning_explanation,
+                "model": r.reasoning_model,
+            }
+            for r in results
+        ]
+
+        logging.info(
+            f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
+            f"({len(results)} problems judged)"
+        )
+
+        return {
+            "reasoning_quality": avg,
+            "reasoning_coefficient": coeff,
+            "reasoning_scores": reasoning_scores,
+            "reasoning_details": reasoning_details,
+            "judge_inference_failed": total_inf_failed,
+            "judge_inference_total": total_inf_total,
+        }
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:
         """Return the status for a scored problem."""
@@ -394,6 +458,48 @@ class ProgressReporter:
 
             inf_failures, inf_total = self._read_inference_stats(problem_id)
 
+            # Run reasoning quality judge on this problem's trajectory.
+            # Circuit breaker: skip if 3 consecutive problems had total judge failure.
+            reasoning_score = 0.0
+            reasoning_explanation = ""
+            reasoning_model = ""
+            reasoning_inf_failed = 0
+            reasoning_inf_total = 0
+            if self._chutes_access_token and not self._judge_circuit_open:
+                try:
+                    judge_result = score_reasoning_quality(
+                        dialogue, api_key=self._chutes_access_token
+                    )
+                    reasoning_score = judge_result["score"]
+                    reasoning_explanation = judge_result["explanation"]
+                    reasoning_model = judge_result["model"]
+                    reasoning_inf_failed = judge_result["inference_failed"]
+                    reasoning_inf_total = judge_result["inference_total"]
+
+                    # Update circuit breaker state
+                    if reasoning_inf_total > 0 and reasoning_inf_failed == reasoning_inf_total:
+                        self._consecutive_judge_failures += 1
+                        if self._consecutive_judge_failures >= 3:
+                            self._judge_circuit_open = True
+                            logging.error(
+                                "Reasoning judge circuit breaker tripped: "
+                                "3 consecutive problems with 100% judge failure. "
+                                "Skipping judge for remaining problems."
+                            )
+                    else:
+                        self._consecutive_judge_failures = 0
+
+                    logging.info(
+                        f"Reasoning score: {reasoning_score:.2f} "
+                        f"(problem={problem_id}, model={reasoning_model})"
+                    )
+                except Exception as e:
+                    logging.warning(f"Reasoning judge failed for {problem_id}: {e}")
+                    self._consecutive_judge_failures += 1
+                    if self._consecutive_judge_failures >= 3:
+                        self._judge_circuit_open = True
+                        logging.error("Reasoning judge circuit breaker tripped after exceptions.")
+
             result = ProblemResult(
                 problem_id=str(problem_id),
                 category=category,
@@ -402,6 +508,11 @@ class ProgressReporter:
                 score_dict=score_dict if isinstance(score_dict, dict) else {},
                 inference_failures=inf_failures,
                 inference_total=inf_total,
+                reasoning_score=reasoning_score,
+                reasoning_explanation=reasoning_explanation,
+                reasoning_model=reasoning_model,
+                reasoning_inf_failed=reasoning_inf_failed,
+                reasoning_inf_total=reasoning_inf_total,
             )
             with self._lock:
                 self._results[str(problem_id)] = result
