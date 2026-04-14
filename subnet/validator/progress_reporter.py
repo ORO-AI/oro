@@ -39,7 +39,7 @@ class ProblemResult:
     score_dict: Dict[str, Any] = field(default_factory=dict)
     inference_failures: int = 0
     inference_total: int = 0
-    reasoning_score: float = 0.0
+    reasoning_score: float | None = None
     reasoning_explanation: str = ""
     reasoning_model: str = ""
     reasoning_inf_failed: int = 0
@@ -233,8 +233,9 @@ class ProgressReporter:
                 "judge_inference_total": 0,
             }
 
-        total_score = sum(r.reasoning_score for r in results)
-        avg = round(total_score / len(results), 4) if results else 0.0
+        judged = [r for r in results if r.reasoning_score is not None]
+        total_score = sum(r.reasoning_score for r in judged)
+        avg = round(total_score / len(judged), 4) if judged else 0.0
         coeff = reasoning_coefficient(avg)
         total_inf_failed = sum(r.reasoning_inf_failed for r in results)
         total_inf_total = sum(r.reasoning_inf_total for r in results)
@@ -446,7 +447,7 @@ class ProgressReporter:
 
             # Run reasoning quality judge on this problem's trajectory.
             # Circuit breaker: skip if 3 consecutive problems had total judge failure.
-            reasoning_score = 0.0
+            reasoning_score = None
             reasoning_explanation = ""
             reasoning_model = ""
             reasoning_inf_failed = 0
@@ -530,9 +531,9 @@ class ProgressReporter:
 
         updates = []
         for r in results:
-            # Build score_components_summary with reasoning if available
+            # Build score_components_summary with reasoning if judge ran
             scs = None
-            if r.reasoning_score > 0:
+            if r.reasoning_score is not None:
                 scs = {
                     "reasoning_explanation": r.reasoning_explanation,
                     "reasoning_model": r.reasoning_model,
@@ -542,7 +543,7 @@ class ProgressReporter:
                 problem_id=UUID(r.problem_id),
                 status=r.status,
                 score=r.score,
-                reasoning_score=r.reasoning_score if r.reasoning_score > 0 else None,
+                reasoning_score=r.reasoning_score,
                 score_components_summary=scs,
                 inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
                 inference_total=r.inference_total if r.inference_total > 0 else None,
