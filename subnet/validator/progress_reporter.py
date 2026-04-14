@@ -544,10 +544,20 @@ class ProgressReporter:
 
         updates = []
         for r in results:
+            # Build score_components_summary with reasoning if available
+            scs = None
+            if r.reasoning_score > 0:
+                scs = {
+                    "reasoning_explanation": r.reasoning_explanation,
+                    "reasoning_model": r.reasoning_model,
+                }
+
             update = ProblemProgressUpdate(
                 problem_id=UUID(r.problem_id),
                 status=r.status,
                 score=r.score,
+                reasoning_score=r.reasoning_score if r.reasoning_score > 0 else None,
+                score_components_summary=scs,
                 inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
                 inference_total=r.inference_total if r.inference_total > 0 else None,
             )
