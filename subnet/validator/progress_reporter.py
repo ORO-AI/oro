@@ -1,7 +1,8 @@
 """File watcher for scoring problems and reporting progress to Backend.
 
 Architecture:
-  - Single loop reads output file, scores problems, batch-reports to backend
+  - Main loop reads output file and dispatches scoring to a thread pool
+  - Each worker runs the full per-problem pipeline: outcome + reasoning judge
   - _results dict is the sole source of truth for problem state
   - Loop exits when all problems are confirmed or hard timeout expires
   - Aggregate score is computed on-demand from _results
@@ -13,6 +14,7 @@ import sys
 import time
 import traceback
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -23,7 +25,6 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 from bittensor.utils.btlogging import logging
 
 from src.agent.scoring import is_problem_successful, compute_aggregate
-from src.agent.reasoning_scorer import score_reasoning_quality
 from subnet.sandbox import attach_title_embeddings
 from .backend_client import BackendClient
 
@@ -39,19 +40,27 @@ class ProblemResult:
     score_dict: Dict[str, Any] = field(default_factory=dict)
     inference_failures: int = 0
     inference_total: int = 0
-    reasoning_score: float = 0.0
+    reasoning_score: float | None = None
     reasoning_explanation: str = ""
     reasoning_model: str = ""
     reasoning_inf_failed: int = 0
     reasoning_inf_total: int = 0
 
 
+# Default number of concurrent scoring workers
+DEFAULT_SCORING_WORKERS = 4
+
+# Report to backend at most every N seconds
+REPORT_INTERVAL_SECONDS = 10.0
+
+
 class ProgressReporter:
     """Monitors sandbox output, scores problems, and reports to Backend.
 
-    Single loop architecture:
-    - While sandbox runs: tail output file, score problems, batch-report
-    - After sandbox exits: continue scoring with hard timeout
+    Architecture:
+    - Main loop tails output file and dispatches lines to a thread pool
+    - Each worker scores one problem end-to-end (outcome + reasoning judge)
+    - Batch reports consolidated every REPORT_INTERVAL_SECONDS
     - Exit when confirmed == total_problems or timeout expires
     """
 
@@ -65,6 +74,7 @@ class ProgressReporter:
         poll_interval: float = 1.0,
         scoring_timeout: float = 900.0,
         chutes_access_token: Optional[str] = None,
+        max_scoring_workers: int = DEFAULT_SCORING_WORKERS,
     ):
         self.backend_client = backend_client
         self.eval_run_id = eval_run_id
@@ -90,7 +100,17 @@ class ProgressReporter:
         # total failures to avoid retry storms on bad tokens/infra issues.
         self._consecutive_judge_failures = 0
         self._judge_circuit_open = False
-        self._last_reported_count = 0  # track when to batch report
+
+        # Batch reporting state
+        self._last_report_time = 0.0
+        self._last_reported_count = 0
+
+        # Thread pool for concurrent scoring
+        self._scoring_executor = ThreadPoolExecutor(
+            max_workers=max_scoring_workers,
+            thread_name_prefix="scorer",
+        )
+        self._scoring_futures: Dict[str, Future] = {}
 
         # Build problem_id -> problem lookup
         self._id_to_problem: Dict[str, Dict[str, Any]] = {}
@@ -168,6 +188,8 @@ class ProgressReporter:
         self._file_position = 0
         self._results = {}
         self._last_reported_count = 0
+        self._last_report_time = 0.0
+        self._scoring_futures = {}
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -188,6 +210,7 @@ class ProgressReporter:
                 logging.warning(
                     f"Monitoring thread did not finish within {join_timeout}s"
                 )
+        self._scoring_executor.shutdown(wait=False)
 
     def get_aggregate_score(self) -> Optional[Dict[str, Any]]:
         """Compute aggregate score on demand from _results."""
@@ -215,7 +238,11 @@ class ProgressReporter:
         return aggregate
 
     def get_reasoning_data(self) -> Dict[str, Any]:
-        """Return per-problem reasoning data and aggregate for score_components."""
+        """Return aggregate reasoning metrics for run-level score_components.
+
+        Per-problem reasoning data is now sent via progress reports.
+        This method returns only the summary fields needed at run completion.
+        """
         from src.agent.scoring import reasoning_coefficient
 
         with self._lock:
@@ -225,42 +252,25 @@ class ProgressReporter:
             return {
                 "reasoning_quality": 0.0,
                 "reasoning_coefficient": reasoning_coefficient(0.0),
-                "reasoning_scores": [],
-                "reasoning_details": [],
                 "judge_inference_failed": 0,
                 "judge_inference_total": 0,
             }
 
-        total_score = sum(r.reasoning_score for r in results)
-        avg = round(total_score / len(results), 4) if results else 0.0
+        judged = [r for r in results if r.reasoning_score is not None]
+        total_score = sum(r.reasoning_score for r in judged)
+        avg = round(total_score / len(judged), 4) if judged else 0.0
         coeff = reasoning_coefficient(avg)
         total_inf_failed = sum(r.reasoning_inf_failed for r in results)
         total_inf_total = sum(r.reasoning_inf_total for r in results)
 
-        reasoning_scores = [
-            {"problem_id": r.problem_id, "score": r.reasoning_score}
-            for r in results
-        ]
-        reasoning_details = [
-            {
-                "problem_id": r.problem_id,
-                "score": r.reasoning_score,
-                "explanation": r.reasoning_explanation,
-                "model": r.reasoning_model,
-            }
-            for r in results
-        ]
-
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
-            f"({len(results)} problems judged)"
+            f"({len(judged)} problems judged)"
         )
 
         return {
             "reasoning_quality": avg,
             "reasoning_coefficient": coeff,
-            "reasoning_scores": reasoning_scores,
-            "reasoning_details": reasoning_details,
             "judge_inference_failed": total_inf_failed,
             "judge_inference_total": total_inf_total,
         }
@@ -279,23 +289,29 @@ class ProgressReporter:
     IDLE_TIMEOUT = 120.0
 
     def _run(self) -> None:
-        """Single monitoring loop.
+        """Main monitoring loop.
 
-        Tails the output file, scores problems, and batch-reports to backend.
-        When the sandbox exits (_stop_event set), starts a hard timeout.
+        Tails the output file and dispatches scoring to the thread pool.
+        Batch-reports periodically instead of after each problem.
         Exits when:
         - All problems have results, OR
         - Hard timeout (scoring_timeout) expires, OR
         - No new output for IDLE_TIMEOUT seconds after sandbox exit
         """
-        last_scored_at: Optional[float] = None
+        last_activity_at: Optional[float] = None
 
         while True:
-            # Read and score any new output lines (reports after each scored)
-            newly_scored = self._read_and_score()
+            # Read new lines and dispatch to thread pool
+            newly_dispatched = self._read_and_dispatch()
 
-            if newly_scored > 0:
-                last_scored_at = time.time()
+            # Collect completed futures
+            self._collect_completed_futures()
+
+            if newly_dispatched > 0:
+                last_activity_at = time.time()
+
+            # Periodic batch report
+            self._maybe_report()
 
             # Check exit: all problems have results
             with self._lock:
@@ -308,19 +324,21 @@ class ProgressReporter:
             # Start hard timeout when sandbox exits
             if self._stop_event.is_set() and self._hard_deadline is None:
                 self._hard_deadline = time.time() + self.scoring_timeout
-                if last_scored_at is None:
-                    last_scored_at = time.time()
+                if last_activity_at is None:
+                    last_activity_at = time.time()
                 logging.info(
                     f"Sandbox exited, scoring timeout in {self.scoring_timeout}s"
                 )
 
-            # Check idle timeout: no new output after sandbox exit
+            # Check idle timeout: no new output and no in-flight scoring
+            pending_futures = sum(1 for f in self._scoring_futures.values() if not f.done())
             if (
                 self._hard_deadline is not None
-                and last_scored_at is not None
-                and (time.time() - last_scored_at) >= self.IDLE_TIMEOUT
+                and last_activity_at is not None
+                and pending_futures == 0
+                and (time.time() - last_activity_at) >= self.IDLE_TIMEOUT
             ):
-                idle_secs = int(time.time() - last_scored_at)
+                idle_secs = int(time.time() - last_activity_at)
                 unscored = self._total_problems - result_count
                 self._mark_remaining_timed_out()
                 self._batch_report()
@@ -355,10 +373,11 @@ class ProgressReporter:
                 break
 
             # Log progress periodically after sandbox exits
-            if self._hard_deadline is not None and newly_scored == 0:
+            if self._hard_deadline is not None and newly_dispatched == 0:
                 elapsed = int(time.time() - (self._hard_deadline - self.scoring_timeout))
                 logging.info(
-                    f"Scored {result_count}/{self._total_problems} problems, "
+                    f"Scored {result_count}/{self._total_problems} problems "
+                    f"({pending_futures} in-flight), "
                     f"waiting for remaining output ({elapsed}s elapsed)"
                 )
 
@@ -366,12 +385,12 @@ class ProgressReporter:
 
     # ─── Scoring ────────────────────────────────────────────────────────
 
-    def _read_and_score(self) -> int:
-        """Read new lines from output file and score them.
+    def _read_and_dispatch(self) -> int:
+        """Read new lines from output file and dispatch scoring to thread pool.
 
-        Returns the number of newly scored problems.
+        Returns the number of newly dispatched problems.
         """
-        newly_scored = 0
+        newly_dispatched = 0
         try:
             if not self.output_file.exists():
                 return 0
@@ -387,12 +406,27 @@ class ProgressReporter:
                 self._file_position = f.tell()
 
             for line in new_lines:
-                if line.strip():
-                    if self._score_line(line):
-                        newly_scored += 1
-                        # Batch report after each scored problem for real-time progress
-                        self._batch_report()
-                # Yield back to loop if hard deadline expired
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Parse just enough to get problem_id and check for duplicates
+                problem_id = self._extract_problem_id(line)
+                if not problem_id:
+                    continue
+
+                with self._lock:
+                    already_scored = problem_id in self._results
+                already_dispatched = problem_id in self._scoring_futures
+
+                if already_scored or already_dispatched:
+                    continue
+
+                # Dispatch to thread pool
+                future = self._scoring_executor.submit(self._score_problem, line, problem_id)
+                self._scoring_futures[problem_id] = future
+                newly_dispatched += 1
+
                 if self._hard_deadline is not None and time.time() >= self._hard_deadline:
                     break
 
@@ -402,47 +436,58 @@ class ProgressReporter:
         except Exception as e:
             logging.warning(f"Error processing output: {e}")
 
-        return newly_scored
+        return newly_dispatched
 
-    def _score_line(self, line: str) -> bool:
-        """Score a single problem line and store result locally.
+    def _extract_problem_id(self, line: str) -> Optional[str]:
+        """Extract problem_id from an output line without full scoring."""
+        try:
+            line = line.replace("\x00", "")
+            dialogue = json.loads(line)
+            if not isinstance(dialogue, list) or not dialogue:
+                return None
+            extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
+            return extra_info.get("problem_id")
+        except (json.JSONDecodeError, Exception):
+            return None
 
-        Returns True if a new problem was scored.
+    def _collect_completed_futures(self) -> None:
+        """Check for completed scoring futures and update last_activity_at."""
+        completed = [pid for pid, f in self._scoring_futures.items() if f.done()]
+        for pid in completed:
+            future = self._scoring_futures.pop(pid)
+            exc = future.exception()
+            if exc:
+                logging.error(f"Scoring worker failed for {pid}: {exc}")
+
+    def _score_problem(self, line: str, problem_id: str) -> None:
+        """Score a single problem end-to-end. Runs in a worker thread.
+
+        Performs outcome scoring, reads inference stats, runs reasoning judge,
+        and stores the result.
         """
         if not self._scorers:
-            return False
+            return
 
-        # Sanitize null bytes
         line = line.replace("\x00", "")
 
         try:
-            dialogue = json.loads(line.strip())
+            dialogue = json.loads(line)
             if not isinstance(dialogue, list) or not dialogue:
-                return False
-
-            extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
-            problem_id = extra_info.get("problem_id")
-            if not problem_id:
-                logging.warning("No problem_id in dialogue extra_info")
-                return False
-
-            # Skip if already scored
-            with self._lock:
-                if problem_id in self._results:
-                    return False
+                return
 
             problem = self._id_to_problem.get(str(problem_id))
             if not problem:
                 logging.warning(f"Unknown problem_id: {problem_id}")
-                return False
+                return
 
+            extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
 
             scorer = self._scorers.get(category)
             if not scorer:
                 logging.warning(f"No scorer for category '{category}'")
-                return False
+                return
 
             with self._lock:
                 scored_count = len(self._results) + 1
@@ -451,6 +496,7 @@ class ProgressReporter:
                 f"{query[:50]}..."
             )
 
+            # Outcome scoring
             score_dict = scorer.score_problem(query=query, output=dialogue)
             is_successful = is_problem_successful(score_dict, category)
             score = 1.0 if is_successful else 0.0
@@ -458,15 +504,20 @@ class ProgressReporter:
 
             inf_failures, inf_total = self._read_inference_stats(problem_id)
 
-            # Run reasoning quality judge on this problem's trajectory.
-            # Circuit breaker: skip if 3 consecutive problems had total judge failure.
-            reasoning_score = 0.0
+            # Reasoning judge — circuit breaker is checked under lock
+            reasoning_score = None
             reasoning_explanation = ""
             reasoning_model = ""
             reasoning_inf_failed = 0
             reasoning_inf_total = 0
-            if self._chutes_access_token and not self._judge_circuit_open:
+
+            with self._lock:
+                should_judge = bool(self._chutes_access_token and not self._judge_circuit_open)
+
+            if should_judge:
                 try:
+                    from src.agent.reasoning_scorer import score_reasoning_quality
+
                     judge_result = score_reasoning_quality(
                         dialogue, api_key=self._chutes_access_token
                     )
@@ -476,18 +527,19 @@ class ProgressReporter:
                     reasoning_inf_failed = judge_result["inference_failed"]
                     reasoning_inf_total = judge_result["inference_total"]
 
-                    # Update circuit breaker state
-                    if reasoning_inf_total > 0 and reasoning_inf_failed == reasoning_inf_total:
-                        self._consecutive_judge_failures += 1
-                        if self._consecutive_judge_failures >= 3:
-                            self._judge_circuit_open = True
-                            logging.error(
-                                "Reasoning judge circuit breaker tripped: "
-                                "3 consecutive problems with 100% judge failure. "
-                                "Skipping judge for remaining problems."
-                            )
-                    else:
-                        self._consecutive_judge_failures = 0
+                    # Thread-safe circuit breaker update
+                    with self._lock:
+                        if reasoning_inf_total > 0 and reasoning_inf_failed == reasoning_inf_total:
+                            self._consecutive_judge_failures += 1
+                            if self._consecutive_judge_failures >= 3:
+                                self._judge_circuit_open = True
+                                logging.error(
+                                    "Reasoning judge circuit breaker tripped: "
+                                    "3 consecutive problems with 100% judge failure. "
+                                    "Skipping judge for remaining problems."
+                                )
+                        else:
+                            self._consecutive_judge_failures = 0
 
                     logging.info(
                         f"Reasoning score: {reasoning_score:.2f} "
@@ -495,10 +547,13 @@ class ProgressReporter:
                     )
                 except Exception as e:
                     logging.warning(f"Reasoning judge failed for {problem_id}: {e}")
-                    self._consecutive_judge_failures += 1
-                    if self._consecutive_judge_failures >= 3:
-                        self._judge_circuit_open = True
-                        logging.error("Reasoning judge circuit breaker tripped after exceptions.")
+                    with self._lock:
+                        self._consecutive_judge_failures += 1
+                        if self._consecutive_judge_failures >= 3:
+                            self._judge_circuit_open = True
+                            logging.error(
+                                "Reasoning judge circuit breaker tripped after exceptions."
+                            )
 
             result = ProblemResult(
                 problem_id=str(problem_id),
@@ -522,17 +577,28 @@ class ProgressReporter:
                 f"Problem {completed}/{self._total_problems} scored: "
                 f"{score:.4f} (query: {query[:50]}...)"
             )
-            return True
 
         except json.JSONDecodeError:
             logging.warning(f"Failed to parse line: {line[:100]}...")
-            return False
         except Exception as e:
-            logging.error(f"Error scoring problem: {e}")
+            logging.error(f"Error scoring problem {problem_id}: {e}")
             traceback.print_exc()
-            return False
 
     # ─── Reporting ───────────────────────────────────────────────────────
+
+    def _maybe_report(self) -> None:
+        """Report to backend if enough time has passed or new results are available."""
+        with self._lock:
+            current_count = len(self._results)
+
+        if current_count == self._last_reported_count:
+            return
+
+        now = time.time()
+        if now - self._last_report_time >= REPORT_INTERVAL_SECONDS:
+            self._batch_report()
+            self._last_report_time = now
+            self._last_reported_count = current_count
 
     def _batch_report(self) -> None:
         """Send all accumulated results to backend in one request."""
@@ -544,10 +610,20 @@ class ProgressReporter:
 
         updates = []
         for r in results:
+            # Include per-problem reasoning data if judge ran
+            scs = None
+            if r.reasoning_score is not None:
+                scs = {
+                    "reasoning_explanation": r.reasoning_explanation,
+                    "reasoning_model": r.reasoning_model,
+                }
+
             update = ProblemProgressUpdate(
                 problem_id=UUID(r.problem_id),
                 status=r.status,
                 score=r.score,
+                reasoning_score=r.reasoning_score,
+                score_components_summary=scs,
                 inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
                 inference_total=r.inference_total if r.inference_total > 0 else None,
             )
