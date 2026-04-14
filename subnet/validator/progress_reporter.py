@@ -215,7 +215,11 @@ class ProgressReporter:
         return aggregate
 
     def get_reasoning_data(self) -> Dict[str, Any]:
-        """Return per-problem reasoning data and aggregate for score_components."""
+        """Return aggregate reasoning metrics for run-level score_components.
+
+        Per-problem reasoning data is now sent via progress reports.
+        This method returns only the summary fields needed at run completion.
+        """
         from src.agent.scoring import reasoning_coefficient
 
         with self._lock:
@@ -225,8 +229,6 @@ class ProgressReporter:
             return {
                 "reasoning_quality": 0.0,
                 "reasoning_coefficient": reasoning_coefficient(0.0),
-                "reasoning_scores": [],
-                "reasoning_details": [],
                 "judge_inference_failed": 0,
                 "judge_inference_total": 0,
             }
@@ -237,20 +239,6 @@ class ProgressReporter:
         total_inf_failed = sum(r.reasoning_inf_failed for r in results)
         total_inf_total = sum(r.reasoning_inf_total for r in results)
 
-        reasoning_scores = [
-            {"problem_id": r.problem_id, "score": r.reasoning_score}
-            for r in results
-        ]
-        reasoning_details = [
-            {
-                "problem_id": r.problem_id,
-                "score": r.reasoning_score,
-                "explanation": r.reasoning_explanation,
-                "model": r.reasoning_model,
-            }
-            for r in results
-        ]
-
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
             f"({len(results)} problems judged)"
@@ -259,8 +247,6 @@ class ProgressReporter:
         return {
             "reasoning_quality": avg,
             "reasoning_coefficient": coeff,
-            "reasoning_scores": reasoning_scores,
-            "reasoning_details": reasoning_details,
             "judge_inference_failed": total_inf_failed,
             "judge_inference_total": total_inf_total,
         }

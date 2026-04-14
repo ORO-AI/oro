@@ -749,8 +749,6 @@ class Validator:
             aggregate["reasoning_coefficient"] = reasoning_result["reasoning_coefficient"]
             aggregate["judge_inference_failed"] = reasoning_result["judge_inference_failed"]
             aggregate["judge_inference_total"] = reasoning_result["judge_inference_total"]
-            aggregate["reasoning_scores"] = reasoning_result["reasoning_scores"]
-            aggregate["reasoning_details"] = reasoning_result["reasoning_details"]
 
             logging.info(
                 f"Score: final={score:.4f} "
