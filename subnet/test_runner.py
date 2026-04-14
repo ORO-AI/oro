@@ -23,6 +23,8 @@ os.environ.setdefault("SEARCH_SERVER_URL", SEARCH_SERVER_URL)
 sys.path.insert(0, "/app/src/agent")
 from problem_scorer import ProblemScorer  # noqa: E402
 from scoring import is_problem_successful, compute_aggregate  # noqa: E402
+from reasoning_scorer import score_reasoning_quality  # noqa: E402
+from scoring import reasoning_coefficient, blend_final_score  # noqa: E402
 
 from subnet.sandbox import (  # noqa: E402
     SANDBOX_IMAGE,
@@ -44,8 +46,10 @@ def _write_jsonl(problems: list[dict], output_path: Path) -> None:
             f.write(json.dumps(p) + "\n")
 
 
-def _score_output(output_file: Path, problems: list[dict]) -> float:
-    """Score agent output using ProblemScorer (HTTP-based, no pyserini).
+def _score_output(
+    output_file: Path, problems: list[dict], chutes_key: str | None = None, skip_reasoning: bool = False
+) -> float:
+    """Score agent output using ProblemScorer and reasoning judge.
 
     Returns:
         Score (0.0 - 1.0), or -1.0 on failure.
@@ -80,6 +84,7 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
         )
 
     scores = []
+    dialogues = []
     with open(output_file) as f:
         for line in f:
             line = line.strip()
@@ -95,6 +100,7 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
             task = task_for_query[query]
             score = scorers[task].score_problem(query=query, output=output)
             scores.append({"score_dict": score, "category": task, "query": query})
+            dialogues.append(output)
 
             gt = score.get("gt", 0)
             rule = score.get("rule", 0)
@@ -123,7 +129,41 @@ def _score_output(output_file: Path, problems: list[dict]) -> float:
     print(f"Format score:      {agg['format_score']:.3f}")
     print(f"Field matching:    {agg['field_matching']:.3f}")
 
-    return agg["success_rate"]
+    success_rate = agg["success_rate"]
+
+    # Reasoning quality scoring (uses same Chutes token as sandbox)
+    if skip_reasoning or not chutes_key:
+        return success_rate
+
+    print()
+    print("Scoring reasoning quality...")
+    reasoning_scores = []
+    total_failed = 0
+    total_calls = 0
+    for i, dialogue in enumerate(dialogues):
+        query = scores[i]["query"]
+        short_query = query[:55] + "..." if len(query) > 55 else query
+        result = score_reasoning_quality(dialogue, api_key=chutes_key)
+        reasoning_scores.append(result["score"])
+        total_failed += result["inference_failed"]
+        total_calls += result["inference_total"]
+        print(f"  [{result['score']:.1f}] {short_query}")
+
+    if reasoning_scores:
+        avg_quality = sum(reasoning_scores) / len(reasoning_scores)
+        coeff = reasoning_coefficient(avg_quality)
+        final_score = blend_final_score(success_rate, avg_quality)
+
+        print()
+        print(f"Reasoning quality: {avg_quality:.3f}")
+        print(f"Reasoning coeff:   {coeff:.3f}")
+        if total_failed > 0:
+            print(f"Judge failures:    {total_failed}/{total_calls}")
+        print()
+        print(f"Final score:       {final_score:.4f}  (success_rate {success_rate:.3f} × coefficient {coeff:.3f})")
+        return final_score
+
+    return success_rate
 
 
 def run_test(
@@ -131,6 +171,7 @@ def run_test(
     problem_file: str = DEFAULT_PROBLEM_FILE,
     max_workers: int = 3,
     timeout: int = 1800,
+    skip_reasoning: bool = False,
 ) -> float:
     """Run agent against test problems and return score.
 
@@ -224,7 +265,7 @@ def run_test(
     # Score using ProblemScorer (HTTP calls to search-server, no pyserini)
     print()
     print("Scoring results...")
-    return _score_output(output_file, problems)
+    return _score_output(output_file, problems, chutes_key=chutes_key, skip_reasoning=skip_reasoning)
 
 
 def main():
@@ -254,17 +295,23 @@ def main():
         default=1800,
         help="Timeout in seconds for sandbox execution (default: 1800)",
     )
+    parser.add_argument(
+        "--skip-reasoning",
+        action="store_true",
+        help="Skip reasoning quality scoring to save Chutes API calls",
+    )
 
     args = parser.parse_args()
-    score = run_test(args.agent_file, args.problem_file, args.max_workers, args.timeout)
+    score = run_test(args.agent_file, args.problem_file, args.max_workers, args.timeout, args.skip_reasoning)
 
     if score < 0:
         print("\nTest FAILED")
         sys.exit(1)
 
     print()
-    print(f"Score: {score:.4f}")
-    print(f"Result: {'PASS' if score > 0 else 'FAIL'}")
+    print(f"{'═' * 40}")
+    print(f"  SCORE: {score:.4f}")
+    print(f"{'═' * 40}")
     sys.exit(0)
 
 
