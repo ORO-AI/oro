@@ -566,8 +566,9 @@ class Validator:
             Returns (None, [], []) if fetch failed.
         """
         try:
-            logging.info(f"Fetching problems for suite {suite_id} from Backend API")
-            problems = self.backend_client.get_suite_problems(suite_id)
+            eval_run_id = UUID(eval_run_id_str)
+            logging.info(f"Fetching problems for run {eval_run_id_str}")
+            problems = self.backend_client.get_run_problems(eval_run_id)
 
             if not problems:
                 logging.error(f"No problems returned for suite {suite_id}")

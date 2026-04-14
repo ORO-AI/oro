@@ -20,6 +20,7 @@ from oro_sdk.api.public import get_top_agent
 from oro_sdk.api.validator import (
     claim_work,
     complete_run,
+    get_run_problems,
     heartbeat,
     presign_upload,
     update_progress,
@@ -41,7 +42,7 @@ from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.models.progress_update_request import ProgressUpdateRequest
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.top_agent_response import TopAgentResponse
-from oro_sdk.types import UNSET, Response
+from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
 
 
@@ -512,6 +513,34 @@ class BackendClient:
                 f"S3 upload failed: {response.status_code}",
                 status_code=response.status_code,
             )
+
+    def get_run_problems(self, eval_run_id: UUID) -> list[dict]:
+        """Get problems for a specific evaluation run via SDK.
+
+        For RACE runs, returns race-specific problems from the hidden bank.
+        For QUALIFYING runs, returns the suite problems.
+
+        Args:
+            eval_run_id: The evaluation run ID.
+
+        Returns:
+            List of problem dicts with full metadata.
+
+        Raises:
+            BackendError: If the request fails.
+        """
+        response = self._call_api(
+            get_run_problems.sync_detailed,
+            "get_run_problems",
+            eval_run_id=eval_run_id,
+            client=self._auth_client,
+        )
+        problems = []
+        for p in response.problems:
+            metadata = p.metadata.to_dict() if p.metadata and not isinstance(p.metadata, Unset) else {}
+            metadata["problem_id"] = str(p.problem_id)
+            problems.append(metadata)
+        return problems
 
     def get_suite_problems(self, suite_id: int) -> list[dict]:
         """Get full problem metadata for a suite.
