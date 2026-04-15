@@ -19,6 +19,7 @@ from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
+from src.agent.types import SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
 from .version_collector import collect_service_versions
@@ -233,7 +234,7 @@ class Validator:
         eval_run_id: str,
         problem_file: Optional[Path] = None,
         chutes_access_token: Optional[str] = None,
-    ) -> tuple[Optional[Path], dict]:
+    ) -> tuple[Optional[Path], SandboxMetadata]:
         """Run sandbox with downloaded agent, return output file path and metadata.
 
         Returns:
@@ -246,7 +247,7 @@ class Validator:
         stdout_log = eval_dir / "sandbox_stdout.log"
         stderr_log = eval_dir / "sandbox_stderr.log"
 
-        metadata: dict = {"exit_code": None, "duration_seconds": None, "stderr_tail": None}
+        metadata: SandboxMetadata = {"exit_code": None, "duration_seconds": None, "stderr_tail": None}
 
         workspace_dir = Path(self.config.workspace_dir)
         ws = str(workspace_dir)
@@ -919,7 +920,7 @@ class Validator:
         score: float,
         results_s3_key: str = "",
         score_components: Optional[Dict[str, Any]] = None,
-        sandbox_metadata: Optional[dict] = None,
+        sandbox_metadata: Optional[SandboxMetadata] = None,
     ) -> None:
         """Complete an evaluation run, with retry queue fallback.
 
@@ -929,7 +930,7 @@ class Validator:
             score: Evaluation score.
             results_s3_key: S3 key for logs.
             score_components: Optional dict with detailed score breakdown.
-            sandbox_metadata: Optional dict with sandbox execution metadata.
+            sandbox_metadata: Optional sandbox execution metadata.
         """
         if score_components is None:
             score_components = {"success_rate": score}
@@ -976,7 +977,7 @@ class Validator:
         eval_run_id: UUID,
         status: TerminalStatus,
         reason: str,
-        sandbox_metadata: Optional[dict] = None,
+        sandbox_metadata: Optional[SandboxMetadata] = None,
     ) -> None:
         """Report a failed evaluation to Backend, with retry queue fallback.
 
@@ -984,7 +985,7 @@ class Validator:
             eval_run_id: The evaluation run ID (UUID).
             status: Terminal status (TerminalStatus enum).
             reason: Failure reason for logging.
-            sandbox_metadata: Optional dict with sandbox execution metadata.
+            sandbox_metadata: Optional sandbox execution metadata.
         """
         logging.error(f"Evaluation {eval_run_id} failed: {reason}")
         logging.info(f"Reporting failure to Backend with status={status.value}...")

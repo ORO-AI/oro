@@ -11,6 +11,8 @@ from uuid import UUID
 
 from oro_sdk.models.terminal_status import TerminalStatus
 
+from src.agent.types import SandboxMetadata
+
 
 @dataclass
 class CompletionRequest:
@@ -29,7 +31,7 @@ class CompletionRequest:
     score_components: Optional[dict] = field(default_factory=dict)
     results_s3_key: str = ""
     failure_reason: Optional[str] = None
-    sandbox_metadata: Optional[dict] = None
+    sandbox_metadata: Optional[SandboxMetadata] = None
 
     def to_dict(self) -> dict:
         """Serialize to dict for JSON persistence."""
