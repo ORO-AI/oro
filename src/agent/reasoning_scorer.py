@@ -154,11 +154,6 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
     return {"score": 0.0, "explanation": response_text}
 
 
-def parse_judge_score(response_text: str) -> float:
-    """Parse the judge's response into a float score (backwards compat)."""
-    return parse_judge_response(response_text)["score"]
-
-
 def score_reasoning_quality(
     dialogue: list[dict[str, Any]],
     api_key: str,
@@ -258,7 +253,7 @@ def score_reasoning_quality(
             inference_failed += 1
             logger.warning(f"Judge call timed out with {model}")
             model_idx += 1
-        except Exception as e:
+        except requests.RequestException as e:
             inference_failed += 1
             logger.warning(f"Judge call failed with {model}: {e}")
             model_idx += 1

@@ -30,9 +30,6 @@ MAX_STEPS = 25
 
 _proxy = ProxyClient(timeout=120, max_retries=2)
 
-# ── Tool definitions ─────────────────────────────────────────────────────────
-
-
 @Tool
 def find_product(
     q: str,
@@ -139,9 +136,6 @@ def terminate(status: str = "success") -> str:
     return f"The interaction has been completed with status: {status}"
 
 
-# ── Helper tools (client-side, no backend changes needed) ────────────────────
-
-
 @Tool
 def check_product_match(product_id: str, requirements: str) -> Dict:
     """
@@ -177,7 +171,6 @@ def check_product_match(product_id: str, requirements: str) -> Dict:
     except json.JSONDecodeError:
         return {"matched": False, "error": "Invalid requirements JSON"}
 
-    # Build a flat searchable text from all product fields
     all_values = []
     for v in attrs.values():
         if isinstance(v, list):
@@ -201,9 +194,7 @@ def check_product_match(product_id: str, requirements: str) -> Dict:
     mismatches = []
     for key, required_val in reqs.items():
         req_lower = str(required_val).lower()
-        # Check attributes directly
         found = False
-        # Direct attribute key match
         if key.lower() in {k.lower() for k in attrs}:
             attr_val = next(v for k, v in attrs.items() if k.lower() == key.lower())
             attr_str = (
@@ -213,10 +204,8 @@ def check_product_match(product_id: str, requirements: str) -> Dict:
             )
             if req_lower in attr_str:
                 found = True
-        # Fuzzy match across all values
         if not found and req_lower in searchable:
             found = True
-        # Check description as fallback
         if not found and req_lower in desc:
             found = True
 
@@ -407,9 +396,6 @@ def calculate_voucher(
     }
 
 
-# ── Toolkit description for system prompt ────────────────────────────────────
-
-
 def _build_toolkit_descriptions() -> str:
     """Build toolkit descriptions from registered tool docstrings and signatures."""
     import inspect
@@ -428,8 +414,6 @@ def _build_toolkit_descriptions() -> str:
 
 TOOLKIT_DESCRIPTIONS = _build_toolkit_descriptions()
 
-
-# ── System prompt (from paper's rollout.md with toolkit injected) ────────────
 
 BASE_SYSTEM_PROMPT = f"""# Role
 You are a helpful multi-turn dialogue assistant capable of leveraging tool calls to solve user tasks and provide structured chat responses.
@@ -522,14 +506,10 @@ def _build_system_prompt(query: str) -> str:
     return BASE_SYSTEM_PROMPT + PRODUCT_STRATEGY
 
 
-# ── ReAct loop helpers ───────────────────────────────────────────────────────
-
-
 def parse_llm_output(content: str, reasoning_content: str = "") -> dict:
     """Parse LLM output for <think>, <tool_call>, <response> tags."""
     parsed = {}
 
-    # Extract think
     match = re.search(r"<think>(.+?)</think>", content, re.DOTALL)
     if match:
         parsed["think"] = match.group(1).strip()
@@ -540,7 +520,6 @@ def parse_llm_output(content: str, reasoning_content: str = "") -> dict:
     else:
         parsed["think"] = ""
 
-    # Extract tool_call
     parsed["tool_call"] = []
     match = re.search(r"<tool_call>(.+?)</tool_call>", content, re.DOTALL)
     if match:
@@ -562,7 +541,6 @@ def parse_llm_output(content: str, reasoning_content: str = "") -> dict:
         except (json.JSONDecodeError, KeyError):
             logger.warning("Failed to parse tool_call JSON from LLM output")
 
-    # Extract response
     match = re.search(r"<response>(.+?)</response>", content, re.DOTALL)
     if match:
         parsed["response"] = match.group(1).strip()
@@ -621,9 +599,6 @@ def inference(
     return {"content": "", "reasoning_content": "", "tool_calls": None}
 
 
-# ── Main agent entry point ───────────────────────────────────────────────────
-
-
 def agent_main(problem_data: Dict) -> List[Dict]:
     """
     ReAct agent entry point.
@@ -653,7 +628,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
     # Initial user message
     history_messages.append(format_message_for_history("user", query))
 
-    # Build task-specific system prompt
     system_prompt = _build_system_prompt(query)
 
     consecutive_empties = 0
@@ -662,7 +636,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
     candidate_product_ids: List[str] = []  # Track best candidates seen
 
     for step_num in range(1, MAX_STEPS + 1):
-        # Build the user prompt from full history
         user_prompt = build_user_prompt(history_messages)
 
         # Call LLM
@@ -675,7 +648,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
         content = llm_result.get("content", "")
         reasoning_content = llm_result.get("reasoning_content", "")
 
-        # Parse the output
         parsed = parse_llm_output(content, reasoning_content)
 
         # Handle empty responses (API failures) - retry up to max_consecutive_empties times
@@ -780,7 +752,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
                     }
                 )
 
-        # Create dialogue step
         step = create_dialogue_step(
             think=parsed["think"],
             tool_results=tool_results,
@@ -790,7 +761,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
         )
         steps.append(step)
 
-        # Update history with assistant's output
         if parsed["think"]:
             history_messages.append(
                 format_message_for_history("think", parsed["think"])
@@ -810,7 +780,6 @@ def agent_main(problem_data: Dict) -> List[Dict]:
                 format_message_for_history("response", parsed["response"])
             )
 
-        # Check termination
         if is_terminate(parsed):
             logger.info(f"[ReAct] Terminated at step {step_num}")
             break

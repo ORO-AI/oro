@@ -28,7 +28,7 @@ from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .models import CompletionRequest
-from subnet.sandbox import host_path, load_problems, build_sandbox_command
+from subnet.sandbox import host_path, load_problems, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
 WATCHTOWER_URL = os.environ.get("ORO_WATCHTOWER_URL", "http://watchtower:8080")
@@ -38,6 +38,13 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
     "1",
     "yes",
 )
+
+
+def _rewrite_localhost_url(url: str) -> str:
+    """Rewrite localhost URLs to host.docker.internal for Docker connectivity."""
+    if url.startswith("http://localhost:"):
+        return url.replace("http://localhost:", "http://host.docker.internal:", 1)
+    return url
 
 
 class Validator:
@@ -208,10 +215,7 @@ class Validator:
         try:
             # When running inside Docker, rewrite localhost URLs to
             # host.docker.internal so presigned S3 URLs (LocalStack) work.
-            if url.startswith("http://localhost:"):
-                url = url.replace(
-                    "http://localhost:", "http://host.docker.internal:", 1
-                )
+            url = _rewrite_localhost_url(url)
             logging.info(f"Downloading agent from {url} for eval_run {eval_run_id}")
             response = requests.get(url, timeout=30)
             response.raise_for_status()
@@ -400,19 +404,16 @@ class Validator:
                 pass
             time.sleep(10)
 
-        sandbox_image = os.environ.get(
-            "SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest"
-        )
         try:
             result = subprocess.run(
-                ["docker", "pull", sandbox_image],
+                ["docker", "pull", SANDBOX_IMAGE],
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
             if result.returncode != 0:
                 logging.warning(f"Sandbox image pull failed: {result.stderr.strip()}")
-        except Exception as e:
+        except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
             logging.warning(f"Sandbox image pull failed: {e}")
 
         # Re-collect service versions after potential updates
@@ -605,16 +606,6 @@ class Validator:
             logging.error(f"Unexpected error fetching problems: {e}")
             return None, [], []
 
-    def _load_problems_from_file(self, problem_file: Path) -> List[Dict]:
-        """Load problems from JSON or JSONL file (with all metadata intact)."""
-        try:
-            problems = load_problems(problem_file)
-            logging.info(f"Loaded {len(problems)} problems from {problem_file}")
-            return problems
-        except Exception as e:
-            logging.error(f"Failed to load problems from {problem_file}: {e}")
-            return []
-
     def run_evaluation_cycle(self, work: ClaimWorkResponse):
         """Execute a single evaluation cycle for claimed work.
 
@@ -793,8 +784,8 @@ class Validator:
                     import shutil
 
                     shutil.rmtree(eval_dir)
-                except Exception:
-                    pass
+                except OSError as e:
+                    logging.debug(f"Cleanup failed for {eval_dir}: {e}")
 
     def _upload_logs(
         self,
@@ -876,12 +867,8 @@ class Validator:
                 )
 
                 # Rewrite localhost URLs for Docker → host connectivity
-                if hasattr(presign, "upload_url") and presign.upload_url.startswith(
-                    "http://localhost:"
-                ):
-                    presign.upload_url = presign.upload_url.replace(
-                        "http://localhost:", "http://host.docker.internal:", 1
-                    )
+                if hasattr(presign, "upload_url"):
+                    presign.upload_url = _rewrite_localhost_url(presign.upload_url)
 
                 self.backend_client.upload_to_s3(presign, compressed)
                 logging.info(f"Uploaded logs to {presign.results_s3_key}")

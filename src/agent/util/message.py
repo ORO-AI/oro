@@ -1,10 +1,6 @@
-import re
 import hashlib
 import base64
-try:
-    import ujson as json
-except ImportError:
-    import json
+import ujson as json
 
 from pydantic import BaseModel
 
@@ -15,7 +11,10 @@ OUTPUT_ROLES = ["think", "tool_call", "response"]
 
 
 def generate_tool_call_id(name: str, parameters: dict, length: int = 8) -> str:
-    tool_call_str = tool_call_str = f"{name}\n{parameters}"
+    # NOTE: Duplicated from src.agent.agent_interface.generate_tool_call_id
+    # because this module is imported via bare `from util.message import ...`
+    # inside the sandbox (sys.path hack), so cross-package imports are fragile.
+    tool_call_str = f"{name}\n{parameters}"
     hash_bytes = hashlib.md5(tool_call_str.encode("utf-8"), usedforsecurity=False).digest()
 
     base64_str = base64.urlsafe_b64encode(hash_bytes).decode("utf-8")
@@ -60,67 +59,6 @@ class Message(BaseModel):
                 current.append(f"<{role}>{content}</{role}>")
         return "\n".join(current)
 
-    def clear(self):
-        setattr(self, "user", "")
-        setattr(self, "think", "")
-        setattr(self, "tool_call", [])
-        setattr(self, "obs", [])
-        setattr(self, "response", "")
-
     @classmethod
     def from_dict(clf, message: dict):
         return clf(**message)
-
-    @classmethod
-    def from_string(clf, reasoning_content: str, content: str):
-        tmp = dict()
-        for role in OUTPUT_ROLES:
-            matchobj = re.search(f"<{role}>(.+?)</{role}>", content, re.DOTALL)
-            if matchobj:
-                tmp[role] = matchobj.group(1).strip()
-        # think
-        if not tmp.get("think") and reasoning_content:
-            tmp["think"] = (
-                reasoning_content.replace("<think>", "").replace("</think>", "").strip()
-            )
-        # tool call
-        if "tool_call" in tmp:
-            tool_call = []
-            try:
-                json_array = json.loads(tmp["tool_call"])
-                if isinstance(json_array, dict):
-                    json_array = [json_array]
-                for commend in json_array:
-                    name = commend["name"]
-                    parameters = commend["parameters"]
-                    tool_call_id = generate_tool_call_id(name, parameters)
-                    tool_call.append(
-                        {
-                            "name": name,
-                            "parameters": parameters,
-                            "tool_call_id": tool_call_id,
-                        }
-                    )
-            except (json.JSONDecodeError, KeyError, TypeError):
-                pass
-            tmp["tool_call"] = tool_call
-        return clf(**tmp)
-
-
-if __name__ == "__main__":
-    message = {
-        "user": "I want to buy red nike basketball shoes.",
-        "think": "The user want to buy red nike basketball shoes, I should use the find_product tool.",
-        "tool_call": [
-            {
-                "name": "find_product",
-                "parameters": {"q": "red nike basketball shoes", "page": 1},
-            }
-        ],
-    }
-    m = Message.from_dict(message)
-    print(m.user)
-    print(m.think)
-    print(m.tool_call)
-    print(m.to_dict())
-    print(m.to_string())

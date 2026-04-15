@@ -350,10 +350,5 @@ class ProblemScorer:
                         1 if total_price_after_discount <= voucher["budget"] else 0
                     )
 
-        if len(reward) > 0:
-            score["product"] /= len(reward)
-            score["gt"] /= len(reward)
-            score["rule"] /= len(reward)
-            for field in FIELDS:
-                score[field] /= len(reward)
+        self._normalize_multi_product_score(score, reward)
         score["budget"] = budget_match
