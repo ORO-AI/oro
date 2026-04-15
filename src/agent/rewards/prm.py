@@ -61,8 +61,3 @@ def format_reward(completion: str, roles: list = []) -> float:
                 if pos[roles[i]][0][0] < pos[roles[j]][1][0] < pos[roles[i]][1][0]:
                     return 0
     return 1
-
-
-if __name__ == "__main__":
-    completion = """..."""
-    print(format_reward(completion))

@@ -1,52 +1,10 @@
-"""
-Agent interface definitions and helper functions for ShoppingBench sandbox execution.
-
-This module provides:
-- Type definitions for agent interfaces
-- Helper functions for creating expected output
-- Tool registry for dynamic tool registration
-
-Usage in agent files:
-    # Import helpers (use absolute import for compatibility)
-    from src.agent.agent_interface import (
-        Tool,
-        execute_tool_call,
-        create_dialogue_step,
-    )
-
-    # Register a custom tool (name defaults to function name)
-    @Tool
-    def my_custom_tool(param1: str) -> str:
-        return f"Result: {param1}"
-
-    # Or override the name
-    @Tool("custom_name")
-    def my_function(param1: str) -> str:
-        return f"Result: {param1}"
-
-    # Use in agent_main
-    tool_result = execute_tool_call("my_custom_tool", {"param1": "value"})
-    step = create_dialogue_step(
-        think="...",
-        tool_results=[tool_result],
-        response="...",
-        query="...",
-        step=1
-    )
-"""
+"""Tool registration, execution, and dialogue step creation for ShoppingBench agents."""
 
 import json
 import hashlib
 import base64
 import time
 from typing import List, Dict, Any, Callable, TypedDict
-
-# Agent must return a list of steps in the format expected by the evaluation framework.
-AgentOutput = List[Dict]
-
-# Tools can return any serializable type
-ToolResult = Any
-
 
 class ToolCallResult(TypedDict):
     """
@@ -72,17 +30,7 @@ _TOOL_REGISTRY: Dict[str, Callable] = {}
 
 
 def register_tool(name: str, func: Callable) -> None:
-    """
-    Register a tool function in the global registry.
-
-    Args:
-        name: Tool name (e.g., "find_product", "my_custom_tool")
-        func: Callable function that implements the tool
-
-    Example:
-        # Direct registration
-        register_tool("my_tool", my_tool_function)
-    """
+    """Register a callable as a named tool."""
     _TOOL_REGISTRY[name] = func
 
 
@@ -126,18 +74,7 @@ def Tool(name: str = None):
 
 
 def get_tool(name: str) -> Callable:
-    """
-    Get a registered tool by name.
-
-    Args:
-        name: Tool name
-
-    Returns:
-        The registered tool function
-
-    Raises:
-        ValueError: If tool is not registered
-    """
+    """Get a registered tool by name. Raises KeyError if not found."""
     if name not in _TOOL_REGISTRY:
         available = ", ".join(sorted(_TOOL_REGISTRY.keys()))
         raise ValueError(
@@ -148,28 +85,8 @@ def get_tool(name: str) -> Callable:
     return _TOOL_REGISTRY[name]
 
 
-def list_tools() -> List[str]:
-    """
-    List all registered tool names.
-
-    Returns:
-        List of registered tool names
-    """
-    return list(_TOOL_REGISTRY.keys())
-
-
 def generate_tool_call_id(name: str, parameters: dict, length: int = 8) -> str:
-    """
-    Generate a tool call ID from tool name and parameters.
-
-    Args:
-        name: Tool name
-        parameters: Tool parameters dict
-        length: Length of the generated ID (default: 8)
-
-    Returns:
-        Tool call ID string
-    """
+    """Generate a deterministic ID from tool name + params."""
     tool_call_str = f"{name}\n{parameters}"
     hash_bytes = hashlib.md5(tool_call_str.encode("utf-8"), usedforsecurity=False).digest()
     base64_str = base64.urlsafe_b64encode(hash_bytes).decode("utf-8")
@@ -178,22 +95,7 @@ def generate_tool_call_id(name: str, parameters: dict, length: int = 8) -> str:
 
 
 def format_content(think: str, tool_calls: List[dict], response: str) -> str:
-    """
-    Format content string with proper tags for format scoring.
-
-    This matches the expected format from the evaluation framework:
-    - Uses <think> tag in content string (message dict uses "think" key)
-    - Uses <tool_call> with JSON array
-    - Uses <response> tag
-
-    Args:
-        think: Reasoning/thinking text
-        tool_calls: List of tool call dicts (with name, parameters, tool_call_id)
-        response: Response text to user
-
-    Returns:
-        Formatted content string with XML-like tags
-    """
+    """Format content string with proper tags for format scoring."""
     parts = []
     if think:
         parts.append(f"<think>{think}</think>")
@@ -212,21 +114,7 @@ def format_content(think: str, tool_calls: List[dict], response: str) -> str:
 def create_dialogue_step(
     think: str, tool_results: List[ToolCallResult], response: str, query: str, step: int
 ) -> dict:
-    """
-    Create a dialogue step in the format expected by the evaluation framework.
-
-    Formats content properly for format scoring.
-
-    Args:
-        think: Reasoning/thinking text
-        tool_results: List of ToolCallResult objects from execute_tool_call()
-        response: Response text to user
-        query: The original query
-        step: Step number in the dialogue
-
-    Returns:
-        Dialogue step dict with completion structure matching evaluation framework
-    """
+    """Create a dialogue step dict for the evaluation framework."""
     # Generate content using formatted tags
     content = format_content(think, tool_results, response)
 
@@ -257,34 +145,7 @@ def create_dialogue_step(
 
 
 def execute_tool_call(tool_name: str, parameters: dict) -> ToolCallResult:
-    """
-    Execute a tool call and return all information in a single result object.
-
-    This helper function:
-    - Generates tool_call_id using generate_tool_call_id()
-    - Looks up the tool in the registry
-    - Executes the tool with the provided parameters
-    - Returns everything in a single ToolCallResult object
-
-    Args:
-        tool_name: Name of the tool to execute (must be registered)
-        parameters: Parameters to pass to the tool
-
-    Returns:
-        ToolCallResult dict containing:
-        - name: Name of the tool
-        - parameters: Parameters that were passed
-        - tool_call_id: Unique ID for this tool call
-        - result: The result from tool execution (not included in output)
-
-    Raises:
-        ValueError: If tool is not registered
-
-    Example:
-        tool_result = execute_tool_call("find_product", {"q": "laptop"})
-        # Access: tool_result["name"], tool_result["parameters"],
-        #         tool_result["tool_call_id"], tool_result["result"]
-    """
+    """Execute a registered tool and return the result with metadata."""
     # Generate tool_call_id
     tool_call_id = generate_tool_call_id(tool_name, parameters)
 

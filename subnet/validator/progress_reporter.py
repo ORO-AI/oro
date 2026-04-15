@@ -26,7 +26,9 @@ from src.agent.problem_scorer import ProblemScorer, clear_product_cache
 from src.agent.scoring import is_problem_successful, compute_aggregate, reasoning_coefficient
 from src.agent.types import ScoreDict
 from subnet.sandbox import attach_title_embeddings
-from .backend_client import BackendClient
+import requests
+
+from .backend_client import BackendClient, BackendError
 
 
 @dataclass
@@ -121,8 +123,6 @@ class ProgressReporter:
 
         self._initialize_scorers()
 
-    # ─── Scorer initialization ──────────────────────────────────────────
-
     def _initialize_scorers(self) -> None:
         """Initialize per-category ProblemScorers from problem metadata."""
         try:
@@ -161,11 +161,9 @@ class ProgressReporter:
                 f"Initialized {len(self._scorers)} scorers: {list(self._scorers.keys())}"
             )
 
-        except Exception as e:
+        except (ImportError, OSError, ValueError, TypeError, KeyError) as e:
             logging.error(f"Failed to initialize ProblemScorers: {e}")
             self._scorers = {}
-
-    # ─── Public API ─────────────────────────────────────────────────────
 
     def start_monitoring(self) -> None:
         """Start the background monitoring loop."""
@@ -267,8 +265,6 @@ class ProgressReporter:
             return result.status
         return ProblemStatus.FAILED
 
-    # ─── Background loop ────────────────────────────────────────────────
-
     # How long to wait with no new output before giving up (seconds)
     IDLE_TIMEOUT = 120.0
 
@@ -367,8 +363,6 @@ class ProgressReporter:
 
             time.sleep(self.poll_interval)
 
-    # ─── Scoring ────────────────────────────────────────────────────────
-
     def _read_and_dispatch(self) -> int:
         """Read new lines from output file and dispatch scoring to thread pool.
 
@@ -417,7 +411,7 @@ class ProgressReporter:
         except (OSError, IOError) as e:
             logging.warning(f"Error reading output file: {e}")
             self._file_position = 0
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             logging.warning(f"Error processing output: {e}")
 
         return newly_dispatched
@@ -431,7 +425,7 @@ class ProgressReporter:
                 return None
             extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
             return extra_info.get("problem_id")
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, KeyError, TypeError):
             return None
 
     def _collect_completed_futures(self) -> None:
@@ -568,8 +562,6 @@ class ProgressReporter:
             logging.error(f"Error scoring problem {problem_id}: {e}")
             traceback.print_exc()
 
-    # ─── Reporting ───────────────────────────────────────────────────────
-
     def _maybe_report(self) -> None:
         """Report to backend if enough time has passed or new results are available."""
         with self._lock:
@@ -618,7 +610,7 @@ class ProgressReporter:
             logging.info(
                 f"Batch reported {len(updates)}/{self._total_problems} problems"
             )
-        except Exception as e:
+        except (BackendError, requests.RequestException) as e:
             logging.warning(f"Batch report failed ({len(updates)} problems): {e}")
 
     def _mark_remaining_timed_out(self) -> None:
@@ -639,8 +631,6 @@ class ProgressReporter:
                     status=ProblemStatus.TIMED_OUT,
                     score=0.0,
                 )
-
-    # ─── Helpers ────────────────────────────────────────────────────────
 
     def _read_inference_stats(self, problem_id: str) -> tuple[int, int]:
         """Read inference stats from the shared JSONL sidecar file."""

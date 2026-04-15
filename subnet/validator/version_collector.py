@@ -5,10 +5,11 @@ and pulled images. Returns short-form digests for compact storage.
 """
 
 import logging
-import os
 import socket
 import subprocess
 from typing import Optional
+
+from subnet.sandbox import SANDBOX_IMAGE
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +18,6 @@ SERVICE_CONTAINERS = [
     "shoppingbench-search-server",
     "shoppingbench-proxy",
 ]
-
-# Sandbox image to inspect (pulled but not always running)
-SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 
 # Short name mapping for output keys
 CONTAINER_KEY_MAP = {

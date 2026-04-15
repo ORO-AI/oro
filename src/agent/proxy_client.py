@@ -1,14 +1,4 @@
-"""
-Simple proxy client for making HTTP requests to ShoppingBench services via the proxy.
-
-This module provides a minimal HTTP client that handles:
-- URL building
-- Retry logic
-- Error handling
-- GET and POST requests
-
-All requests go through the proxy service for network isolation.
-"""
+"""HTTP proxy client for ShoppingBench services."""
 
 import json
 import os
@@ -169,7 +159,7 @@ class ProxyClient:
                         f"{operation_name} returned status {response.status_code}, "
                         f"retry {i + 1}/{self.max_retries}"
                     )
-            except Exception as e:
+            except requests.RequestException as e:
                 logger.error(
                     f"{operation_name} error, retry {i + 1}/{self.max_retries}: {e}"
                 )
@@ -242,33 +232,3 @@ class ProxyClient:
         if response and response.status_code == 200:
             return response.json()
         return None
-
-
-# Global instance for convenience
-_default_client: Optional[ProxyClient] = None
-
-
-def get_proxy_client() -> ProxyClient:
-    """
-    Get or create the default proxy client instance.
-
-    Returns:
-        Default ProxyClient instance
-    """
-    global _default_client
-    if _default_client is None:
-        _default_client = ProxyClient()
-    return _default_client
-
-
-def set_proxy_client(client: ProxyClient) -> None:
-    """
-    Set the default proxy client instance.
-
-    Useful for testing or custom configuration.
-
-    Args:
-        client: ProxyClient instance to use as default
-    """
-    global _default_client
-    _default_client = client

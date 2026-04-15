@@ -66,7 +66,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load configuration
     if args.config:
         with open(args.config, "r") as f:
             config_dict = json.load(f)
@@ -80,19 +79,16 @@ def main():
             agent_file=args.agent_file,
         )
 
-    # Validate configuration
     try:
         config.validate()
     except (FileNotFoundError, ValueError) as e:
         logger.error(f"Configuration error: {e}")
         sys.exit(1)
 
-    # Set environment variables for agent
     os.environ["SANDBOX_PROXY_URL"] = config.sandbox_proxy_url
     if config.output_file:
         os.environ["SANDBOX_OUTPUT_FILE"] = config.output_file
 
-    # Load problems
     logger.info(f"Loading problems from {config.problem_file}")
     problems = load_problems(config.problem_file)
 

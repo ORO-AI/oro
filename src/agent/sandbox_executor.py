@@ -1,12 +1,4 @@
-"""
-Sandbox executor for running agents against ShoppingBench problems in parallel.
-
-This module manages parallel execution of agent_main() against multiple problems
-from JSONL files, with timeout handling and error isolation.
-
-Uses multiprocessing for per-problem execution so that timed-out agents can be
-reliably terminated (unlike threads, which continue running after timeout).
-"""
+"""Sandbox executor for running agents against problems in parallel."""
 
 import importlib.util
 import json
@@ -26,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ProblemResult:
+class ExecutionResult:
     """Result of executing an agent against a single problem."""
 
     query: str
@@ -103,10 +95,8 @@ def load_agent_from_file(file_path: str) -> Callable:
     if not os.path.isfile(file_path):
         raise ValueError(f"Agent file path is not a file: {file_path}")
 
-    # Create a unique module name based on the file path
     module_name = f"user_agent_{abs(hash(file_path))}"
 
-    # Load the module
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not create module spec from file: {file_path}")
@@ -114,7 +104,6 @@ def load_agent_from_file(file_path: str) -> Callable:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    # Extract agent_main function
     if not hasattr(module, "agent_main"):
         raise ImportError(f"Module {file_path} does not define 'agent_main' function")
 
@@ -191,7 +180,7 @@ def execute_single_problem(
     problem: Dict,
     timeout: float = 300.0,
     agent_file: Optional[str] = None,
-) -> ProblemResult:
+) -> ExecutionResult:
     """Execute agent_main() for a single problem with timeout.
 
     Spawns the agent in a child **process** so that a timed-out execution can
@@ -205,7 +194,7 @@ def execute_single_problem(
             uses default ``src.agent.agent``.
 
     Returns:
-        ProblemResult with execution outcome.
+        ExecutionResult with execution outcome.
     """
     query = problem.get("query", "")
     problem_id = problem.get("problem_id") or problem.get("id")
@@ -236,7 +225,7 @@ def execute_single_problem(
             process.join()
         inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
         result_queue.close()
-        return ProblemResult(
+        return ExecutionResult(
             query=query,
             success=False,
             error=f"Execution exceeded timeout of {timeout}s",
@@ -251,7 +240,7 @@ def execute_single_problem(
         if not result_queue.empty():
             status, data = result_queue.get_nowait()
             if status == "success":
-                return ProblemResult(
+                return ExecutionResult(
                     query=query,
                     success=True,
                     result=data,
@@ -260,7 +249,7 @@ def execute_single_problem(
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
                 )
-            return ProblemResult(
+            return ExecutionResult(
                 query=query,
                 success=False,
                 error=data,
@@ -269,7 +258,7 @@ def execute_single_problem(
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
             )
-        return ProblemResult(
+        return ExecutionResult(
             query=query,
             success=False,
             error=f"Process exited with code {process.exitcode} but produced no result",
@@ -282,8 +271,8 @@ def execute_single_problem(
         result_queue.close()
 
 
-def _format_single_result(result: ProblemResult) -> Optional[str]:
-    """Format a single ProblemResult as a JSONL line for dialogue output.
+def _format_single_result(result: ExecutionResult) -> Optional[str]:
+    """Format a single ExecutionResult as a JSONL line for dialogue output.
 
     Returns the JSON string (without trailing newline), or None if the
     result should be skipped (failed, wrong format).
@@ -317,7 +306,7 @@ def execute_problems_parallel(
     timeout_per_problem: float = 300.0,
     agent_file: Optional[str] = None,
     output_file: Optional[str] = None,
-) -> List[ProblemResult]:
+) -> List[ExecutionResult]:
     """Execute multiple problems in parallel, writing results incrementally.
 
     Each problem runs in its own child process (via ``execute_single_problem``)
@@ -350,7 +339,7 @@ def execute_problems_parallel(
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
         fout = open(output_file, "a", encoding="utf-8")
 
-    results: List[ProblemResult] = []
+    results: List[ExecutionResult] = []
     start_time = time.time()
 
     try:
@@ -387,7 +376,7 @@ def execute_problems_parallel(
                         f"Future for problem '{query}' timed out during result retrieval"
                     )
                     results.append(
-                        ProblemResult(
+                        ExecutionResult(
                             query=query,
                             success=False,
                             error="Future timeout during result retrieval",
@@ -401,7 +390,7 @@ def execute_problems_parallel(
                         f"Unexpected error retrieving result for '{query}': {e}"
                     )
                     results.append(
-                        ProblemResult(
+                        ExecutionResult(
                             query=query,
                             success=False,
                             error=f"Unexpected error: {str(e)}",
@@ -422,12 +411,12 @@ def execute_problems_parallel(
     return results
 
 
-def format_results(results: List[ProblemResult]) -> Dict:
+def format_results(results: List[ExecutionResult]) -> Dict:
     """
     Format execution results for evaluation.
 
     Args:
-        results: List of ProblemResult objects
+        results: List of ExecutionResult objects
 
     Returns:
         Dictionary with formatted results

@@ -154,33 +154,6 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
     return hit_count / total_count, total_counter, hit_counter
 
 
-def web_rule_score_reward(product: dict, reward: dict) -> tuple[float, float]:
-    if ground_truth_reward(product, reward) == 1:
-        return 1, 1
-
-    kw = reward["key_attribute"]
-    title_score = 1 if kw.lower() in product["title"].lower() else 0
-    kw_score = 1 if kw.lower() in product["description"].lower() else 0
-    kw_score = max(title_score, kw_score)
-
-    # title
-    model = _get_sentence_model()
-    if "title" in reward and model is not None:
-        title = reward["title"]
-        sentences = [product["title"], title]
-        embeddings = model.encode(sentences)
-        similarities = model.similarity(embeddings, embeddings)
-        sim = similarities[0][1]
-        title_score = 1 if sim >= 0.8 else 0
-
-    return kw_score, title_score
-
-
-def web_response_score_reward(response: str, kw: str) -> float:
-    score = 1 if kw.lower() in response.lower() else 0
-    return score
-
-
 def length_reward(output: list[dict]) -> float:
     if not output:
         return 0

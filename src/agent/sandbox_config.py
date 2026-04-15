@@ -27,20 +27,6 @@ class SandboxConfig:
     # Agent file configuration
     agent_file: Optional[str] = None  # None = use default src.agent.agent
 
-    @classmethod
-    def from_env(cls) -> "SandboxConfig":
-        """Load configuration from environment variables."""
-        return cls(
-            problem_file=os.getenv(
-                "SANDBOX_PROBLEM_FILE", "data/synthesize_product_test.jsonl"
-            ),
-            max_workers=int(os.getenv("SANDBOX_MAX_WORKERS", "0")) or None,
-            timeout_per_problem=float(os.getenv("SANDBOX_TIMEOUT", "300.0")),
-            sandbox_proxy_url=os.getenv("SANDBOX_PROXY_URL", "http://proxy:80"),
-            output_file=os.getenv("SANDBOX_OUTPUT_FILE"),
-            agent_file=os.getenv("SANDBOX_AGENT_FILE"),
-        )
-
     def validate(self) -> None:
         """Validate configuration values."""
         if not os.path.exists(self.problem_file):

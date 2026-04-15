@@ -6,7 +6,6 @@ from reasoning_scorer import (
     score_reasoning_quality,
     format_trajectory_for_judge,
     parse_judge_response,
-    parse_judge_score,
     JUDGE_MODELS,
 )
 
@@ -114,15 +113,6 @@ class TestParseJudgeResponse:
         )
         resp = parse_judge_response(response)
         assert resp["score"] == 0.9
-
-
-class TestParseJudgeScore:
-    def test_backwards_compat(self):
-        assert parse_judge_score('{"reasoning_quality": 0.85}') == 0.85
-
-    def test_plain_text_without_json_returns_zero(self):
-        """Plain text without JSON should return 0, not extract random numbers."""
-        assert parse_judge_score("The reasoning quality score is 0.7") == 0.0
 
 
 class TestScoreReasoningQuality:

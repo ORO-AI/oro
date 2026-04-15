@@ -79,7 +79,6 @@ class BackendError(Exception):
 
     @property
     def is_auth_error(self) -> bool:
-        """Return True if this is an authentication/authorization error."""
         return self.status_code in (401, 403)
 
     @property
@@ -89,7 +88,6 @@ class BackendError(Exception):
 
     @property
     def is_conflict(self) -> bool:
-        """Return True if this is a conflict error (409)."""
         return self.status_code == 409
 
     @property
@@ -127,27 +125,22 @@ class BackendError(Exception):
 
     @property
     def is_not_run_owner(self) -> bool:
-        """Return True if validator is not the run owner."""
         return self.is_error(NotRunOwnerError)
 
     @property
     def is_run_already_complete(self) -> bool:
-        """Return True if run is already complete."""
         return self.is_error(RunAlreadyCompleteError)
 
     @property
     def is_eval_run_not_found(self) -> bool:
-        """Return True if evaluation run was not found."""
         return self.is_error(EvalRunNotFoundError)
 
     @property
     def is_invalid_problem_id(self) -> bool:
-        """Return True if problem ID is invalid."""
         return self.is_error(InvalidProblemIdError)
 
     @property
     def is_missing_score(self) -> bool:
-        """Return True if score is missing."""
         return self.is_error(MissingScoreError)
 
     def __str__(self) -> str:
@@ -339,15 +332,11 @@ class BackendClient:
 
         # Pass service_versions as request body if available
         if service_versions is not None:
-            try:
-                from oro_sdk.models.heartbeat_request import (
-                    HeartbeatRequest as SdkHeartbeatRequest,
-                )
+            from oro_sdk.models.heartbeat_request import (
+                HeartbeatRequest as SdkHeartbeatRequest,
+            )
 
-                kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
-            except ImportError:
-                # SDK doesn't have HeartbeatRequest yet — skip body
-                pass
+            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
 
         return self._call_api(
             heartbeat.sync_detailed,
@@ -542,48 +531,3 @@ class BackendClient:
             problems.append(metadata)
         return problems
 
-    def get_suite_problems(self, suite_id: int) -> list[dict]:
-        """Get full problem metadata for a suite.
-
-        This endpoint returns the complete problem metadata that validators
-        need to actually run evaluations (query, reward, etc.).
-
-        Args:
-            suite_id: The problem suite ID.
-
-        Returns:
-            List of problem dicts with full metadata.
-
-        Raises:
-            BackendError: If the request fails.
-        """
-        try:
-            # Use public client (no auth required)
-            response = self._public_client.get_httpx_client().get(
-                f"/v1/public/suites/{suite_id}/problems",
-                params={"include_embeddings": "true"},
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                # Extract metadata and include problem_id from each problem
-                problems = []
-                for p in data.get("problems", []):
-                    problem = p.get("metadata", {}).copy()
-                    problem["problem_id"] = p.get("problem_id")
-                    problems.append(problem)
-                return problems
-            elif response.status_code == 404:
-                raise BackendError(
-                    f"Suite {suite_id} not found or has no problems",
-                    status_code=404,
-                )
-            else:
-                raise BackendError(
-                    f"get_suite_problems: HTTP {response.status_code}",
-                    status_code=response.status_code,
-                )
-        except httpx.TimeoutException:
-            raise BackendError("get_suite_problems: Request timed out")
-        except httpx.ConnectError as e:
-            raise BackendError(f"get_suite_problems: Connection error: {e}")
