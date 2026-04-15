@@ -57,7 +57,7 @@ def test_non_gt_calls_encode(mock_get):
 
 
 @patch("src.agent.problem_scorer.get_product")
-@patch("rewards.orm._get_sentence_model")
+@patch("src.agent.rewards.orm._get_sentence_model")
 def test_shop_batch_encodes_non_gt_titles(mock_get, mock_prod):
     """Shop task: non-GT titles are batch-encoded, GT title is skipped."""
     from src.agent.problem_scorer import ProblemScorer

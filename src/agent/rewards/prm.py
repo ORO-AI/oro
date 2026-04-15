@@ -4,7 +4,7 @@ try:
 except ImportError:
     import json
 
-from util.message import OUTPUT_ROLES
+from src.agent.util.message import OUTPUT_ROLES
 
 
 def format_reward(completion: str, roles: list = []) -> float:

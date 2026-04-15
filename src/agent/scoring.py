@@ -6,8 +6,10 @@ test_runner (local testing). Do NOT reimplement scoring elsewhere.
 
 from typing import Optional
 
+from src.agent.types import AggregateScore, ScoreDict
 
-def is_problem_successful(score_dict: Optional[dict], category: str) -> bool:
+
+def is_problem_successful(score_dict: Optional[ScoreDict], category: str) -> bool:
     """Determine if a problem was successfully solved.
 
     Uses category-aware criteria:
@@ -40,7 +42,7 @@ def is_problem_successful(score_dict: Optional[dict], category: str) -> bool:
 def compute_aggregate(
     results: list[dict],
     total_problems: int,
-) -> dict:
+) -> AggregateScore:
     """Compute aggregate score from per-problem results.
 
     Denominator is always total_problems (full suite size).

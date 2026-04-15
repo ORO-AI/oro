@@ -15,9 +15,9 @@ from typing import Optional
 
 import requests
 
-from rewards.orm import batch_encode_titles, ground_truth_reward, rule_score_reward, length_reward
-from rewards.prm import format_reward
-from util.message import Message, OUTPUT_ROLES
+from src.agent.rewards.orm import batch_encode_titles, ground_truth_reward, rule_score_reward, length_reward
+from src.agent.rewards.prm import format_reward
+from src.agent.util.message import Message, OUTPUT_ROLES
 
 
 # Search server URL - configurable via environment variable

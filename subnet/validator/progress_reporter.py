@@ -9,8 +9,6 @@ Architecture:
 """
 
 import json
-import os
-import sys
 import time
 import traceback
 import threading
@@ -24,7 +22,9 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
 from bittensor.utils.btlogging import logging
 
-from src.agent.scoring import is_problem_successful, compute_aggregate
+from src.agent.problem_scorer import ProblemScorer, clear_product_cache
+from src.agent.scoring import is_problem_successful, compute_aggregate, reasoning_coefficient
+from src.agent.types import ScoreDict
 from subnet.sandbox import attach_title_embeddings
 from .backend_client import BackendClient
 
@@ -37,7 +37,7 @@ class ProblemResult:
     category: str
     status: ProblemStatus
     score: float
-    score_dict: Dict[str, Any] = field(default_factory=dict)
+    score_dict: ScoreDict = field(default_factory=dict)
     inference_failures: int = 0
     inference_total: int = 0
     reasoning_score: float | None = None
@@ -126,15 +126,6 @@ class ProgressReporter:
     def _initialize_scorers(self) -> None:
         """Initialize per-category ProblemScorers from problem metadata."""
         try:
-            original_dir = os.getcwd()
-            os.chdir(str(self.workspace_dir))
-
-            scorer_path = str(self.workspace_dir / "src" / "agent")
-            if scorer_path not in sys.path:
-                sys.path.insert(0, scorer_path)
-
-            from problem_scorer import ProblemScorer, clear_product_cache
-
             clear_product_cache()
 
             category_rewards: Dict[str, Dict] = {}
@@ -169,15 +160,10 @@ class ProgressReporter:
             logging.info(
                 f"Initialized {len(self._scorers)} scorers: {list(self._scorers.keys())}"
             )
-            os.chdir(original_dir)
 
         except Exception as e:
             logging.error(f"Failed to initialize ProblemScorers: {e}")
             self._scorers = {}
-            try:
-                os.chdir(original_dir)
-            except Exception:
-                pass
 
     # ─── Public API ─────────────────────────────────────────────────────
 
@@ -243,8 +229,6 @@ class ProgressReporter:
         Per-problem reasoning data is now sent via progress reports.
         This method returns only the summary fields needed at run completion.
         """
-        from src.agent.scoring import reasoning_coefficient
-
         with self._lock:
             results = list(self._results.values())
 
