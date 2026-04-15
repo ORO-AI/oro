@@ -1,6 +1,9 @@
 import hashlib
 import base64
-import ujson as json
+try:
+    import ujson as json
+except ImportError:
+    import json
 
 from pydantic import BaseModel
 

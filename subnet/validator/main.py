@@ -6,7 +6,7 @@ import subprocess
 import time
 import traceback
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 from uuid import UUID
 
 import requests
@@ -28,7 +28,7 @@ from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .models import CompletionRequest
-from subnet.sandbox import host_path, load_problems, build_sandbox_command, SANDBOX_IMAGE
+from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
 WATCHTOWER_URL = os.environ.get("ORO_WATCHTOWER_URL", "http://watchtower:8080")

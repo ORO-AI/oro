@@ -1,5 +1,8 @@
 import re
-import ujson as json
+try:
+    import ujson as json
+except ImportError:
+    import json
 
 from src.agent.util.message import OUTPUT_ROLES
 
