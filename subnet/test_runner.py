@@ -20,7 +20,7 @@ SEARCH_SERVER_URL = os.environ.get("SEARCH_SERVER_URL", "http://search-server:56
 os.environ.setdefault("SEARCH_SERVER_URL", SEARCH_SERVER_URL)
 
 # ProblemScorer uses HTTP calls to search-server — no pyserini/Java needed
-from src.agent.problem_scorer import ProblemScorer, clear_product_cache  # noqa: E402
+from src.agent.problem_scorer import ProblemScorer  # noqa: E402
 from src.agent.scoring import is_problem_successful, compute_aggregate  # noqa: E402
 from src.agent.reasoning_scorer import score_reasoning_quality  # noqa: E402
 from src.agent.scoring import reasoning_coefficient, blend_final_score  # noqa: E402
