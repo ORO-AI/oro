@@ -632,13 +632,19 @@ class Validator:
         agent_path = None
         workspace_dir = Path(self.config.workspace_dir)
 
-        # Step 0: Verify miner Chutes token is present (before starting heartbeat)
+        # Step 0: Verify miner Chutes token is present and valid
         if not chutes_access_token:
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
                 "Miner has no Chutes token — cannot fund inference",
             )
+            return
+
+        # Validate the token can actually make inference calls
+        token_valid, token_reason = self._validate_chutes_token(chutes_access_token)
+        if not token_valid:
+            self._complete_with_failure(eval_run_id, TerminalStatus.FAILED, token_reason)
             return
 
         # Start heartbeat manager only after token validation passes
@@ -958,6 +964,34 @@ class Validator:
                 )
             else:
                 logging.error(f"Non-transient error completing run {eval_run_id}: {e}")
+
+    @staticmethod
+    def _validate_chutes_token(access_token: str) -> tuple[bool, str]:
+        """Validate a Chutes access token can make inference calls.
+
+        Returns (is_valid, failure_reason). On transient errors (5xx,
+        timeout), returns (True, "") to avoid failing runs unnecessarily.
+        """
+        import requests
+
+        try:
+            resp = requests.get(
+                "https://chutes.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                return True, ""
+            if resp.status_code == 401:
+                return False, "Chutes token invalid or expired (HTTP 401)"
+            if resp.status_code == 402:
+                return False, "Miner's Chutes account has no credits (HTTP 402)"
+            # 403, 5xx, or unexpected — could be throttling/transient, proceed
+            logging.warning("Chutes token validation inconclusive: status=%s", resp.status_code)
+            return True, ""
+        except Exception as exc:
+            logging.warning("Chutes token validation error: %s", exc)
+            return True, ""
 
     def _complete_with_failure(
         self,
