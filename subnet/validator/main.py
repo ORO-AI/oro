@@ -967,26 +967,43 @@ class Validator:
 
     @staticmethod
     def _validate_chutes_token(access_token: str) -> tuple[bool, str]:
-        """Validate a Chutes access token can make inference calls.
+        """Validate a Chutes access token by making a minimal inference call.
+
+        A single 1-token completion catches both invalid tokens (401) and
+        zero-balance accounts (402). The models listing endpoint can't
+        distinguish pro-plan users (balance=0 but have quotas) from
+        genuinely broke accounts.
 
         Returns (is_valid, failure_reason). On transient errors (5xx,
-        timeout), returns (True, "") to avoid failing runs unnecessarily.
+        timeout, 429), returns (True, "") to avoid failing runs unnecessarily.
         """
         import requests
 
         try:
-            resp = requests.get(
-                "https://chutes.ai/api/v1/models",
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=5,
+            resp = requests.post(
+                "https://llm.chutes.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "Qwen/Qwen3-32B-TEE",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+                timeout=15,
             )
             if resp.status_code == 200:
                 return True, ""
             if resp.status_code == 401:
                 return False, "Chutes token invalid or expired (HTTP 401)"
             if resp.status_code == 402:
-                return False, "Miner's Chutes account has no credits (HTTP 402)"
-            # 403, 5xx, or unexpected — could be throttling/transient, proceed
+                detail = resp.json().get("detail", {})
+                msg = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+                return False, f"Miner's Chutes account has no credits ({msg})"
+            if resp.status_code == 429:
+                # Rate limited — token is valid, just throttled
+                return True, ""
             logging.warning("Chutes token validation inconclusive: status=%s", resp.status_code)
             return True, ""
         except Exception as exc:
