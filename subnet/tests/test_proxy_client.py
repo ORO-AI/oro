@@ -6,7 +6,7 @@ import tempfile
 from unittest.mock import patch, MagicMock
 
 
-from src.agent.proxy_client import InferenceStats, ProxyClient
+from src.agent.proxy_client import InferenceStats, ProxyClient, RequestLog
 
 
 class TestProxyClientAuth:
@@ -121,5 +121,142 @@ class TestInferenceStats:
             with open(path) as f:
                 entry = json.loads(f.readline())
             assert entry["problem_id"] == "unknown"
+        finally:
+            os.unlink(path)
+
+
+class TestRequestLog:
+    """Tests for proxy call request logging."""
+
+    def test_records_get_call(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            log.record(
+                method="GET",
+                path="/search/find_product",
+                params={"q": "laptop", "page": 1},
+                status_code=200,
+                response_body=[{"product_id": "123", "title": "Laptop"}],
+                duration_ms=150.5,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["method"] == "GET"
+            assert entry["path"] == "/search/find_product"
+            assert entry["params"] == {"q": "laptop", "page": 1}
+            assert entry["status_code"] == 200
+            assert entry["duration_ms"] == 150.5
+            assert entry["response"] == [{"product_id": "123", "title": "Laptop"}]
+            assert "timestamp" in entry
+        finally:
+            os.unlink(path)
+
+    def test_records_post_call(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            log.record(
+                method="POST",
+                path="/search/view_product_information",
+                json_data={"product_id": "456"},
+                status_code=200,
+                duration_ms=80.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["method"] == "POST"
+            assert entry["json_data"] == {"product_id": "456"}
+        finally:
+            os.unlink(path)
+
+    def test_inference_body_omits_messages(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            log.record(
+                method="POST",
+                path="/inference/chat/completions",
+                json_data={
+                    "model": "gpt-4",
+                    "messages": [{"role": "user", "content": "very long prompt..."}],
+                    "temperature": 0.7,
+                },
+                status_code=200,
+                duration_ms=2000.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert "messages" not in entry["json_data"]
+            assert entry["json_data"]["model"] == "gpt-4"
+            assert entry["json_data"]["temperature"] == 0.7
+        finally:
+            os.unlink(path)
+
+    def test_large_response_truncated(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            large_body = {"data": "x" * 3000}
+            log.record(
+                method="GET",
+                path="/search/find_product",
+                status_code=200,
+                response_body=large_body,
+                duration_ms=100.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["response_truncated"] is True
+            assert entry["response_length"] > 2000
+            assert "response" not in entry
+        finally:
+            os.unlink(path)
+
+    def test_no_file_does_not_crash(self):
+        log = RequestLog(log_file=None)
+        log.record(method="GET", path="/search/find_product", status_code=200)
+
+    def test_none_params_omitted(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            log.record(method="GET", path="/health", status_code=200, duration_ms=5.0)
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert "params" not in entry
+            assert "json_data" not in entry
+        finally:
+            os.unlink(path)
+
+    def test_multiple_calls_append(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            log.record(method="GET", path="/a", status_code=200, duration_ms=1.0)
+            log.record(method="GET", path="/b", status_code=200, duration_ms=2.0)
+            log.record(method="POST", path="/c", status_code=200, duration_ms=3.0)
+
+            with open(path) as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+
+            assert len(lines) == 3
+            assert [e["path"] for e in lines] == ["/a", "/b", "/c"]
         finally:
             os.unlink(path)

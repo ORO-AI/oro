@@ -6,7 +6,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from src.agent.sandbox_executor import execute_single_problem, _read_inference_stats
+from src.agent.sandbox_executor import execute_single_problem, _read_inference_stats, _read_request_log
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FAST = str(FIXTURES / "fast_agent.py")
@@ -73,3 +73,34 @@ class TestReadInferenceStats:
         failures, total = _read_inference_stats("/tmp/nonexistent.jsonl", "p1")
         assert failures == 0
         assert total == 0
+
+
+class TestReadRequestLog:
+    def test_reads_all_entries(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write(json.dumps({"method": "GET", "path": "/a"}) + "\n")
+            f.write(json.dumps({"method": "POST", "path": "/b"}) + "\n")
+            path = f.name
+        try:
+            entries = _read_request_log(path)
+            assert len(entries) == 2
+            assert entries[0]["path"] == "/a"
+            assert entries[1]["path"] == "/b"
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_returns_empty(self):
+        entries = _read_request_log("/tmp/nonexistent_request_log.jsonl")
+        assert entries == []
+
+    def test_skips_blank_lines(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write(json.dumps({"method": "GET", "path": "/a"}) + "\n")
+            f.write("\n")
+            f.write(json.dumps({"method": "GET", "path": "/b"}) + "\n")
+            path = f.name
+        try:
+            entries = _read_request_log(path)
+            assert len(entries) == 2
+        finally:
+            os.unlink(path)

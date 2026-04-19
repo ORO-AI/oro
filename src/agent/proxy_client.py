@@ -19,6 +19,58 @@ DEFAULT_RETRY_DELAY = 2
 DEFAULT_RATE_LIMIT_RETRY_DELAY = 5
 
 
+class RequestLog:
+    """Thread-safe log of all proxy HTTP calls.
+
+    Appends one JSONL entry per request so data survives process kills.
+    """
+
+    def __init__(self, log_file: Optional[str] = None):
+        self._lock = threading.Lock()
+        self._log_file = log_file
+
+    def record(
+        self,
+        method: str,
+        path: str,
+        params: Optional[Dict] = None,
+        json_data: Optional[Dict] = None,
+        status_code: Optional[int] = None,
+        response_body: object = None,
+        duration_ms: float = 0.0,
+    ) -> None:
+        if not self._log_file:
+            return
+        entry = {
+            "method": method,
+            "path": path,
+            "timestamp": int(time.time() * 1000),
+            "duration_ms": round(duration_ms, 1),
+            "status_code": status_code,
+        }
+        if params:
+            entry["params"] = {k: v for k, v in params.items() if v is not None}
+        if json_data:
+            if "/inference/" in path:
+                # Omit large message arrays from inference requests
+                entry["json_data"] = {k: v for k, v in json_data.items() if k != "messages"}
+            else:
+                entry["json_data"] = json_data
+        if response_body is not None:
+            body_str = json.dumps(response_body, default=str)
+            if len(body_str) > 2000:
+                entry["response_truncated"] = True
+                entry["response_length"] = len(body_str)
+            else:
+                entry["response"] = response_body
+        with self._lock:
+            try:
+                with open(self._log_file, "a") as f:
+                    f.write(json.dumps(entry, default=str) + "\n")
+            except OSError:
+                pass
+
+
 class InferenceStats:
     """Thread-safe counter for inference call outcomes.
 
@@ -102,6 +154,8 @@ class ProxyClient:
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
         self.inference_stats = InferenceStats(stats_file)
+        request_log_file = os.environ.get("REQUEST_LOG_FILE")
+        self.request_log = RequestLog(request_log_file)
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -175,40 +229,29 @@ class ProxyClient:
         return None
 
     def get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
-        """
-        Make a GET request to the proxy.
-
-        Args:
-            path: API path
-            params: Query parameters
-
-        Returns:
-            JSON response as dict, or None if request failed
-        """
+        """Make a GET request to the proxy."""
         url = self._build_url(path, params)
 
         def make_request():
             return requests.get(url, timeout=self.timeout)
 
+        t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, f"GET {path}")
-        if response:
-            return response.json()
-        return None
+        duration_ms = (time.monotonic() - t0) * 1000
+        result = response.json() if response else None
+
+        self.request_log.record(
+            method="GET",
+            path=path,
+            params=params,
+            status_code=response.status_code if response else None,
+            response_body=result,
+            duration_ms=duration_ms,
+        )
+        return result
 
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
-        """
-        Make a POST request to the proxy.
-
-        Inference requests (paths containing "/inference/") automatically include
-        an Authorization header when an API key is available (CHUTES_ACCESS_TOKEN env var).
-
-        Args:
-            path: API path
-            json_data: JSON data to send in request body
-
-        Returns:
-            JSON response as dict, or None if request failed
-        """
+        """Make a POST request to the proxy."""
         url = self._build_url(path)
         headers: Dict[str, str] = {}
         if self.api_key and "/inference/" in path:
@@ -218,17 +261,30 @@ class ProxyClient:
             response = requests.post(
                 url, json=json_data, headers=headers, timeout=self.timeout
             )
-            # Don't retry on 404 (e.g., model not found)
             if response.status_code == 404:
                 logger.error(f"Resource not found: {path}")
             return response
 
+        t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, f"POST {path}")
+        duration_ms = (time.monotonic() - t0) * 1000
+
         if "/inference/" in path:
             if response and response.status_code == 200:
                 self.inference_stats.record_success()
             else:
                 self.inference_stats.record_failure()
+
+        result = None
         if response and response.status_code == 200:
-            return response.json()
-        return None
+            result = response.json()
+
+        self.request_log.record(
+            method="POST",
+            path=path,
+            json_data=json_data,
+            status_code=response.status_code if response else None,
+            response_body=result,
+            duration_ms=duration_ms,
+        )
+        return result
