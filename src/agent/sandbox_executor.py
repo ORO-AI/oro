@@ -324,9 +324,26 @@ def _format_single_result(result: ExecutionResult) -> Optional[str]:
         if result.problem_id and "problem_id" not in step.get("extra_info", {}):
             step.setdefault("extra_info", {})["problem_id"] = result.problem_id
 
-    # Attach proxy call log to first step's extra_info for complete observability
+    # Distribute proxy calls across steps by timestamp approximation.
+    # Calls before the first step go to step 0; calls between step N and N+1
+    # go to step N.
     if result.proxy_calls and dialogue_steps:
-        dialogue_steps[0].setdefault("extra_info", {})["proxy_calls"] = result.proxy_calls
+        step_timestamps = [
+            s.get("extra_info", {}).get("timestamp", 0) for s in dialogue_steps
+        ]
+        # Bucket each call into the latest step whose timestamp <= call timestamp
+        buckets: Dict[int, List[Dict]] = {}
+        for call in result.proxy_calls:
+            call_ts = call.get("timestamp", 0)
+            target = 0
+            for i, st in enumerate(step_timestamps):
+                if st <= call_ts:
+                    target = i
+                else:
+                    break
+            buckets.setdefault(target, []).append(call)
+        for idx, calls in buckets.items():
+            dialogue_steps[idx].setdefault("extra_info", {})["proxy_calls"] = calls
 
     return json.dumps(dialogue_steps)
 
