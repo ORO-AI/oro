@@ -58,7 +58,7 @@ def _select_models_by_utilization() -> list[str]:
         scored.sort()
         result = [model for _, model in scored]
         logger.info(
-            f"Judge model order by utilization: "
+            "Judge model order by utilization: "
             + ", ".join(f"{m}({util_by_name.get(m, -1):.0%})" for m in result)
         )
         return result
