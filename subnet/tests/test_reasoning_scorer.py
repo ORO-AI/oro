@@ -4,7 +4,6 @@ from unittest.mock import patch, MagicMock
 
 from reasoning_scorer import (
     _format_proxy_call,
-    _get_completion_tokens,
     _summarize_proxy_calls,
     score_reasoning_quality,
     format_trajectory_for_judge,
