@@ -16,6 +16,7 @@ EXPOSE 5632
 # Set environment variables
 ENV HOST=0.0.0.0
 ENV PORT=5632
+ENV JAVA_OPTS="-Xmx4g -Xms2g"
 
 # Use entrypoint script
 ENTRYPOINT ["/app/entrypoint.sh"]
