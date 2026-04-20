@@ -23,8 +23,7 @@ logger = logging.getLogger(__name__)
 PROXY_URL = "http://proxy:80"
 
 # Chutes TEE models (must use -TEE suffix for proxy allowlist).
-# Ordered by 7-day run volume (highest availability first).
-# If one is rate-limited (429), rotate to the next.
+# Used as fallback when utilization API is unavailable.
 JUDGE_MODELS = [
     "Qwen/Qwen3-32B-TEE",
     "MiniMaxAI/MiniMax-M2.5-TEE",
@@ -32,6 +31,40 @@ JUDGE_MODELS = [
     "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE",
     "deepseek-ai/DeepSeek-V3-0324-TEE",
 ]
+
+CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
+CHUTES_UTILIZATION_TIMEOUT = 5
+
+
+def _select_models_by_utilization() -> list[str]:
+    """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
+
+    Returns models sorted by utilization_current (ascending = least loaded first).
+    Falls back to the static JUDGE_MODELS list on any failure.
+    """
+    try:
+        resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
+        if resp.status_code != 200:
+            return list(JUDGE_MODELS)
+
+        entries = resp.json()
+        util_by_name = {e["name"]: e.get("utilization_current", 1.0) for e in entries}
+
+        scored = []
+        for model in JUDGE_MODELS:
+            util = util_by_name.get(model, 1.0)
+            scored.append((util, model))
+
+        scored.sort()
+        result = [model for _, model in scored]
+        logger.info(
+            "Judge model order by utilization: "
+            + ", ".join(f"{m}({util_by_name.get(m, -1):.0%})" for m in result)
+        )
+        return result
+    except Exception as e:
+        logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
+        return list(JUDGE_MODELS)
 
 JUDGE_SYSTEM_PROMPT = """\
 You are an evaluator scoring whether a shopping agent uses genuine LLM reasoning or just pattern matching.
@@ -293,11 +326,12 @@ def score_reasoning_quality(
     url = f"{proxy_url.rstrip('/')}/inference/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}"}
 
+    models = _select_models_by_utilization()
     model_idx = 0
     inference_failed = 0
     inference_total = 0
     for attempt in range(max_retries):
-        model = JUDGE_MODELS[model_idx % len(JUDGE_MODELS)]
+        model = models[model_idx % len(models)]
         inference_total += 1
 
         try:
