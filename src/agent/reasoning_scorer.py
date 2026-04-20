@@ -88,6 +88,17 @@ MAX_PROXY_PARAM_CHARS = 200
 MAX_PROXY_CALLS_SHOWN = 30
 
 
+def _get_completion_tokens(call: dict[str, Any]) -> Any:
+    """Extract completion_tokens from a proxy call's response, or None."""
+    response = call.get("response")
+    if not isinstance(response, dict):
+        return None
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    return usage.get("completion_tokens")
+
+
 def _format_proxy_call(call: dict[str, Any]) -> str:
     """Format a single proxy call into a readable line."""
     method = call.get("method", "?")
@@ -95,7 +106,6 @@ def _format_proxy_call(call: dict[str, Any]) -> str:
     status = call.get("status_code", "?")
     duration = call.get("duration_ms", 0)
 
-    # Include search params for context
     params = call.get("params")
     param_str = ""
     if params:
@@ -103,20 +113,13 @@ def _format_proxy_call(call: dict[str, Any]) -> str:
         if len(param_str) > MAX_PROXY_PARAM_CHARS:
             param_str = param_str[:MAX_PROXY_PARAM_CHARS] + "..."
 
-    # Include model name and token usage for inference calls
     json_data = call.get("json_data")
     model_str = ""
     if json_data and isinstance(json_data, dict) and json_data.get("model"):
         model_str = f" model={json_data['model']}"
 
-    tokens_str = ""
-    response = call.get("response")
-    if response and isinstance(response, dict):
-        usage = response.get("usage")
-        if usage and isinstance(usage, dict):
-            comp = usage.get("completion_tokens")
-            if comp is not None:
-                tokens_str = f" tokens={comp}"
+    comp = _get_completion_tokens(call)
+    tokens_str = f" tokens={comp}" if comp is not None else ""
 
     return f"  {method} {path}{param_str}{model_str}{tokens_str} → {status} ({duration:.0f}ms)"
 
@@ -147,11 +150,7 @@ def _summarize_proxy_calls(proxy_calls: list[dict[str, Any]]) -> str:
             product_views += 1
         elif "/inference/" in path:
             inference_calls += 1
-            response = call.get("response")
-            if response and isinstance(response, dict):
-                usage = response.get("usage")
-                if usage and isinstance(usage, dict):
-                    total_completion_tokens += usage.get("completion_tokens", 0)
+            total_completion_tokens += _get_completion_tokens(call) or 0
 
     token_str = f", {total_completion_tokens} tokens generated" if total_completion_tokens else ""
     lines = [
