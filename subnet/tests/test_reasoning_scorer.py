@@ -193,6 +193,18 @@ class TestFormatProxyCall:
         assert "POST /inference/chat/completions" in result
         assert "model=deepseek-ai/DeepSeek-V3.2-TEE" in result
 
+    def test_inference_with_token_count(self):
+        call = {
+            "method": "POST",
+            "path": "/inference/chat/completions",
+            "json_data": {"model": "test-model"},
+            "status_code": 200,
+            "duration_ms": 5000,
+            "response": {"usage": {"completion_tokens": 142, "prompt_tokens": 800}},
+        }
+        result = _format_proxy_call(call)
+        assert "tokens=142" in result
+
     def test_truncates_long_params(self):
         call = {
             "method": "GET",
@@ -215,12 +227,14 @@ class TestSummarizeProxyCalls:
             {"method": "GET", "path": "/search/find_product", "params": {"q": "mouse"}, "status_code": 200, "duration_ms": 100},
             {"method": "GET", "path": "/search/find_product", "params": {"q": "keyboard"}, "status_code": 200, "duration_ms": 150},
             {"method": "GET", "path": "/search/view_product_information", "params": {"product_ids": "123"}, "status_code": 200, "duration_ms": 50},
-            {"method": "POST", "path": "/inference/chat/completions", "json_data": {"model": "test-model"}, "status_code": 200, "duration_ms": 2000},
+            {"method": "POST", "path": "/inference/chat/completions", "json_data": {"model": "test-model"}, "status_code": 200, "duration_ms": 2000,
+             "response": {"usage": {"completion_tokens": 95, "prompt_tokens": 500}}},
         ]
         result = _summarize_proxy_calls(calls)
         assert "2 search" in result
         assert "1 product views" in result
         assert "1 inference" in result
+        assert "95 tokens generated" in result
         assert "Call sequence:" in result
         assert "mouse" in result
         assert "keyboard" in result
