@@ -18,7 +18,7 @@ echo "Java version: $(java -version 2>&1 | head -1)" >&2
 
 # Set JVM memory options for pyserini/Lucene (default: 8GB heap, adjust as needed)
 # Use JAVA_OPTS environment variable if set, otherwise use defaults
-export JAVA_OPTS="${JAVA_OPTS:--Xmx8g -Xms4g}"
+export JAVA_OPTS="${JAVA_OPTS:--Xmx4g -Xms2g}"
 
 echo "JVM Options: $JAVA_OPTS" >&2
 
