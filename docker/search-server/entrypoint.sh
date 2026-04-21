@@ -16,9 +16,8 @@ if ! command -v java &> /dev/null; then
 fi
 echo "Java version: $(java -version 2>&1 | head -1)" >&2
 
-# Set JVM memory options for pyserini/Lucene (default: 8GB heap, adjust as needed)
-# Use JAVA_OPTS environment variable if set, otherwise use defaults
-export JAVA_OPTS="${JAVA_OPTS:--Xmx4g -Xms2g}"
+# JAVA_OPTS default is set in the Dockerfile ENV.
+# Override at runtime via docker-compose or -e JAVA_OPTS="..." if needed.
 
 echo "JVM Options: $JAVA_OPTS" >&2
 
