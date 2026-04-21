@@ -93,7 +93,7 @@ class Validator:
         parser.add_argument(
             "--sandbox-max-workers",
             type=int,
-            default=int(os.environ.get("SANDBOX_MAX_WORKERS", "10")),
+            default=int(os.environ.get("SANDBOX_MAX_WORKERS", "15")),
             help="Number of parallel problem workers in sandbox (env: SANDBOX_MAX_WORKERS).",
         )
         parser.add_argument(
