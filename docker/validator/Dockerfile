@@ -8,23 +8,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv for deterministic dependency resolution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-# Install CPU-only PyTorch first (avoids pulling ~2GB CUDA version)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Install all dependencies from lockfile — fully deterministic builds.
+# The lockfile pins every transitive dependency so fresh builds always
+# get identical packages regardless of upstream releases.
+COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Layer 1: Heavy, stable dependencies (bittensor, sentence-transformers, etc.)
-# This layer rarely changes and stays cached across most builds.
-COPY docker/validator/requirements-base.txt /app/requirements-base.txt
-RUN pip install --no-cache-dir -r /app/requirements-base.txt
-
-# Layer 2: Pre-cache SentenceTransformer model (avoids runtime download)
+# Pre-cache SentenceTransformer model (avoids runtime download)
 ARG HF_TOKEN=""
-RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')"
-
-# Layer 3: Fast-changing dependencies (oro-sdk updates frequently)
-COPY docker/validator/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')"
 
 # Copy validator code
 COPY subnet/ /app/subnet/
@@ -43,4 +40,4 @@ COPY data/ /app/data/
 
 ENV PYTHONPATH=/app
 
-ENTRYPOINT ["python", "-m", "subnet.validator.main"]
+ENTRYPOINT ["uv", "run", "python", "-m", "subnet.validator.main"]
