@@ -137,3 +137,26 @@ jobs:
             -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ needs.determine-tag.outputs.tag }} \
             -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest \
             $(printf '${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@sha256:%s ' $(ls /tmp/digests/))
+
+  smoke-test:
+    needs: [determine-tag, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Smoke test validator image
+        run: |
+          docker run --rm ${{ env.IMAGE_PREFIX }}/validator:${{ needs.determine-tag.outputs.tag }} \
+            python -c "from subnet.validator.main import Validator; print('Validator import OK')"
+
+      - name: Smoke test sandbox image
+        run: |
+          docker run --rm ${{ env.IMAGE_PREFIX }}/sandbox:${{ needs.determine-tag.outputs.tag }} \
+            python -c "from src.agent.agent_interface import AgentInterface; print('Sandbox import OK')"
