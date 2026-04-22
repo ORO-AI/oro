@@ -32,14 +32,17 @@ jobs:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
     
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+
     - name: Install test dependencies
       run: |
         python -m pip install --upgrade pip
         pip install pytest-cov requests pydantic
         # Validator tests need bittensor-wallet and oro-sdk; install from
-        # the validator requirements so the test suite exercises the same
+        # the validator lockfile so the test suite exercises the same
         # package versions the validator ships with.
-        pip install -r docker/validator/requirements-base.txt -r docker/validator/requirements.txt
+        uv pip install --system --project docker/validator/ -r docker/validator/pyproject.toml
 
     - name: Run tests with pytest and coverage
       run: |
