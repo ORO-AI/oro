@@ -360,6 +360,24 @@ class TestBackendClientErrorHandling:
             assert exc_info.value.is_transient
             assert exc_info.value.status_code is None
 
+    def test_sdk_parse_error_surfaces_actionable_message(self, mock_wallet):
+        """SDK response parsing failures (e.g. KeyError('loc')) raise a
+        descriptive BackendError instead of bubbling up an opaque KeyError.
+        """
+        client = BackendClient("https://api.example.com", mock_wallet)
+
+        with patch(
+            "validator.backend_client.claim_work.sync_detailed",
+            side_effect=KeyError("loc"),
+        ):
+            with pytest.raises(BackendError) as exc_info:
+                client.claim_work()
+
+            msg = str(exc_info.value)
+            assert "Response parsing failed" in msg
+            assert "KeyError" in msg
+            assert "loc" in msg
+
     def test_auth_error_detection(self, mock_wallet):
         """401/403 errors are detected as auth errors."""
         client = BackendClient("https://api.example.com", mock_wallet)
