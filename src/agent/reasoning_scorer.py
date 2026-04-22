@@ -272,9 +272,12 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
     if not response_text:
         return {"score": 0.0, "explanation": ""}
 
-    # Try parsing the whole text as JSON first (no <think> block)
+    # Try parsing the whole text as JSON first (no <think> block).
+    # strict=False tolerates control characters (newlines, tabs) inside
+    # JSON string values — the LLM judge sometimes embeds product IDs
+    # or data that contain literal newlines.
     try:
-        data = json.loads(response_text.strip())
+        data = json.loads(response_text.strip(), strict=False)
         if isinstance(data, dict) and "reasoning_quality" in data:
             score = max(0.0, min(1.0, float(data["reasoning_quality"])))
             explanation = data.get("explanation", "")
@@ -284,15 +287,35 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
 
     # Extract the last JSON object from the response (after </think> or anywhere)
     # This handles: "<think>...score should be 0.9...</think>\n{"reasoning_quality": 0.9, ...}"
-    json_matches = list(re.finditer(r'\{[^{}]*"reasoning_quality"\s*:\s*[\d.]+[^{}]*\}', response_text))
+    json_matches = list(re.finditer(r'\{[^{}]*"reasoning_quality"\s*:\s*[\d.]+[^{}]*\}', response_text, re.DOTALL))
     if json_matches:
         # Use the LAST match (the actual output, not something quoted in <think>)
         try:
-            data = json.loads(json_matches[-1].group())
+            data = json.loads(json_matches[-1].group(), strict=False)
             score = max(0.0, min(1.0, float(data["reasoning_quality"])))
             # Use the clean explanation from the JSON, not the raw <think> block
             explanation = data.get("explanation", "")
             return {"score": score, "explanation": explanation}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            pass
+
+    # Last resort: try to repair truncated JSON by closing open strings/braces.
+    # The LLM response may be cut off mid-explanation by max_tokens limits.
+    if '"reasoning_quality"' in response_text:
+        repaired = response_text.rstrip()
+        # Close any unterminated string
+        quote_count = repaired.count('"') - repaired.count('\\"')
+        if quote_count % 2 == 1:
+            repaired += '"'
+        # Close the object
+        if not repaired.rstrip().endswith('}'):
+            repaired += '}'
+        try:
+            data = json.loads(repaired, strict=False)
+            if isinstance(data, dict) and "reasoning_quality" in data:
+                score = max(0.0, min(1.0, float(data["reasoning_quality"])))
+                explanation = data.get("explanation", "")
+                return {"score": score, "explanation": explanation}
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
