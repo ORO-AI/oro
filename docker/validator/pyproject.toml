@@ -1,0 +1,26 @@
+[project]
+name = "oro-validator"
+version = "0.0.0"
+description = "ORO subnet validator dependencies"
+requires-python = ">=3.10"
+dependencies = [
+    "async-substrate-interface==1.6.4",
+    "bittensor==10.1.0",
+    "bittensor-wallet==4.0.1",
+    "oro-sdk==1.0.36",
+    "requests==2.32.5",
+    "sentence-transformers==5.3.0",
+    "torch",
+    "ujson==5.12.0",
+]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
