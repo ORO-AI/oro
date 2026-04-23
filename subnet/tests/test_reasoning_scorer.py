@@ -220,6 +220,27 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
+    def test_handles_null_content_from_chutes(self, mock_post, _mock_sleep):
+        """Chutes sometimes returns {'choices':[{'message':{'content':null}}]}.
+        We must coerce to '' so the unparseable-200 retry path triggers
+        without crashing on content[:200]."""
+        mock_post.side_effect = [
+            # First judge returns 200 OK with content=null (the shape that crashed pre-hotfix)
+            MagicMock(status_code=200, json=lambda: {"choices": [{"message": {"content": None}}]}),
+            MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": '{"reasoning_quality": 0.6, "explanation": "ok"}'}}]
+                },
+            ),
+        ]
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+        assert result["score"] == 0.6
+        assert result["inference_failed"] == 1
+        assert result["inference_total"] == 2
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
     def test_returns_zero_when_all_retries_unparseable(self, mock_post, _mock_sleep):
         """If every rotated judge returns an unparseable 200, fall through
         to the max-retries exit path with score=0 and inference_failed
