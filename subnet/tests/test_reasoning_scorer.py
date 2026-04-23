@@ -4,11 +4,14 @@ from unittest.mock import patch, MagicMock
 
 from reasoning_scorer import (
     _format_proxy_call,
+    _select_models_by_utilization,
     _summarize_proxy_calls,
     score_reasoning_quality,
     format_trajectory_for_judge,
     parse_judge_response,
+    FALLBACK_JUDGE_MODELS,
     JUDGE_MODELS,
+    PRIMARY_JUDGE_MODEL,
 )
 
 
@@ -162,8 +165,59 @@ class TestScoreReasoningQuality:
         result = score_reasoning_quality([], api_key="test-key")
         assert result["score"] == 0.0
 
-    def test_judge_models_is_nonempty(self):
-        assert len(JUDGE_MODELS) >= 3
+    def test_judge_models_has_primary_and_fallbacks(self):
+        assert JUDGE_MODELS[0] == PRIMARY_JUDGE_MODEL
+        assert JUDGE_MODELS[1:] == FALLBACK_JUDGE_MODELS
+        assert len(FALLBACK_JUDGE_MODELS) >= 1
+
+
+class TestSelectModelsByUtilization:
+    """Tests for _select_models_by_utilization routing logic."""
+
+    def _mock_response(self, entries):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = entries
+        return resp
+
+    def test_primary_first_when_not_throttled(self):
+        entries = [
+            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.3, "rate_limit_ratio_5m": 0.0},
+            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.5, "rate_limit_ratio_5m": 0.0},
+            {"name": FALLBACK_JUDGE_MODELS[1], "utilization_current": 0.9, "rate_limit_ratio_5m": 0.0},
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        assert result[0] == PRIMARY_JUDGE_MODEL
+        # Fallbacks ordered by utilization (lowest first)
+        assert result[1:] == [FALLBACK_JUDGE_MODELS[0], FALLBACK_JUDGE_MODELS[1]]
+
+    def test_fallback_first_when_primary_throttled(self):
+        entries = [
+            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.4, "rate_limit_ratio_5m": 0.8},
+            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.3, "rate_limit_ratio_5m": 0.0},
+            {"name": FALLBACK_JUDGE_MODELS[1], "utilization_current": 0.1, "rate_limit_ratio_5m": 0.0},
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        # Least-loaded fallback first, primary pushed to last resort
+        assert result[0] == FALLBACK_JUDGE_MODELS[1]
+        assert result[-1] == PRIMARY_JUDGE_MODEL
+
+    def test_primary_throttle_at_threshold_stays_primary(self):
+        # Boundary: exactly 0.5 should NOT demote the primary
+        entries = [
+            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.4, "rate_limit_ratio_5m": 0.5},
+            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.1, "rate_limit_ratio_5m": 0.0},
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        assert result[0] == PRIMARY_JUDGE_MODEL
+
+    def test_api_failure_returns_static_list(self):
+        with patch("reasoning_scorer.requests.get", side_effect=Exception("boom")):
+            result = _select_models_by_utilization()
+        assert result == JUDGE_MODELS
 
 
 class TestFormatProxyCall:

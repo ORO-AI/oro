@@ -22,24 +22,39 @@ logger = logging.getLogger(__name__)
 
 PROXY_URL = "http://proxy:80"
 
-# Chutes TEE models (must use -TEE suffix for proxy allowlist).
-# Used as fallback when utilization API is unavailable.
-JUDGE_MODELS = [
-    "Qwen/Qwen3-32B-TEE",
-    "MiniMaxAI/MiniMax-M2.5-TEE",
-    "deepseek-ai/DeepSeek-V3.2-TEE",
-    "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE",
+# Chutes TEE judges (must use -TEE suffix for proxy allowlist).
+#
+# Qwen3-32B is the primary judge; the DeepSeek variants are fallbacks
+# used only when the primary is rate-limiting above
+# PRIMARY_THROTTLE_THRESHOLD. MiniMax-M2.5 and Qwen3-235B-Instruct were
+# removed after per-agent measurements showed they scored identical
+# trajectories ~29 and ~25 points lower than Qwen3-32B respectively —
+# a systematic bias large enough to swing leaderboard ranking based on
+# which judge a run happened to route to.
+PRIMARY_JUDGE_MODEL = "Qwen/Qwen3-32B-TEE"
+FALLBACK_JUDGE_MODELS = [
     "deepseek-ai/DeepSeek-V3-0324-TEE",
+    "deepseek-ai/DeepSeek-V3.2-TEE",
 ]
+JUDGE_MODELS = [PRIMARY_JUDGE_MODEL, *FALLBACK_JUDGE_MODELS]
+
+# If the primary's 5-minute rate-limit ratio exceeds this fraction,
+# route to the least-loaded fallback first.
+PRIMARY_THROTTLE_THRESHOLD = 0.5
 
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
 
 
 def _select_models_by_utilization() -> list[str]:
-    """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
+    """Return judge models in order of preference.
 
-    Returns models sorted by utilization_current (ascending = least loaded first).
+    Default: primary first, then fallbacks ordered by current utilization
+    (least-loaded first). If the primary's 5-minute rate-limit ratio
+    exceeds PRIMARY_THROTTLE_THRESHOLD, the least-loaded fallback is
+    promoted to first — the primary still stays in the list as a last
+    resort.
+
     Falls back to the static JUDGE_MODELS list on any failure.
     """
     try:
@@ -47,21 +62,36 @@ def _select_models_by_utilization() -> list[str]:
         if resp.status_code != 200:
             return list(JUDGE_MODELS)
 
-        entries = resp.json()
-        util_by_name = {e["name"]: e.get("utilization_current", 1.0) for e in entries}
+        by_name = {e["name"]: e for e in resp.json()}
 
-        scored = []
-        for model in JUDGE_MODELS:
-            util = util_by_name.get(model, 1.0)
-            scored.append((util, model))
-
-        scored.sort()
-        result = [model for _, model in scored]
-        logger.info(
-            "Judge model order by utilization: "
-            + ", ".join(f"{m}({util_by_name.get(m, -1):.0%})" for m in result)
+        fallbacks_scored = sorted(
+            (by_name.get(m, {}).get("utilization_current", 1.0), m)
+            for m in FALLBACK_JUDGE_MODELS
         )
-        return result
+        fallbacks = [m for _, m in fallbacks_scored]
+
+        primary_throttle = by_name.get(PRIMARY_JUDGE_MODEL, {}).get(
+            "rate_limit_ratio_5m", 0.0
+        )
+        if primary_throttle > PRIMARY_THROTTLE_THRESHOLD:
+            logger.warning(
+                f"Primary judge {PRIMARY_JUDGE_MODEL} rate-limiting at "
+                f"{primary_throttle:.0%} (> {PRIMARY_THROTTLE_THRESHOLD:.0%}); "
+                f"routing to fallback first"
+            )
+            return [*fallbacks, PRIMARY_JUDGE_MODEL]
+
+        primary_util = by_name.get(PRIMARY_JUDGE_MODEL, {}).get(
+            "utilization_current", -1
+        )
+        logger.info(
+            f"Judge order: {PRIMARY_JUDGE_MODEL}({primary_util:.0%}), fallbacks: "
+            + ", ".join(
+                f"{m}({by_name.get(m, {}).get('utilization_current', -1):.0%})"
+                for m in fallbacks
+            )
+        )
+        return [PRIMARY_JUDGE_MODEL, *fallbacks]
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
         return list(JUDGE_MODELS)
