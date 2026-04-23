@@ -64,15 +64,14 @@ def _select_models_by_utilization() -> list[str]:
 
         by_name = {e["name"]: e for e in resp.json()}
 
-        fallbacks_scored = sorted(
-            (by_name.get(m, {}).get("utilization_current", 1.0), m)
-            for m in FALLBACK_JUDGE_MODELS
-        )
-        fallbacks = [m for _, m in fallbacks_scored]
+        def field(model: str, key: str, default: float) -> float:
+            return by_name.get(model, {}).get(key, default)
 
-        primary_throttle = by_name.get(PRIMARY_JUDGE_MODEL, {}).get(
-            "rate_limit_ratio_5m", 0.0
-        )
+        fallbacks = [m for _, m in sorted(
+            (field(m, "utilization_current", 1.0), m) for m in FALLBACK_JUDGE_MODELS
+        )]
+
+        primary_throttle = field(PRIMARY_JUDGE_MODEL, "rate_limit_ratio_5m", 0.0)
         if primary_throttle > PRIMARY_THROTTLE_THRESHOLD:
             logger.warning(
                 f"Primary judge {PRIMARY_JUDGE_MODEL} rate-limiting at "
@@ -81,14 +80,12 @@ def _select_models_by_utilization() -> list[str]:
             )
             return [*fallbacks, PRIMARY_JUDGE_MODEL]
 
-        primary_util = by_name.get(PRIMARY_JUDGE_MODEL, {}).get(
-            "utilization_current", -1
-        )
         logger.info(
-            f"Judge order: {PRIMARY_JUDGE_MODEL}({primary_util:.0%}), fallbacks: "
+            f"Judge order: {PRIMARY_JUDGE_MODEL}"
+            f"({field(PRIMARY_JUDGE_MODEL, 'utilization_current', -1):.0%}), "
+            "fallbacks: "
             + ", ".join(
-                f"{m}({by_name.get(m, {}).get('utilization_current', -1):.0%})"
-                for m in fallbacks
+                f"{m}({field(m, 'utilization_current', -1):.0%})" for m in fallbacks
             )
         )
         return [PRIMARY_JUDGE_MODEL, *fallbacks]
