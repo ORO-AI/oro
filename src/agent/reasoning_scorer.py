@@ -404,7 +404,9 @@ def score_reasoning_quality(
             )
 
             if resp.status_code == 200:
-                content = resp.json()["choices"][0]["message"]["content"]
+                # Chutes sometimes returns {"choices":[{"message":{"content":null}}]}.
+                # Coerce to "" so downstream logging and parsing always see a str.
+                content = resp.json()["choices"][0]["message"]["content"] or ""
                 parsed = parse_judge_response(content)
                 if parsed["parsed"]:
                     logger.info(
