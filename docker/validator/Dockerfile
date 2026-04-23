@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for deterministic dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -21,7 +21,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Pre-cache SentenceTransformer model (avoids runtime download)
 ARG HF_TOKEN=""
-RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')"
+RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} .venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B')"
 
 # Copy validator code
 COPY subnet/ /app/subnet/
@@ -40,4 +40,4 @@ COPY data/ /app/data/
 
 ENV PYTHONPATH=/app
 
-ENTRYPOINT ["uv", "run", "python", "-m", "subnet.validator.main"]
+ENTRYPOINT [".venv/bin/python", "-m", "subnet.validator.main"]

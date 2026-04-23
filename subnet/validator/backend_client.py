@@ -9,6 +9,7 @@ Error Handling:
     error.status_code for HTTP status-based handling.
 """
 
+import logging
 from typing import Any, Callable, Optional
 from uuid import UUID
 
@@ -268,6 +269,21 @@ class BackendClient:
             raise BackendError(
                 f"{operation}: Unexpected status {e.status_code}{body}",
                 status_code=e.status_code,
+            )
+        except (KeyError, AttributeError, TypeError) as e:
+            # SDK response parsing failed. Happens when the response body doesn't
+            # match the expected schema (e.g., a proxy/WAF strips fields). The
+            # original KeyError('loc') becomes "'loc'" via str(e) higher up,
+            # which is unactionable — surface the parsing failure explicitly.
+            logging.exception(
+                "%s: SDK response parsing failed (%s). Check for proxy/WAF "
+                "interference or SDK/Backend version mismatch.",
+                operation, type(e).__name__,
+            )
+            raise BackendError(
+                f"{operation}: Response parsing failed ({type(e).__name__}: {e}). "
+                f"This usually indicates the Backend response was modified in "
+                f"transit (proxy/WAF) or the validator SDK is out of sync."
             )
 
     def claim_work(

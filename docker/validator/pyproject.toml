@@ -10,7 +10,7 @@ dependencies = [
     "oro-sdk==1.0.36",
     "requests==2.32.5",
     "sentence-transformers==5.3.0",
-    "torch",
+    "torch>=2.11.0,<3",
     "ujson==5.12.0",
 ]
 
