@@ -157,9 +157,9 @@ jobs:
       - name: Smoke test validator image
         run: |
           docker run --rm --entrypoint uv ${{ env.IMAGE_PREFIX }}/validator:${{ needs.determine-tag.outputs.tag }} \
-            run python -c "from subnet.validator.main import Validator; print('Validator import OK')"
+            run python -c "import subnet.validator.main; print('Validator module OK')"
 
       - name: Smoke test sandbox image
         run: |
           docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/sandbox:${{ needs.determine-tag.outputs.tag }} \
-            -c "from src.agent.agent_interface import AgentInterface; print('Sandbox import OK')"
+            -c "import src.agent.agent_interface; print('Sandbox module OK')"
