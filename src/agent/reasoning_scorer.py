@@ -107,9 +107,9 @@ Score 0.6-0.8 — GENUINE reasoning:
 
 Score 0.9-1.0 — STRONG reasoning:
 - All of the above, plus:
-- Agent compares options, applies constraints (budget, voucher rules, product requirements)
-- Explains trade-offs in product selection
+- Agent compares options and explains its selection rationale, citing specific data from proxy results
 - Thinking is consistent with the exact calls shown in proxy logs
+- Do NOT reward or penalize based on whether the final product satisfies query constraints — that is scored separately.
 
 Be generous with agents genuinely reasoning, even if imperfectly. Be harsh with fakers.
 
