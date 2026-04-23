@@ -220,6 +220,21 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
+    def test_returns_zero_when_all_retries_unparseable(self, mock_post, _mock_sleep):
+        """If every rotated judge returns an unparseable 200, fall through
+        to the max-retries exit path with score=0 and inference_failed
+        counting every attempt — don't surface one of the spurious 0s."""
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": ""}}]},
+        )
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key", max_retries=3)
+        assert result["score"] == 0.0
+        assert result["inference_failed"] == 3
+        assert result["inference_total"] == 3
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
     def test_keeps_legitimate_zero_without_retry(self, mock_post, _mock_sleep):
         """A well-formed JSON with reasoning_quality: 0 must be returned as-is
         — do NOT rotate models, that's a real regex-agent detection."""
