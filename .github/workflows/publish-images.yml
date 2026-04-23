@@ -151,12 +151,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # --entrypoint overrides the image's ENTRYPOINT. Without it, argv is
+      # appended to the validator's entrypoint and a live validator boots.
       - name: Smoke test validator image
         run: |
-          docker run --rm ${{ env.IMAGE_PREFIX }}/validator:${{ needs.determine-tag.outputs.tag }} \
-            python -c "from subnet.validator.main import Validator; print('Validator import OK')"
+          docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/validator:${{ needs.determine-tag.outputs.tag }} \
+            -c "from subnet.validator.main import Validator; print('Validator import OK')"
 
       - name: Smoke test sandbox image
         run: |
-          docker run --rm ${{ env.IMAGE_PREFIX }}/sandbox:${{ needs.determine-tag.outputs.tag }} \
-            python -c "from src.agent.agent_interface import AgentInterface; print('Sandbox import OK')"
+          docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/sandbox:${{ needs.determine-tag.outputs.tag }} \
+            -c "from src.agent.agent_interface import AgentInterface; print('Sandbox import OK')"
