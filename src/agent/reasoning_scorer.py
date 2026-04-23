@@ -276,11 +276,41 @@ def format_trajectory_for_judge(dialogue: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _extract_score(candidate: str) -> dict[str, Any] | None:
+    """Try to parse one JSON candidate into a score dict. Returns None if
+    the candidate doesn't parse as a dict containing 'reasoning_quality'."""
+    try:
+        # strict=False tolerates control characters (newlines, tabs) inside
+        # JSON string values — the judge sometimes embeds product IDs or
+        # data that contain literal newlines.
+        data = json.loads(candidate, strict=False)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not (isinstance(data, dict) and "reasoning_quality" in data):
+        return None
+    try:
+        score = max(0.0, min(1.0, float(data["reasoning_quality"])))
+    except (ValueError, TypeError):
+        return None
+    return {"score": score, "explanation": data.get("explanation", ""), "parsed": True}
+
+
+def _repair_truncated_json(response_text: str) -> str:
+    """Close any unterminated string or brace in a response that was
+    cut off mid-explanation by the judge's max_tokens limit."""
+    repaired = response_text.rstrip()
+    quote_count = repaired.count('"') - repaired.count('\\"')
+    if quote_count % 2 == 1:
+        repaired += '"'
+    if not repaired.endswith('}'):
+        repaired += '}'
+    return repaired
+
+
 def parse_judge_response(response_text: str) -> dict[str, Any]:
     """Parse the judge's response into a score and explanation.
 
     Handles responses with <think> blocks followed by JSON output.
-    The full response (think + JSON) is stored as the explanation.
 
     Returns:
         Dict with 'score' (float 0-1), 'explanation' (str), and
@@ -292,54 +322,33 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
     if not response_text:
         return {"score": 0.0, "explanation": "", "parsed": False}
 
-    # Try parsing the whole text as JSON first (no <think> block).
-    # strict=False tolerates control characters (newlines, tabs) inside
-    # JSON string values — the LLM judge sometimes embeds product IDs
-    # or data that contain literal newlines.
-    try:
-        data = json.loads(response_text.strip(), strict=False)
-        if isinstance(data, dict) and "reasoning_quality" in data:
-            score = max(0.0, min(1.0, float(data["reasoning_quality"])))
-            explanation = data.get("explanation", "")
-            return {"score": score, "explanation": explanation, "parsed": True}
-    except (json.JSONDecodeError, ValueError, TypeError):
-        pass
-
-    # Extract the last JSON object from the response (after </think> or anywhere)
-    # This handles: "<think>...score should be 0.9...</think>\n{"reasoning_quality": 0.9, ...}"
-    json_matches = list(re.finditer(r'\{[^{}]*"reasoning_quality"\s*:\s*[\d.]+[^{}]*\}', response_text, re.DOTALL))
+    # 1. Whole response as JSON (no <think> block)
+    # 2. Last "reasoning_quality" JSON object anywhere in text
+    #    (handles "<think>...</think>\n{...}" — last match is the real output)
+    # 3. Truncation repair — close open string/brace
+    json_matches = list(re.finditer(
+        r'\{[^{}]*"reasoning_quality"\s*:\s*[\d.]+[^{}]*\}',
+        response_text, re.DOTALL,
+    ))
+    candidates = [response_text.strip()]
     if json_matches:
-        # Use the LAST match (the actual output, not something quoted in <think>)
-        try:
-            data = json.loads(json_matches[-1].group(), strict=False)
-            score = max(0.0, min(1.0, float(data["reasoning_quality"])))
-            # Use the clean explanation from the JSON, not the raw <think> block
-            explanation = data.get("explanation", "")
-            return {"score": score, "explanation": explanation, "parsed": True}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
-
-    # Last resort: try to repair truncated JSON by closing open strings/braces.
-    # The LLM response may be cut off mid-explanation by max_tokens limits.
+        candidates.append(json_matches[-1].group())
     if '"reasoning_quality"' in response_text:
-        repaired = response_text.rstrip()
-        # Close any unterminated string
-        quote_count = repaired.count('"') - repaired.count('\\"')
-        if quote_count % 2 == 1:
-            repaired += '"'
-        # Close the object
-        if not repaired.rstrip().endswith('}'):
-            repaired += '}'
-        try:
-            data = json.loads(repaired, strict=False)
-            if isinstance(data, dict) and "reasoning_quality" in data:
-                score = max(0.0, min(1.0, float(data["reasoning_quality"])))
-                explanation = data.get("explanation", "")
-                return {"score": score, "explanation": explanation, "parsed": True}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            pass
+        candidates.append(_repair_truncated_json(response_text))
+
+    for candidate in candidates:
+        result = _extract_score(candidate)
+        if result is not None:
+            return result
 
     return {"score": 0.0, "explanation": response_text, "parsed": False}
+
+
+def _rotate_and_backoff(model_idx: int, attempt: int) -> int:
+    """Advance to the next judge model and sleep with exponential backoff
+    (capped at 10s) before the next retry. Returns the new model_idx."""
+    time.sleep(min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10))
+    return model_idx + 1
 
 
 def score_reasoning_quality(
@@ -397,32 +406,27 @@ def score_reasoning_quality(
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"]
                 parsed = parse_judge_response(content)
-                if not parsed["parsed"]:
-                    # 200 OK but response was empty/truncated/garbage — treat
-                    # as a transient judge failure so callers don't get a
-                    # spurious 0.0. Rotate model and retry.
-                    inference_failed += 1
-                    logger.warning(
-                        f"Judge response unparseable from {model} "
-                        f"(attempt {attempt + 1}/{max_retries}); "
-                        f"rotating model. content[:200]={content[:200]!r}"
+                if parsed["parsed"]:
+                    logger.info(
+                        f"Judge scored trajectory {parsed['score']:.2f} "
+                        f"(model={model}, attempt={attempt + 1})"
                     )
-                    model_idx += 1
-                    delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
-                    time.sleep(delay)
-                    continue
-
-                logger.info(
-                    f"Judge scored trajectory {parsed['score']:.2f} "
-                    f"(model={model}, attempt={attempt + 1})"
+                    return {
+                        **{k: parsed[k] for k in ("score", "explanation")},
+                        "model": model,
+                        "inference_failed": inference_failed,
+                        "inference_total": inference_total,
+                    }
+                # 200 OK with empty/unparseable body — transient judge failure,
+                # not score=0. Rotate and retry.
+                inference_failed += 1
+                logger.warning(
+                    f"Judge response unparseable from {model} "
+                    f"(attempt {attempt + 1}/{max_retries}); "
+                    f"content[:200]={content[:200]!r}"
                 )
-                return {
-                    "score": parsed["score"],
-                    "explanation": parsed["explanation"],
-                    "model": model,
-                    "inference_failed": inference_failed,
-                    "inference_total": inference_total,
-                }
+                model_idx = _rotate_and_backoff(model_idx, attempt)
+                continue
 
             inference_failed += 1
 
@@ -439,19 +443,12 @@ def score_reasoning_quality(
                     f"Judge call failed ({resp.status_code}) with {model}, "
                     f"rotating model (attempt {attempt + 1}/{max_retries})"
                 )
-                model_idx += 1
-                # Exponential backoff matching ProxyClient rate limit delay
-                delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
-                time.sleep(delay)
-                continue
-
-            logger.warning(
-                f"Judge call returned {resp.status_code} with {model}: "
-                f"{resp.text[:200]}"
-            )
-            model_idx += 1
-            delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
-            time.sleep(delay)
+            else:
+                logger.warning(
+                    f"Judge call returned {resp.status_code} with {model}: "
+                    f"{resp.text[:200]}"
+                )
+            model_idx = _rotate_and_backoff(model_idx, attempt)
             continue
 
         except requests.exceptions.Timeout:
