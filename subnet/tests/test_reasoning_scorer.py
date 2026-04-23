@@ -216,6 +216,32 @@ class TestFormatProxyCall:
         result = _format_proxy_call(call)
         assert "..." in result
 
+    def test_includes_returned_product_ids(self):
+        call = {
+            "method": "GET",
+            "path": "/search/find_product",
+            "params": {"q": "laptop"},
+            "status_code": 200,
+            "duration_ms": 100,
+            "result_product_ids": ["123", "456", "789"],
+        }
+        result = _format_proxy_call(call)
+        assert "returned product_ids: 123,456,789" in result
+
+    def test_truncates_long_returned_product_ids_list(self):
+        ids = [str(i) for i in range(30)]
+        call = {
+            "method": "GET",
+            "path": "/search/find_product",
+            "params": {"q": "laptop"},
+            "status_code": 200,
+            "duration_ms": 100,
+            "result_product_ids": ids,
+        }
+        result = _format_proxy_call(call)
+        assert "returned product_ids: 0,1,2" in result
+        assert "(+10 more)" in result
+
 
 class TestSummarizeProxyCalls:
     def test_empty_list(self):

@@ -225,6 +225,59 @@ class TestRequestLog:
         finally:
             os.unlink(path)
 
+    def test_find_product_preserves_ids_when_truncated(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            large_results = [
+                {"product_id": f"pid-{i}", "title": "x" * 300, "price": 100.0}
+                for i in range(10)
+            ]
+            log.record(
+                method="GET",
+                path="/search/find_product",
+                params={"q": "laptop"},
+                status_code=200,
+                response_body=large_results,
+                duration_ms=100.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["response_truncated"] is True
+            assert entry["result_product_ids"] == [f"pid-{i}" for i in range(10)]
+            assert "response" not in entry
+        finally:
+            os.unlink(path)
+
+    def test_view_product_truncation_does_not_add_result_ids(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            large_results = [
+                {"product_id": f"pid-{i}", "title": "x" * 300}
+                for i in range(10)
+            ]
+            log.record(
+                method="GET",
+                path="/search/view_product_information",
+                params={"product_ids": "pid-0"},
+                status_code=200,
+                response_body=large_results,
+                duration_ms=50.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["response_truncated"] is True
+            assert "result_product_ids" not in entry
+        finally:
+            os.unlink(path)
+
     def test_no_file_does_not_crash(self):
         log = RequestLog(log_file=None)
         log.record(method="GET", path="/search/find_product", status_code=200)
