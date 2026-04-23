@@ -61,6 +61,14 @@ class RequestLog:
             if len(body_str) > 2000:
                 entry["response_truncated"] = True
                 entry["response_length"] = len(body_str)
+                if "/search/find_product" in path and isinstance(response_body, list):
+                    # Preserve product IDs so the reasoning judge can verify the
+                    # agent's selections came from actual search results.
+                    entry["result_product_ids"] = [
+                        str(item["product_id"])
+                        for item in response_body
+                        if isinstance(item, dict) and "product_id" in item
+                    ]
             else:
                 entry["response"] = response_body
         with self._lock:

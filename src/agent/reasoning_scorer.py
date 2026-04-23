@@ -84,7 +84,7 @@ The key question: **Is this agent actually reasoning, or faking it?**
 2. **Token output**: Check `tokens=N` on inference calls. Real reasoning produces 50-300 tokens per call. Trivial or cached responses produce <10 tokens — this indicates the agent is calling inference as a decoy without actually using the output.
 3. **Call ordering**: Real agents interleave inference and search (think → search → think → search → decide). Regex agents do search → search → recommend with no inference between.
 4. **Search query diversity**: Real agents adapt search queries based on results (refining terms, trying alternatives). Regex agents use hardcoded query templates.
-5. **Thinking-to-action consistency**: Does the thinking text describe what the proxy calls actually show? If thinking says "I will search for X" but proxy logs show a different query (or no search at all), the trajectory is fabricated.
+5. **Thinking-to-action consistency**: Does the agent actually make the calls its thinking describes? If thinking claims "I will search for X" but no such search appears in proxy logs, the trajectory is fabricated. Scope: evaluate ONLY whether described actions occurred — do NOT judge whether the final product satisfies query constraints (price, brand, attributes, availability). Constraint matching is scored separately.
 6. **Duration plausibility**: LLM inference typically takes 3-30s. Sub-second inference calls are suspicious (trivial prompts or cached responses).
 
 ## Scoring
@@ -107,9 +107,9 @@ Score 0.6-0.8 — GENUINE reasoning:
 
 Score 0.9-1.0 — STRONG reasoning:
 - All of the above, plus:
-- Agent compares options, applies constraints (budget, voucher rules, product requirements)
-- Explains trade-offs in product selection
+- Agent compares options and explains its selection rationale, citing specific data from proxy results
 - Thinking is consistent with the exact calls shown in proxy logs
+- Do NOT reward or penalize based on whether the final product satisfies query constraints — that is scored separately.
 
 Be generous with agents genuinely reasoning, even if imperfectly. Be harsh with fakers.
 
@@ -121,6 +121,7 @@ MAX_THINK_CHARS = 1000
 MAX_RESULT_CHARS = 300
 MAX_PROXY_PARAM_CHARS = 200
 MAX_PROXY_CALLS_SHOWN = 30
+MAX_SEARCH_IDS_SHOWN = 20
 
 
 def _get_completion_tokens(call: dict[str, Any]) -> Any:
@@ -156,7 +157,14 @@ def _format_proxy_call(call: dict[str, Any]) -> str:
     comp = _get_completion_tokens(call)
     tokens_str = f" tokens={comp}" if comp is not None else ""
 
-    return f"  {method} {path}{param_str}{model_str}{tokens_str} → {status} ({duration:.0f}ms)"
+    line = f"  {method} {path}{param_str}{model_str}{tokens_str} → {status} ({duration:.0f}ms)"
+
+    result_ids = call.get("result_product_ids")
+    if isinstance(result_ids, list) and result_ids:
+        shown = result_ids[:MAX_SEARCH_IDS_SHOWN]
+        suffix = f" (+{len(result_ids) - len(shown)} more)" if len(result_ids) > len(shown) else ""
+        line += f"\n    returned product_ids: {','.join(shown)}{suffix}"
+    return line
 
 
 def _summarize_proxy_calls(proxy_calls: list[dict[str, Any]]) -> str:
