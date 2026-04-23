@@ -105,8 +105,48 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  smoke-test:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download validator digest (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-validator-linux-amd64
+          path: /tmp/digests/validator
+
+      - name: Download sandbox digest (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-sandbox-linux-amd64
+          path: /tmp/digests/sandbox
+
+      # Override ENTRYPOINT so argv runs our import check instead of booting
+      # a live validator. Validator deps live in a uv-managed venv, so we
+      # enter through `uv run` rather than the system python.
+      - name: Smoke test validator image
+        run: |
+          digest=$(ls /tmp/digests/validator | head -1)
+          docker run --rm --entrypoint uv ${{ env.IMAGE_PREFIX }}/validator@sha256:$digest \
+            run python -c "import subnet.validator.main; print('Validator module OK')"
+
+      - name: Smoke test sandbox image
+        run: |
+          digest=$(ls /tmp/digests/sandbox | head -1)
+          docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/sandbox@sha256:$digest \
+            -c "import src.agent.agent_interface; print('Sandbox module OK')"
+
   merge:
-    needs: [determine-tag, build]
+    needs: [determine-tag, smoke-test]
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -137,29 +177,3 @@ jobs:
             -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ needs.determine-tag.outputs.tag }} \
             -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest \
             $(printf '${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@sha256:%s ' $(ls /tmp/digests/))
-
-  smoke-test:
-    needs: [determine-tag, merge]
-    runs-on: ubuntu-latest
-    permissions:
-      packages: read
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Override ENTRYPOINT so argv runs our import check instead of booting
-      # a live validator. Validator deps live in a uv-managed venv, so we
-      # enter through `uv run` rather than the system python.
-      - name: Smoke test validator image
-        run: |
-          docker run --rm --entrypoint uv ${{ env.IMAGE_PREFIX }}/validator:${{ needs.determine-tag.outputs.tag }} \
-            run python -c "import subnet.validator.main; print('Validator module OK')"
-
-      - name: Smoke test sandbox image
-        run: |
-          docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/sandbox:${{ needs.determine-tag.outputs.tag }} \
-            -c "import src.agent.agent_interface; print('Sandbox module OK')"
