@@ -283,10 +283,14 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
     The full response (think + JSON) is stored as the explanation.
 
     Returns:
-        Dict with 'score' (float 0-1) and 'explanation' (str).
+        Dict with 'score' (float 0-1), 'explanation' (str), and
+        'parsed' (bool). When parsed is False the 0.0 score is a fallback
+        for an unparseable response — callers should treat this as a
+        transient judge failure and retry with another model, not as a
+        legitimate "no reasoning" verdict.
     """
     if not response_text:
-        return {"score": 0.0, "explanation": ""}
+        return {"score": 0.0, "explanation": "", "parsed": False}
 
     # Try parsing the whole text as JSON first (no <think> block).
     # strict=False tolerates control characters (newlines, tabs) inside
@@ -297,7 +301,7 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
         if isinstance(data, dict) and "reasoning_quality" in data:
             score = max(0.0, min(1.0, float(data["reasoning_quality"])))
             explanation = data.get("explanation", "")
-            return {"score": score, "explanation": explanation}
+            return {"score": score, "explanation": explanation, "parsed": True}
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
 
@@ -311,7 +315,7 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
             score = max(0.0, min(1.0, float(data["reasoning_quality"])))
             # Use the clean explanation from the JSON, not the raw <think> block
             explanation = data.get("explanation", "")
-            return {"score": score, "explanation": explanation}
+            return {"score": score, "explanation": explanation, "parsed": True}
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
@@ -331,11 +335,11 @@ def parse_judge_response(response_text: str) -> dict[str, Any]:
             if isinstance(data, dict) and "reasoning_quality" in data:
                 score = max(0.0, min(1.0, float(data["reasoning_quality"])))
                 explanation = data.get("explanation", "")
-                return {"score": score, "explanation": explanation}
+                return {"score": score, "explanation": explanation, "parsed": True}
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
-    return {"score": 0.0, "explanation": response_text}
+    return {"score": 0.0, "explanation": response_text, "parsed": False}
 
 
 def score_reasoning_quality(
@@ -393,12 +397,28 @@ def score_reasoning_quality(
             if resp.status_code == 200:
                 content = resp.json()["choices"][0]["message"]["content"]
                 parsed = parse_judge_response(content)
+                if not parsed["parsed"]:
+                    # 200 OK but response was empty/truncated/garbage — treat
+                    # as a transient judge failure so callers don't get a
+                    # spurious 0.0. Rotate model and retry.
+                    inference_failed += 1
+                    logger.warning(
+                        f"Judge response unparseable from {model} "
+                        f"(attempt {attempt + 1}/{max_retries}); "
+                        f"rotating model. content[:200]={content[:200]!r}"
+                    )
+                    model_idx += 1
+                    delay = min(RATE_LIMIT_RETRY_DELAY * (2 ** attempt), 10)
+                    time.sleep(delay)
+                    continue
+
                 logger.info(
                     f"Judge scored trajectory {parsed['score']:.2f} "
                     f"(model={model}, attempt={attempt + 1})"
                 )
                 return {
-                    **parsed,
+                    "score": parsed["score"],
+                    "explanation": parsed["explanation"],
                     "model": model,
                     "inference_failed": inference_failed,
                     "inference_total": inference_total,

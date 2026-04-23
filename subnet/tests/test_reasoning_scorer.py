@@ -97,27 +97,41 @@ class TestParseJudgeResponse:
         resp = parse_judge_response('{"reasoning_quality": 0.85, "explanation": "Good analysis"}')
         assert resp["score"] == 0.85
         assert resp["explanation"] == "Good analysis"
+        assert resp["parsed"] is True
 
     def test_parses_json_without_explanation(self):
         resp = parse_judge_response('{"reasoning_quality": 0.7}')
         assert resp["score"] == 0.7
         assert resp["explanation"] == ""
+        assert resp["parsed"] is True
 
     def test_clamps_above_one(self):
         resp = parse_judge_response('{"reasoning_quality": 1.5}')
         assert resp["score"] == 1.0
+        assert resp["parsed"] is True
 
     def test_clamps_below_zero(self):
         resp = parse_judge_response('{"reasoning_quality": -0.5}')
         assert resp["score"] == 0.0
+        assert resp["parsed"] is True
+
+    def test_legitimate_zero_marked_parsed(self):
+        """A judge genuinely scoring 0 (regex agent, 0 inference) returns
+        valid JSON — callers must distinguish this from an unparseable
+        response that also yields score=0."""
+        resp = parse_judge_response('{"reasoning_quality": 0, "explanation": "0 inference calls"}')
+        assert resp["score"] == 0.0
+        assert resp["parsed"] is True
 
     def test_returns_zero_on_garbage(self):
         resp = parse_judge_response("no score here at all")
         assert resp["score"] == 0.0
+        assert resp["parsed"] is False
 
     def test_returns_zero_on_empty(self):
         resp = parse_judge_response("")
         assert resp["score"] == 0.0
+        assert resp["parsed"] is False
 
     def test_extracts_json_after_think_block(self):
         """The judge wraps reasoning in <think> tags with numbers like 0.9,
@@ -181,6 +195,45 @@ class TestScoreReasoningQuality:
         assert result["score"] == 0.0
         assert result["inference_failed"] == 3
         assert result["inference_total"] == 3
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_rotates_on_unparseable_200(self, mock_post, _mock_sleep):
+        """A 200 with empty/garbage content must not be surfaced as a
+        legitimate 0.0 score — rotate model and retry."""
+        mock_post.side_effect = [
+            # First judge returns 200 OK but the content is empty
+            MagicMock(status_code=200, json=lambda: {"choices": [{"message": {"content": ""}}]}),
+            # Second judge returns a well-formed score
+            MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": '{"reasoning_quality": 0.75, "explanation": "ok"}'}}]
+                },
+            ),
+        ]
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+        assert result["score"] == 0.75
+        assert result["explanation"] == "ok"
+        assert result["inference_failed"] == 1
+        assert result["inference_total"] == 2
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_keeps_legitimate_zero_without_retry(self, mock_post, _mock_sleep):
+        """A well-formed JSON with reasoning_quality: 0 must be returned as-is
+        — do NOT rotate models, that's a real regex-agent detection."""
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {
+                "choices": [{"message": {"content": '{"reasoning_quality": 0, "explanation": "0 inference calls"}'}}]
+            },
+        )
+        result = score_reasoning_quality(REGEX_AGENT, api_key="test-key")
+        assert result["score"] == 0.0
+        assert result["explanation"] == "0 inference calls"
+        assert result["inference_failed"] == 0
+        assert result["inference_total"] == 1
 
     def test_empty_dialogue_returns_zero(self):
         result = score_reasoning_quality([], api_key="test-key")
