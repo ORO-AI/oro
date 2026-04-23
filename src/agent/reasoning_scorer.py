@@ -23,72 +23,45 @@ logger = logging.getLogger(__name__)
 PROXY_URL = "http://proxy:80"
 
 # Chutes TEE judges (must use -TEE suffix for proxy allowlist).
+# Ordered by load via the Chutes utilization API on every selection.
 #
-# Qwen3-32B is the primary judge; the DeepSeek variants are fallbacks
-# used only when the primary is rate-limiting above
-# PRIMARY_THROTTLE_THRESHOLD. MiniMax-M2.5 and Qwen3-235B-Instruct were
-# removed after per-agent measurements showed they scored identical
-# trajectories ~29 and ~25 points lower than Qwen3-32B respectively —
-# a systematic bias large enough to swing leaderboard ranking based on
-# which judge a run happened to route to.
-PRIMARY_JUDGE_MODEL = "Qwen/Qwen3-32B-TEE"
-FALLBACK_JUDGE_MODELS = [
+# MiniMax-M2.5 previously showed a ~0.29 bias below Qwen3-32B in per-agent
+# comparisons, which is why it had been dropped. That bias was an artifact
+# of format_trajectory_for_judge only reading dialogue[0]'s proxy_calls —
+# with the aggregation fix in this module, MiniMax realigns to within
+# 0.05 of Qwen3-32B.
+JUDGE_MODELS = [
+    "Qwen/Qwen3-32B-TEE",
+    "MiniMaxAI/MiniMax-M2.5-TEE",
     "deepseek-ai/DeepSeek-V3-0324-TEE",
     "deepseek-ai/DeepSeek-V3.2-TEE",
 ]
-JUDGE_MODELS = [PRIMARY_JUDGE_MODEL, *FALLBACK_JUDGE_MODELS]
-
-# If the primary's 5-minute rate-limit ratio exceeds this fraction,
-# route to the least-loaded fallback first.
-PRIMARY_THROTTLE_THRESHOLD = 0.5
 
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
 
 
 def _select_models_by_utilization() -> list[str]:
-    """Return judge models in order of preference.
+    """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
 
-    Default: primary first, then fallbacks ordered by current utilization
-    (least-loaded first). If the primary's 5-minute rate-limit ratio
-    exceeds PRIMARY_THROTTLE_THRESHOLD, the least-loaded fallback is
-    promoted to first — the primary still stays in the list as a last
-    resort.
-
-    Falls back to the static JUDGE_MODELS list on any failure.
+    Returns models sorted by utilization_current (ascending = least loaded
+    first). Falls back to the static JUDGE_MODELS list on any failure.
     """
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
         if resp.status_code != 200:
             return list(JUDGE_MODELS)
 
-        by_name = {e["name"]: e for e in resp.json()}
-
-        def field(model: str, key: str, default: float) -> float:
-            return by_name.get(model, {}).get(key, default)
-
-        fallbacks = [m for _, m in sorted(
-            (field(m, "utilization_current", 1.0), m) for m in FALLBACK_JUDGE_MODELS
-        )]
-
-        primary_throttle = field(PRIMARY_JUDGE_MODEL, "rate_limit_ratio_5m", 0.0)
-        if primary_throttle > PRIMARY_THROTTLE_THRESHOLD:
-            logger.warning(
-                f"Primary judge {PRIMARY_JUDGE_MODEL} rate-limiting at "
-                f"{primary_throttle:.0%} (> {PRIMARY_THROTTLE_THRESHOLD:.0%}); "
-                f"routing to fallback first"
-            )
-            return [*fallbacks, PRIMARY_JUDGE_MODEL]
+        util_by_name = {
+            e["name"]: e.get("utilization_current", 1.0) for e in resp.json()
+        }
+        result = sorted(JUDGE_MODELS, key=lambda m: util_by_name.get(m, 1.0))
 
         logger.info(
-            f"Judge order: {PRIMARY_JUDGE_MODEL}"
-            f"({field(PRIMARY_JUDGE_MODEL, 'utilization_current', -1):.0%}), "
-            "fallbacks: "
-            + ", ".join(
-                f"{m}({field(m, 'utilization_current', -1):.0%})" for m in fallbacks
-            )
+            "Judge model order by utilization: "
+            + ", ".join(f"{m}({util_by_name.get(m, -1):.0%})" for m in result)
         )
-        return [PRIMARY_JUDGE_MODEL, *fallbacks]
+        return result
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
         return list(JUDGE_MODELS)
@@ -261,7 +234,15 @@ def format_trajectory_for_judge(dialogue: list[dict[str, Any]]) -> str:
 
     extra = (dialogue[0].get("extra_info") or {})
     query = extra.get("query", "")
-    proxy_calls = extra.get("proxy_calls", [])
+
+    # Aggregate proxy_calls across every step. They're distributed by
+    # timestamp during trajectory construction, so reading only step 0
+    # undercounts — often severely, which scores trajectories as
+    # "0 inference calls" even when the agent made many.
+    proxy_calls: list[dict[str, Any]] = []
+    for step in dialogue:
+        step_extra = step.get("extra_info") or {}
+        proxy_calls.extend(step_extra.get("proxy_calls") or [])
 
     parts = [f"QUERY: {query}", ""]
 

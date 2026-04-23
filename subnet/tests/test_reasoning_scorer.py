@@ -9,9 +9,7 @@ from reasoning_scorer import (
     score_reasoning_quality,
     format_trajectory_for_judge,
     parse_judge_response,
-    FALLBACK_JUDGE_MODELS,
     JUDGE_MODELS,
-    PRIMARY_JUDGE_MODEL,
 )
 
 
@@ -69,6 +67,29 @@ class TestFormatTrajectoryForJudge:
     def test_includes_query(self):
         text = format_trajectory_for_judge(REASONING_AGENT)
         assert "yellow dishwashing liquid" in text
+
+    def test_aggregates_proxy_calls_across_steps(self):
+        """Proxy calls are distributed by timestamp across every step; the
+        formatter must sum them for the judge, not read only step 0."""
+        dialogue = _make_dialogue([("think", []), ("think", []), ("think", [])])
+        dialogue[0]["extra_info"]["proxy_calls"] = [
+            {"method": "POST", "path": "/inference/chat/completions",
+             "params": {"model": "x"}, "status_code": 200, "duration_ms": 5000,
+             "completion_tokens": 100}
+        ]
+        dialogue[1]["extra_info"]["proxy_calls"] = [
+            {"method": "POST", "path": "/inference/chat/completions",
+             "params": {"model": "x"}, "status_code": 200, "duration_ms": 5000,
+             "completion_tokens": 100}
+        ]
+        dialogue[2]["extra_info"]["proxy_calls"] = [
+            {"method": "GET", "path": "/search/find_product",
+             "params": {"q": "test"}, "status_code": 200, "duration_ms": 150}
+        ]
+        text = format_trajectory_for_judge(dialogue)
+        # Summary reflects the totals from all three steps, not just step 0
+        assert "2 inference" in text
+        assert "1 search" in text
 
 
 class TestParseJudgeResponse:
@@ -165,10 +186,8 @@ class TestScoreReasoningQuality:
         result = score_reasoning_quality([], api_key="test-key")
         assert result["score"] == 0.0
 
-    def test_judge_models_has_primary_and_fallbacks(self):
-        assert JUDGE_MODELS[0] == PRIMARY_JUDGE_MODEL
-        assert JUDGE_MODELS[1:] == FALLBACK_JUDGE_MODELS
-        assert len(FALLBACK_JUDGE_MODELS) >= 1
+    def test_judge_models_nonempty(self):
+        assert len(JUDGE_MODELS) >= 1
 
 
 class TestSelectModelsByUtilization:
@@ -180,42 +199,35 @@ class TestSelectModelsByUtilization:
         resp.json.return_value = entries
         return resp
 
-    def test_primary_first_when_not_throttled(self):
+    def test_sorts_by_utilization_ascending(self):
+        # Make each JUDGE_MODELS entry have a distinct utilization, reversed
+        # from the static order, and verify the returned list is sorted
+        # least-loaded first.
         entries = [
-            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.3, "rate_limit_ratio_5m": 0.0},
-            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.5, "rate_limit_ratio_5m": 0.0},
-            {"name": FALLBACK_JUDGE_MODELS[1], "utilization_current": 0.9, "rate_limit_ratio_5m": 0.0},
+            {"name": m, "utilization_current": 0.9 - i * 0.1}
+            for i, m in enumerate(JUDGE_MODELS)
         ]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
             result = _select_models_by_utilization()
-        assert result[0] == PRIMARY_JUDGE_MODEL
-        # Fallbacks ordered by utilization (lowest first)
-        assert result[1:] == [FALLBACK_JUDGE_MODELS[0], FALLBACK_JUDGE_MODELS[1]]
+        assert result == list(reversed(JUDGE_MODELS))
 
-    def test_fallback_first_when_primary_throttled(self):
-        entries = [
-            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.4, "rate_limit_ratio_5m": 0.8},
-            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.3, "rate_limit_ratio_5m": 0.0},
-            {"name": FALLBACK_JUDGE_MODELS[1], "utilization_current": 0.1, "rate_limit_ratio_5m": 0.0},
-        ]
+    def test_missing_model_treated_as_fully_loaded(self):
+        # Models not present in the utilization response default to 1.0, so
+        # they sort to the end.
+        entries = [{"name": JUDGE_MODELS[-1], "utilization_current": 0.1}]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
             result = _select_models_by_utilization()
-        # Least-loaded fallback first, primary pushed to last resort
-        assert result[0] == FALLBACK_JUDGE_MODELS[1]
-        assert result[-1] == PRIMARY_JUDGE_MODEL
-
-    def test_primary_throttle_at_threshold_stays_primary(self):
-        # Boundary: exactly 0.5 should NOT demote the primary
-        entries = [
-            {"name": PRIMARY_JUDGE_MODEL, "utilization_current": 0.4, "rate_limit_ratio_5m": 0.5},
-            {"name": FALLBACK_JUDGE_MODELS[0], "utilization_current": 0.1, "rate_limit_ratio_5m": 0.0},
-        ]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
-        assert result[0] == PRIMARY_JUDGE_MODEL
+        assert result[0] == JUDGE_MODELS[-1]
 
     def test_api_failure_returns_static_list(self):
         with patch("reasoning_scorer.requests.get", side_effect=Exception("boom")):
+            result = _select_models_by_utilization()
+        assert result == JUDGE_MODELS
+
+    def test_non_200_returns_static_list(self):
+        resp = MagicMock()
+        resp.status_code = 500
+        with patch("reasoning_scorer.requests.get", return_value=resp):
             result = _select_models_by_utilization()
         assert result == JUDGE_MODELS
 
