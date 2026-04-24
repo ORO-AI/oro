@@ -44,23 +44,59 @@ CHUTES_UTILIZATION_TIMEOUT = 5
 def _select_models_by_utilization() -> list[str]:
     """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
 
+    Models reported with zero active instances are excluded. Chutes can
+    descale a model to 0 when idle; the utilization API then reports
+    utilization_current=0.0 (no traffic → no load), which would otherwise
+    make the ascending sort prefer it. Every call routed to a 0-instance
+    model fails, and those failures count toward the judge-infra-failure
+    threshold in the validator.
+
     Returns models sorted by utilization_current (ascending = least loaded
-    first). Falls back to the static JUDGE_MODELS list on any failure.
+    first), excluding any with active_instance_count == 0. Falls back to
+    the static JUDGE_MODELS list on any API failure, or if filtering would
+    leave no models.
     """
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
         if resp.status_code != 200:
             return list(JUDGE_MODELS)
 
-        util_by_name = {
-            e["name"]: e.get("utilization_current", 1.0) for e in resp.json()
-        }
-        result = sorted(JUDGE_MODELS, key=lambda m: util_by_name.get(m, 1.0))
+        entries_by_name = {e["name"]: e for e in resp.json()}
 
-        logger.info(
-            "Judge model order by utilization: "
-            + ", ".join(f"{m}({util_by_name.get(m, -1):.0%})" for m in result)
+        def is_available(m: str) -> bool:
+            e = entries_by_name.get(m)
+            if e is None:
+                # Not reported by the utilization API — be permissive.
+                return True
+            count = e.get("active_instance_count")
+            if count is None:
+                # Field not present on this entry — be permissive.
+                return True
+            return count > 0
+
+        available = [m for m in JUDGE_MODELS if is_available(m)]
+        if not available:
+            logger.warning(
+                "All judge models report zero active instances on Chutes; "
+                "falling back to static model list"
+            )
+            return list(JUDGE_MODELS)
+
+        result = sorted(
+            available,
+            key=lambda m: entries_by_name.get(m, {}).get("utilization_current", 1.0),
         )
+
+        log_parts = [
+            f"{m}({entries_by_name.get(m, {}).get('utilization_current', -1):.0%})"
+            for m in result
+        ]
+        msg = "Judge model order by utilization: " + ", ".join(log_parts)
+        skipped = [m for m in JUDGE_MODELS if m not in available]
+        if skipped:
+            msg += f" | skipped (0 instances): {', '.join(skipped)}"
+        logger.info(msg)
+
         return result
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
