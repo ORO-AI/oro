@@ -320,6 +320,45 @@ class TestSelectModelsByUtilization:
             result = _select_models_by_utilization()
         assert result == JUDGE_MODELS
 
+    def test_zero_active_instances_excluded(self):
+        # A model at 0% utilization would otherwise sort first — but if it's
+        # reporting active_instance_count == 0 (Chutes descaled it) every call
+        # fails. It must be filtered out of the returned order.
+        descaled, *healthy = JUDGE_MODELS
+        entries = [
+            {"name": descaled, "utilization_current": 0.0, "active_instance_count": 0},
+        ] + [
+            {"name": m, "utilization_current": 0.5, "active_instance_count": 4}
+            for m in healthy
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        assert descaled not in result
+        assert set(result) == set(healthy)
+
+    def test_all_zero_active_instances_falls_back_to_static(self):
+        # If every judge model is descaled, prefer the static list over
+        # returning an empty order (calls will still fail, but the validator
+        # behavior stays predictable).
+        entries = [
+            {"name": m, "utilization_current": 0.0, "active_instance_count": 0}
+            for m in JUDGE_MODELS
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        assert result == list(JUDGE_MODELS)
+
+    def test_missing_active_instance_count_field_treated_as_available(self):
+        # Older/partial Chutes responses that omit active_instance_count must
+        # not cause models to be silently dropped.
+        entries = [
+            {"name": m, "utilization_current": 0.1 * i}
+            for i, m in enumerate(JUDGE_MODELS)
+        ]
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
+            result = _select_models_by_utilization()
+        assert set(result) == set(JUDGE_MODELS)
+
 
 class TestFormatProxyCall:
     def test_search_with_params(self):
