@@ -332,6 +332,11 @@ def _format_single_result(result: ExecutionResult) -> Optional[str]:
         if result.problem_id and "problem_id" not in step.get("extra_info", {}):
             step.setdefault("extra_info", {})["problem_id"] = result.problem_id
 
+    # Stamp per-problem execution time onto the first step only — consumers
+    # (validator progress_reporter) read it from dialogue[0].extra_info.
+    if dialogue_steps:
+        dialogue_steps[0].setdefault("extra_info", {})["execution_time"] = result.execution_time
+
     # Distribute proxy calls across steps by timestamp approximation.
     # Calls before the first step go to step 0; calls between step N and N+1
     # go to step N.
