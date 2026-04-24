@@ -5,6 +5,7 @@ import json
 import logging
 import multiprocessing
 import os
+import sys
 import time
 from concurrent.futures import (
     ThreadPoolExecutor,
@@ -103,7 +104,14 @@ def load_agent_from_file(file_path: str) -> Callable:
         raise ImportError(f"Could not create module spec from file: {file_path}")
 
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Register before exec so dataclass + PEP 563 annotations can resolve
+    # string types via sys.modules[cls.__module__] during class definition.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
 
     if not hasattr(module, "agent_main"):
         raise ImportError(f"Module {file_path} does not define 'agent_main' function")
