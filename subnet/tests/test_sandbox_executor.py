@@ -12,6 +12,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 FAST = str(FIXTURES / "fast_agent.py")
 SLOW = str(FIXTURES / "slow_agent.py")
 CRASH = str(FIXTURES / "crashing_agent.py")
+FROZEN_DC = str(FIXTURES / "frozen_dataclass_agent.py")
 
 
 def test_successful_execution():
@@ -43,6 +44,17 @@ def test_missing_agent_file():
         {"query": "x"}, timeout=10.0, agent_file="/tmp/no_such_agent.py"
     )
     assert not result.success
+
+
+def test_frozen_dataclass_with_pep563_annotations():
+    """Agents using `from __future__ import annotations` + @dataclass rely on
+    the loaded module being present in sys.modules — dataclasses._is_type
+    reads sys.modules[cls.__module__] to resolve string-form annotations."""
+    result = execute_single_problem(
+        {"query": "anything", "id": "p-frozen"}, timeout=10.0, agent_file=FROZEN_DC
+    )
+    assert result.success
+    assert result.result["answer"] == "hello-frozen"
 
 
 class TestReadInferenceStats:
