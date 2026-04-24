@@ -47,6 +47,7 @@ class ProblemResult:
     reasoning_model: str = ""
     reasoning_inf_failed: int = 0
     reasoning_inf_total: int = 0
+    execution_time: float | None = None
 
 
 # Default number of concurrent scoring workers
@@ -455,6 +456,7 @@ class ProgressReporter:
                 return
 
             extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
+            execution_time = extra_info.get("execution_time")
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
 
@@ -486,6 +488,7 @@ class ProgressReporter:
                 score_dict=score_dict if isinstance(score_dict, dict) else {},
                 inference_failures=inf_failures,
                 inference_total=inf_total,
+                execution_time=execution_time,
                 **reasoning,
             )
             with self._lock:
@@ -605,6 +608,7 @@ class ProgressReporter:
                 score_components_summary=scs,
                 inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
                 inference_total=r.inference_total if r.inference_total > 0 else None,
+                execution_time=r.execution_time,
             )
             updates.append(update)
 
