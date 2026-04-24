@@ -7,7 +7,7 @@ dependencies = [
     "async-substrate-interface==1.6.4",
     "bittensor==10.1.0",
     "bittensor-wallet==4.0.1",
-    "oro-sdk==1.0.36",
+    "oro-sdk==1.0.45",
     "requests==2.32.5",
     "sentence-transformers==5.3.0",
     "torch>=2.11.0,<3",
