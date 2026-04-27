@@ -33,6 +33,19 @@ from .backend_client import BackendClient, BackendError
 
 
 @dataclass
+class EnvelopeMeta:
+    """Per-problem metadata captured from the sandbox envelope line.
+
+    Held under ``ProgressReporter._lock`` and read by both dispatch (terminal
+    branch) and the scoring worker thread.
+    """
+
+    inference_failure_count: int
+    inference_total: int
+    execution_time: float
+
+
+@dataclass
 class ProblemResult:
     """Single source of truth for one problem's scoring outcome."""
 
@@ -100,10 +113,7 @@ class ProgressReporter:
         self._total_problems = len(problems)
         self._scorers: Dict[str, Any] = {}
 
-        # Sandbox-supplied per-problem metadata captured from envelope lines.
-        # Replaces the validator-side read of inference_stats.jsonl.
-        self._envelope_counts: Dict[str, tuple[int, int]] = {}
-        self._envelope_execution_time: Dict[str, float] = {}
+        self._envelope_meta: Dict[str, EnvelopeMeta] = {}
 
         # Circuit breaker for reasoning judge — stop after N consecutive
         # total failures to avoid retry storms on bad tokens/infra issues.
@@ -411,21 +421,17 @@ class ProgressReporter:
                 problem_id = str(problem_id)
 
                 with self._lock:
-                    already_scored = problem_id in self._results
-                already_dispatched = problem_id in self._scoring_futures
-
-                if already_scored or already_dispatched:
-                    continue
-
-                # Capture sandbox-supplied counts for this problem (replaces
-                # validator-side inference_stats.jsonl read).
-                self._envelope_counts[problem_id] = (
-                    int(envelope.get("inference_failure_count") or 0),
-                    int(envelope.get("inference_total") or 0),
-                )
-                self._envelope_execution_time[problem_id] = float(
-                    envelope.get("execution_time") or 0.0
-                )
+                    if problem_id in self._results:
+                        continue
+                    if problem_id in self._scoring_futures:
+                        continue
+                    self._envelope_meta[problem_id] = EnvelopeMeta(
+                        inference_failure_count=int(
+                            envelope.get("inference_failure_count") or 0
+                        ),
+                        inference_total=int(envelope.get("inference_total") or 0),
+                        execution_time=float(envelope.get("execution_time") or 0.0),
+                    )
 
                 if status is SandboxProblemStatus.SUCCESS:
                     dialogue = envelope.get("dialogue") or []
@@ -499,8 +505,11 @@ class ProgressReporter:
             return None
         category = problem.get("category", "product").lower()
         problem_status = ProblemStatus(status.value)
-        inf_fail, inf_total = self._envelope_counts.get(problem_id, (0, 0))
-        exec_time = self._envelope_execution_time.get(problem_id, 0.0)
+        with self._lock:
+            meta = self._envelope_meta.get(problem_id)
+        inf_fail = meta.inference_failure_count if meta else 0
+        inf_total = meta.inference_total if meta else 0
+        exec_time = meta.execution_time if meta else 0.0
         if error:
             err_msg = error.get("message") if isinstance(error, dict) else None
             if err_msg:
@@ -545,11 +554,11 @@ class ProgressReporter:
                 return
 
             extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
-            # Prefer envelope-supplied execution_time; fall back to extra_info
-            # for trajectories built before envelope rollout.
-            execution_time = self._envelope_execution_time.get(
-                str(problem_id)
-            ) or extra_info.get("execution_time")
+            with self._lock:
+                meta = self._envelope_meta.get(str(problem_id))
+            execution_time = (
+                meta.execution_time if meta is not None else extra_info.get("execution_time")
+            )
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
 
@@ -569,9 +578,8 @@ class ProgressReporter:
             is_successful = is_problem_successful(score_dict, category)
             score = 1.0 if is_successful else 0.0
             status = ProblemStatus.SUCCESS if is_successful else ProblemStatus.FAILED
-            inf_failures, inf_total = self._envelope_counts.get(
-                str(problem_id), (0, 0)
-            )
+            inf_failures = meta.inference_failure_count if meta else 0
+            inf_total = meta.inference_total if meta else 0
 
             reasoning = self._run_reasoning_judge(dialogue, problem_id)
 

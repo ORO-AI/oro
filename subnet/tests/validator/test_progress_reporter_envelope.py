@@ -118,7 +118,8 @@ class TestEnvelopeParsing:
         )
         reporter._read_and_dispatch()
         # Inference counts captured from envelope at dispatch time.
-        assert reporter._envelope_counts[_P1] == (2, 7)
+        meta = reporter._envelope_meta[_P1]
+        assert (meta.inference_failure_count, meta.inference_total) == (2, 7)
         # And materialized into the terminal result.
         assert reporter._results[_P1].inference_failures == 2
         assert reporter._results[_P1].inference_total == 7
