@@ -1,31 +1,15 @@
 """Validator parses envelope format from ORO-907."""
 
 import json
-import logging as _stdlib_logging
-import sys
-import types
 from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 
-# Stub `bittensor.utils.btlogging` before importing progress_reporter — the
-# installed bittensor package can't be imported in this env (unrelated env
-# breakage with async_substrate_interface), so we substitute a lightweight
-# logging facade.
-_btlogging = types.ModuleType("bittensor.utils.btlogging")
-_btlogging.logging = _stdlib_logging.getLogger("bittensor")
-sys.modules.setdefault("bittensor", types.ModuleType("bittensor"))
-sys.modules.setdefault("bittensor.utils", types.ModuleType("bittensor.utils"))
-sys.modules["bittensor.utils.btlogging"] = _btlogging
+from oro_sdk.models import ProblemStatus
 
-# Add subnet to path so `validator.progress_reporter` resolves
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from oro_sdk.models import ProblemStatus  # noqa: E402
-
-from validator.progress_reporter import ProgressReporter  # noqa: E402
+from validator.progress_reporter import ProgressReporter
 
 
 def _write_envelope(path: Path, **fields):
