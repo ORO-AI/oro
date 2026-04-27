@@ -1,6 +1,9 @@
 """Shared pytest fixtures for validator tests."""
 
+import logging as _stdlib_logging
+import sys
 import tempfile
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -10,6 +13,22 @@ import pytest
 from bittensor_wallet import Keypair, Wallet
 
 from oro_sdk.models import HeartbeatResponse, TopAgentResponse
+
+# Stub bittensor.utils.btlogging when the real module is unavailable so any
+# test importing progress_reporter (which imports btlogging at module import)
+# can collect. Real bittensor sometimes can't import in CI due to unrelated
+# env breakage in async_substrate_interface.
+if "bittensor.utils.btlogging" not in sys.modules:
+    try:
+        import bittensor.utils.btlogging  # noqa: F401
+    except Exception:
+        _btlogging = types.ModuleType("bittensor.utils.btlogging")
+        _btlogging.logging = _stdlib_logging.getLogger("bittensor")
+        sys.modules.setdefault("bittensor", types.ModuleType("bittensor"))
+        sys.modules.setdefault(
+            "bittensor.utils", types.ModuleType("bittensor.utils")
+        )
+        sys.modules["bittensor.utils.btlogging"] = _btlogging
 
 from validator.backend_client import BackendClient
 

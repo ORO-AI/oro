@@ -12,10 +12,20 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Union, Callable
+from dataclasses import dataclass, field
+
+from src.agent.sandbox_status import SandboxProblemStatus
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ErrorInfo:
+    """Structured error captured at the exception site (preserves type name)."""
+
+    type: str
+    message: str
 
 
 @dataclass
@@ -25,12 +35,13 @@ class ExecutionResult:
     query: str
     success: bool
     result: Optional[Dict] = None
-    error: Optional[str] = None
+    error: Union[str, ErrorInfo, None] = None
     execution_time: float = 0.0
     problem_id: Optional[str] = None
     inference_failure_count: int = 0
     inference_total: int = 0
     proxy_calls: Optional[List[Dict]] = None
+    status: SandboxProblemStatus = field(default=SandboxProblemStatus.FAILED)
 
 
 def load_problems(problem_file: str) -> List[Dict]:
@@ -199,7 +210,7 @@ def _run_in_process(
         result = agent_fn(problem)
         result_queue.put(("success", result))
     except Exception as e:
-        result_queue.put(("error", str(e)))
+        result_queue.put(("error", {"type": type(e).__name__, "message": str(e)}))
 
 
 def execute_single_problem(
@@ -266,6 +277,7 @@ def execute_single_problem(
             inference_failure_count=inf_failures,
             inference_total=inf_total,
             proxy_calls=proxy_calls or None,
+            status=SandboxProblemStatus.TIMED_OUT,
         )
 
     try:
@@ -281,16 +293,26 @@ def execute_single_problem(
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
                     proxy_calls=proxy_calls or None,
+                    status=SandboxProblemStatus.SUCCESS,
                 )
+            error_payload: Union[str, ErrorInfo]
+            if isinstance(data, dict):
+                error_payload = ErrorInfo(
+                    type=str(data.get("type", "RuntimeError")),
+                    message=str(data.get("message", "")),
+                )
+            else:
+                error_payload = str(data)
             return ExecutionResult(
                 query=query,
                 success=False,
-                error=data,
+                error=error_payload,
                 execution_time=execution_time,
                 problem_id=problem_id,
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
                 proxy_calls=proxy_calls or None,
+                status=SandboxProblemStatus.FAILED,
             )
         return ExecutionResult(
             query=query,
@@ -301,67 +323,93 @@ def execute_single_problem(
             inference_failure_count=inf_failures,
             inference_total=inf_total,
             proxy_calls=proxy_calls or None,
+            status=SandboxProblemStatus.FAILED,
         )
     finally:
         result_queue.close()
 
 
-def _format_single_result(result: ExecutionResult) -> Optional[str]:
-    """Format a single ExecutionResult as a JSONL line for dialogue output.
+def _classify_error_type(
+    error_message: Optional[str], status: SandboxProblemStatus
+) -> str:
+    """Best-effort error type classification from message + status.
 
-    Returns the JSON string (without trailing newline), or None if the
-    result should be skipped (failed, wrong format).
+    No traceback — sandbox stderr already captured in the logs bundle.
     """
-    if not result.success:
-        return None
+    if status == SandboxProblemStatus.TIMED_OUT:
+        return "TimeoutError"
+    if not error_message:
+        return "UnknownError"
+    # Cheap heuristic: error_message often starts with the exception class name
+    head = error_message.split(":", 1)[0].strip()
+    return head if head.isidentifier() else "RuntimeError"
 
-    if not isinstance(result.result, list):
-        return None
 
-    dialogue_steps = result.result
+def _format_single_result(result: ExecutionResult) -> str:
+    """Format an ExecutionResult as one JSONL envelope line.
 
-    for i, step in enumerate(dialogue_steps):
-        if "extra_info" not in step:
-            step["extra_info"] = {
-                "step": i + 1,
-                "query": result.query,
-                "timestamp": int(time.time() * 1000),
+    Always returns a non-empty line — failures emit with dialogue=null so the
+    validator's ProgressReporter sees every problem outcome through one channel.
+    """
+    dialogue: Optional[List[Dict]] = None
+    if result.success and isinstance(result.result, list):
+        dialogue = result.result
+        for i, step in enumerate(dialogue):
+            step.setdefault("extra_info", {})
+            step["extra_info"].setdefault("step", i + 1)
+            step["extra_info"].setdefault("query", result.query)
+            step["extra_info"].setdefault("timestamp", int(time.time() * 1000))
+            if result.problem_id:
+                step["extra_info"].setdefault("problem_id", result.problem_id)
+        # Stamp per-problem execution time onto the first step only — consumers
+        # that look at dialogue[0].extra_info still find it there.
+        if dialogue:
+            dialogue[0]["extra_info"].setdefault("execution_time", result.execution_time)
+        # Distribute proxy calls across steps by timestamp approximation.
+        # Calls before the first step go to step 0; calls between step N and
+        # N+1 go to step N.
+        if result.proxy_calls and dialogue:
+            step_timestamps = [
+                s["extra_info"].get("timestamp", 0) for s in dialogue
+            ]
+            # Per-attempt entries (kind="attempt") are diagnostic only — keep
+            # them out of the trajectory the judge sees.
+            summary_calls = [
+                c for c in result.proxy_calls if c.get("kind") != "attempt"
+            ]
+            buckets: Dict[int, List[Dict]] = {}
+            for call in summary_calls:
+                call_ts = call.get("timestamp", 0)
+                target = 0
+                for i, st in enumerate(step_timestamps):
+                    if st <= call_ts:
+                        target = i
+                    else:
+                        break
+                buckets.setdefault(target, []).append(call)
+            for idx, calls in buckets.items():
+                dialogue[idx]["extra_info"]["proxy_calls"] = calls
+
+    error_obj: Optional[Dict[str, Any]] = None
+    if not result.success and result.error is not None:
+        if isinstance(result.error, ErrorInfo):
+            error_obj = {"type": result.error.type, "message": result.error.message}
+        else:
+            error_obj = {
+                "type": _classify_error_type(result.error, result.status),
+                "message": result.error,
             }
-        if "query" not in step.get("extra_info", {}):
-            step.setdefault("extra_info", {})["query"] = result.query
-        if result.problem_id and "problem_id" not in step.get("extra_info", {}):
-            step.setdefault("extra_info", {})["problem_id"] = result.problem_id
 
-    # Stamp per-problem execution time onto the first step only — consumers
-    # (validator progress_reporter) read it from dialogue[0].extra_info.
-    if dialogue_steps:
-        dialogue_steps[0].setdefault("extra_info", {})["execution_time"] = result.execution_time
-
-    # Distribute proxy calls across steps by timestamp approximation.
-    # Calls before the first step go to step 0; calls between step N and N+1
-    # go to step N.
-    if result.proxy_calls and dialogue_steps:
-        step_timestamps = [
-            s.get("extra_info", {}).get("timestamp", 0) for s in dialogue_steps
-        ]
-        # Per-attempt entries (kind="attempt") are diagnostic only — keep
-        # them out of the trajectory the judge sees.
-        summary_calls = [c for c in result.proxy_calls if c.get("kind") != "attempt"]
-        # Bucket each call into the latest step whose timestamp <= call timestamp
-        buckets: Dict[int, List[Dict]] = {}
-        for call in summary_calls:
-            call_ts = call.get("timestamp", 0)
-            target = 0
-            for i, st in enumerate(step_timestamps):
-                if st <= call_ts:
-                    target = i
-                else:
-                    break
-            buckets.setdefault(target, []).append(call)
-        for idx, calls in buckets.items():
-            dialogue_steps[idx].setdefault("extra_info", {})["proxy_calls"] = calls
-
-    return json.dumps(dialogue_steps)
+    envelope = {
+        "problem_id": result.problem_id,
+        "status": result.status.value,
+        "execution_time": result.execution_time,
+        "inference_failure_count": result.inference_failure_count,
+        "inference_total": result.inference_total,
+        "error": error_obj,
+        "dialogue": dialogue,
+    }
+    return json.dumps(envelope)
 
 
 def execute_problems_parallel(
@@ -429,13 +477,13 @@ def execute_problems_parallel(
 
                     if fout is not None:
                         line = _format_single_result(result)
-                        if line is not None:
-                            fout.write(line + "\n")
-                            fout.flush()
+                        fout.write(line + "\n")
+                        fout.flush()
 
                 except FutureTimeoutError:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
+                    problem_id = problem.get("problem_id") or problem.get("id")
                     logger.error(
                         f"Future for problem '{query}' timed out during result retrieval"
                     )
@@ -445,11 +493,14 @@ def execute_problems_parallel(
                             success=False,
                             error="Future timeout during result retrieval",
                             execution_time=timeout_per_problem,
+                            problem_id=problem_id,
+                            status=SandboxProblemStatus.TIMED_OUT,
                         )
                     )
                 except Exception as e:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
+                    problem_id = problem.get("problem_id") or problem.get("id")
                     logger.error(
                         f"Unexpected error retrieving result for '{query}': {e}"
                     )
@@ -459,6 +510,8 @@ def execute_problems_parallel(
                             success=False,
                             error=f"Unexpected error: {str(e)}",
                             execution_time=0.0,
+                            problem_id=problem_id,
+                            status=SandboxProblemStatus.FAILED,
                         )
                     )
     finally:

@@ -36,7 +36,8 @@ def test_timeout_kills_process():
 def test_agent_crash_returns_error():
     result = execute_single_problem({"query": "crash"}, timeout=10.0, agent_file=CRASH)
     assert not result.success
-    assert "agent crashed on purpose" in result.error
+    err_msg = result.error.message if hasattr(result.error, "message") else result.error
+    assert "agent crashed on purpose" in err_msg
 
 
 def test_missing_agent_file():
