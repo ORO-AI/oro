@@ -99,6 +99,11 @@ class ProgressReporter:
         self._total_problems = len(problems)
         self._scorers: Dict[str, Any] = {}
 
+        # Sandbox-supplied per-problem metadata captured from envelope lines.
+        # Replaces the validator-side read of inference_stats.jsonl.
+        self._envelope_counts: Dict[str, tuple[int, int]] = {}
+        self._envelope_execution_time: Dict[str, float] = {}
+
         # Circuit breaker for reasoning judge — stop after N consecutive
         # total failures to avoid retry storms on bad tokens/infra issues.
         self._consecutive_judge_failures = 0
@@ -365,9 +370,14 @@ class ProgressReporter:
             time.sleep(self.poll_interval)
 
     def _read_and_dispatch(self) -> int:
-        """Read new lines from output file and dispatch scoring to thread pool.
+        """Read new envelope lines from output file.
 
-        Returns the number of newly dispatched problems.
+        SUCCESS envelopes are dispatched to the scoring pool. FAILED and
+        TIMED_OUT envelopes are recorded directly without scoring (no dialogue
+        to score). Per-problem inference counts and execution_time come from
+        the envelope itself — no sidecar reads on the validator side.
+
+        Returns the number of newly dispatched (SUCCESS) problems.
         """
         newly_dispatched = 0
         try:
@@ -389,10 +399,15 @@ class ProgressReporter:
                 if not line:
                     continue
 
-                # Parse just enough to get problem_id and check for duplicates
-                problem_id = self._extract_problem_id(line)
-                if not problem_id:
+                envelope = self._parse_envelope(line)
+                if envelope is None:
                     continue
+
+                problem_id = envelope.get("problem_id")
+                status = envelope.get("status")
+                if not problem_id or not status:
+                    continue
+                problem_id = str(problem_id)
 
                 with self._lock:
                     already_scored = problem_id in self._results
@@ -401,10 +416,33 @@ class ProgressReporter:
                 if already_scored or already_dispatched:
                     continue
 
-                # Dispatch to thread pool
-                future = self._scoring_executor.submit(self._score_problem, line, problem_id)
-                self._scoring_futures[problem_id] = future
-                newly_dispatched += 1
+                # Capture sandbox-supplied counts for this problem (replaces
+                # validator-side inference_stats.jsonl read).
+                self._envelope_counts[problem_id] = (
+                    int(envelope.get("inference_failure_count") or 0),
+                    int(envelope.get("inference_total") or 0),
+                )
+                self._envelope_execution_time[problem_id] = float(
+                    envelope.get("execution_time") or 0.0
+                )
+
+                if status == "SUCCESS":
+                    dialogue = envelope.get("dialogue") or []
+                    future = self._scoring_executor.submit(
+                        self._score_problem, dialogue, problem_id
+                    )
+                    self._scoring_futures[problem_id] = future
+                    newly_dispatched += 1
+                else:
+                    # FAILED / TIMED_OUT — record directly, no scoring dispatch.
+                    terminal = self._build_terminal_result(
+                        problem_id=problem_id,
+                        status=status,
+                        error=envelope.get("error"),
+                    )
+                    if terminal is not None:
+                        with self._lock:
+                            self._results[problem_id] = terminal
 
                 if self._hard_deadline is not None and time.time() >= self._hard_deadline:
                     break
@@ -412,22 +450,62 @@ class ProgressReporter:
         except (OSError, IOError) as e:
             logging.warning(f"Error reading output file: {e}")
             self._file_position = 0
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-            logging.warning(f"Error processing output: {e}")
 
         return newly_dispatched
 
-    def _extract_problem_id(self, line: str) -> Optional[str]:
-        """Extract problem_id from an output line without full scoring."""
+    def _parse_envelope(self, line: str) -> Optional[Dict[str, Any]]:
+        """Parse one envelope line. Returns None for malformed input."""
         try:
             line = line.replace("\x00", "")
-            dialogue = json.loads(line)
-            if not isinstance(dialogue, list) or not dialogue:
-                return None
-            extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
-            return extra_info.get("problem_id")
-        except (json.JSONDecodeError, KeyError, TypeError):
+            envelope = json.loads(line)
+        except json.JSONDecodeError as e:
+            logging.warning(f"Skipping malformed envelope line: {e}")
             return None
+        if not isinstance(envelope, dict):
+            logging.warning(
+                f"Skipping non-dict envelope line: {type(envelope).__name__}"
+            )
+            return None
+        return envelope
+
+    def _build_terminal_result(
+        self,
+        *,
+        problem_id: str,
+        status: str,
+        error: Optional[Dict[str, Any]],
+    ) -> Optional["ProblemResult"]:
+        """Build a non-success ProblemResult from envelope-only data."""
+        problem = self._id_to_problem.get(problem_id)
+        if not problem:
+            logging.warning(f"Unknown problem_id in terminal envelope: {problem_id}")
+            return None
+        category = problem.get("category", "product").lower()
+        try:
+            problem_status = ProblemStatus(status)
+        except ValueError:
+            logging.warning(
+                f"Unknown envelope status '{status}' for {problem_id}, "
+                "treating as FAILED"
+            )
+            problem_status = ProblemStatus.FAILED
+        inf_fail, inf_total = self._envelope_counts.get(problem_id, (0, 0))
+        exec_time = self._envelope_execution_time.get(problem_id, 0.0)
+        if error:
+            err_msg = error.get("message") if isinstance(error, dict) else None
+            if err_msg:
+                logging.info(
+                    f"Recording terminal {status} for {problem_id}: {err_msg[:80]}"
+                )
+        return ProblemResult(
+            problem_id=problem_id,
+            category=category,
+            status=problem_status,
+            score=0.0,
+            inference_failures=inf_fail,
+            inference_total=inf_total,
+            execution_time=exec_time,
+        )
 
     def _collect_completed_futures(self) -> None:
         """Check for completed scoring futures and update last_activity_at."""
@@ -438,25 +516,30 @@ class ProgressReporter:
             if exc:
                 logging.error(f"Scoring worker failed for {pid}: {exc}")
 
-    def _score_problem(self, line: str, problem_id: str) -> None:
-        """Score a single problem end-to-end. Runs in a worker thread."""
+    def _score_problem(self, dialogue: list, problem_id: str) -> None:
+        """Score a single problem end-to-end. Runs in a worker thread.
+
+        Receives the parsed dialogue (list of step dicts) directly from the
+        envelope, instead of reparsing a JSONL line.
+        """
         if not self._scorers:
             return
 
-        line = line.replace("\x00", "")
+        if not isinstance(dialogue, list) or not dialogue:
+            return
 
         try:
-            dialogue = json.loads(line)
-            if not isinstance(dialogue, list) or not dialogue:
-                return
-
             problem = self._id_to_problem.get(str(problem_id))
             if not problem:
                 logging.warning(f"Unknown problem_id: {problem_id}")
                 return
 
             extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
-            execution_time = extra_info.get("execution_time")
+            # Prefer envelope-supplied execution_time; fall back to extra_info
+            # for trajectories built before envelope rollout.
+            execution_time = self._envelope_execution_time.get(
+                str(problem_id)
+            ) or extra_info.get("execution_time")
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
 
@@ -476,7 +559,9 @@ class ProgressReporter:
             is_successful = is_problem_successful(score_dict, category)
             score = 1.0 if is_successful else 0.0
             status = ProblemStatus.SUCCESS if is_successful else ProblemStatus.FAILED
-            inf_failures, inf_total = self._read_inference_stats(problem_id)
+            inf_failures, inf_total = self._envelope_counts.get(
+                str(problem_id), (0, 0)
+            )
 
             reasoning = self._run_reasoning_judge(dialogue, problem_id)
 
@@ -500,8 +585,6 @@ class ProgressReporter:
                 f"{score:.4f} (query: {query[:50]}...)"
             )
 
-        except json.JSONDecodeError:
-            logging.warning(f"Failed to parse line: {line[:100]}...")
         except Exception as e:
             logging.error(f"Error scoring problem {problem_id}: {e}")
             traceback.print_exc()
@@ -621,7 +704,14 @@ class ProgressReporter:
             logging.warning(f"Batch report failed ({len(updates)} problems): {e}")
 
     def _mark_remaining_timed_out(self) -> None:
-        """Mark all unscored problems as TIMED_OUT in local results."""
+        """Mark all unscored problems as TIMED_OUT in local results.
+
+        After ORO-907 the envelope path records FAILED/TIMED_OUT results
+        directly when their envelopes arrive. This sweep therefore only
+        reaches problems that genuinely never produced an envelope — typically
+        a sandbox death before write, a never-started problem, or a partial
+        run cut off by hard deadline.
+        """
         with self._lock:
             scored_ids = set(self._results.keys())
 
@@ -638,21 +728,3 @@ class ProgressReporter:
                     status=ProblemStatus.TIMED_OUT,
                     score=0.0,
                 )
-
-    def _read_inference_stats(self, problem_id: str) -> tuple[int, int]:
-        """Read inference stats from the shared JSONL sidecar file."""
-        stats_path = self.output_file.parent / "inference_stats.jsonl"
-        last_failed, last_total = 0, 0
-        try:
-            with open(stats_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    entry = json.loads(line)
-                    if str(entry.get("problem_id")) == str(problem_id):
-                        last_failed = entry.get("inference_failed", 0)
-                        last_total = entry.get("inference_total", 0)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
-        return last_failed, last_total
