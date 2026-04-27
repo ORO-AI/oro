@@ -8,10 +8,10 @@ The CI guard test in tests/test_sandbox_envelope.py asserts this subset
 relation against a literal mirror of the Backend enum values.
 """
 
-from enum import StrEnum
+from enum import Enum
 
 
-class SandboxProblemStatus(StrEnum):
+class SandboxProblemStatus(str, Enum):
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
     TIMED_OUT = "TIMED_OUT"
