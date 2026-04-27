@@ -4,7 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from src.agent import sandbox_executor
-from src.agent.sandbox_executor import ExecutionResult, _format_single_result
+from src.agent.sandbox_executor import ErrorInfo, ExecutionResult, _format_single_result
 from src.agent.sandbox_status import SandboxProblemStatus
 
 
@@ -132,6 +132,40 @@ class TestFormatSingleResultEnvelope:
         assert env["dialogue"] is None
         assert env["error"]["message"] == "boom"
         assert env["error"]["type"]  # non-empty
+
+    def test_failure_envelope_uses_structured_error_type_from_source(self):
+        """When error is captured at the exception site as ErrorInfo, the
+        type is the actual exception class name, not a regex on the message."""
+        result = ExecutionResult(
+            query="q",
+            success=False,
+            error=ErrorInfo(type="ValueError", message="random text without colon"),
+            execution_time=0.5,
+            problem_id="p_struct",
+            status=SandboxProblemStatus.FAILED,
+        )
+        env = _parse(_format_single_result(result))
+        assert env["error"]["type"] == "ValueError"
+        assert env["error"]["message"] == "random text without colon"
+
+    def test_run_in_process_captures_exception_type_at_source(self, tmp_path):
+        """Child process side: exception type name is on the queue as a dict."""
+        import multiprocessing as mp
+
+        agent_file = tmp_path / "raising_agent.py"
+        agent_file.write_text(
+            "def agent_main(problem):\n"
+            "    raise KeyError('missing-key')\n"
+        )
+        q: mp.Queue = mp.Queue()
+        sandbox_executor._run_in_process(
+            {"query": "q", "problem_id": "x"}, str(agent_file), q
+        )
+        kind, data = q.get(timeout=2)
+        assert kind == "error"
+        assert isinstance(data, dict)
+        assert data["type"] == "KeyError"
+        assert "missing-key" in data["message"]
 
     def test_timeout_envelope_marks_status_and_records_partial_counts(self):
         result = ExecutionResult(

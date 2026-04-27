@@ -23,6 +23,7 @@ from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 from bittensor.utils.btlogging import logging
 
 from src.agent.problem_scorer import ProblemScorer, clear_product_cache
+from src.agent.sandbox_status import SandboxProblemStatus
 from src.agent.scoring import is_problem_successful, compute_aggregate, reasoning_coefficient
 from src.agent.types import ScoreDict
 from subnet.sandbox import attach_title_embeddings
@@ -404,8 +405,8 @@ class ProgressReporter:
                     continue
 
                 problem_id = envelope.get("problem_id")
-                status = envelope.get("status")
-                if not problem_id or not status:
+                status: SandboxProblemStatus = envelope["status"]
+                if not problem_id:
                     continue
                 problem_id = str(problem_id)
 
@@ -426,7 +427,7 @@ class ProgressReporter:
                     envelope.get("execution_time") or 0.0
                 )
 
-                if status == "SUCCESS":
+                if status is SandboxProblemStatus.SUCCESS:
                     dialogue = envelope.get("dialogue") or []
                     future = self._scoring_executor.submit(
                         self._score_problem, dialogue, problem_id
@@ -454,7 +455,12 @@ class ProgressReporter:
         return newly_dispatched
 
     def _parse_envelope(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parse one envelope line. Returns None for malformed input."""
+        """Parse one envelope line. Returns None for malformed input.
+
+        Coerces ``status`` to ``SandboxProblemStatus`` once at the boundary;
+        unrecognized values cause the line to be skipped entirely so callers
+        can rely on `envelope["status"]` being a typed enum.
+        """
         try:
             line = line.replace("\x00", "")
             envelope = json.loads(line)
@@ -466,13 +472,24 @@ class ProgressReporter:
                 f"Skipping non-dict envelope line: {type(envelope).__name__}"
             )
             return None
+        raw_status = envelope.get("status")
+        if not raw_status:
+            logging.warning("Skipping envelope without status field")
+            return None
+        try:
+            envelope["status"] = SandboxProblemStatus(raw_status)
+        except ValueError:
+            logging.warning(
+                f"Skipping envelope with unrecognized status '{raw_status}'"
+            )
+            return None
         return envelope
 
     def _build_terminal_result(
         self,
         *,
         problem_id: str,
-        status: str,
+        status: SandboxProblemStatus,
         error: Optional[Dict[str, Any]],
     ) -> Optional["ProblemResult"]:
         """Build a non-success ProblemResult from envelope-only data."""
@@ -481,14 +498,7 @@ class ProgressReporter:
             logging.warning(f"Unknown problem_id in terminal envelope: {problem_id}")
             return None
         category = problem.get("category", "product").lower()
-        try:
-            problem_status = ProblemStatus(status)
-        except ValueError:
-            logging.warning(
-                f"Unknown envelope status '{status}' for {problem_id}, "
-                "treating as FAILED"
-            )
-            problem_status = ProblemStatus.FAILED
+        problem_status = ProblemStatus(status.value)
         inf_fail, inf_total = self._envelope_counts.get(problem_id, (0, 0))
         exec_time = self._envelope_execution_time.get(problem_id, 0.0)
         if error:

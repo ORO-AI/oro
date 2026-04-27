@@ -12,12 +12,20 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from typing import Dict, List, Optional, Callable
+from typing import Any, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 
 from src.agent.sandbox_status import SandboxProblemStatus
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ErrorInfo:
+    """Structured error captured at the exception site (preserves type name)."""
+
+    type: str
+    message: str
 
 
 @dataclass
@@ -27,15 +35,12 @@ class ExecutionResult:
     query: str
     success: bool
     result: Optional[Dict] = None
-    error: Optional[str] = None
+    error: Union[str, ErrorInfo, None] = None
     execution_time: float = 0.0
     problem_id: Optional[str] = None
     inference_failure_count: int = 0
     inference_total: int = 0
     proxy_calls: Optional[List[Dict]] = None
-    # FAILED is the safe default — every successful exit path sets SUCCESS,
-    # every timeout path sets TIMED_OUT explicitly. Only the unexpected
-    # construction omits status.
     status: SandboxProblemStatus = field(default=SandboxProblemStatus.FAILED)
 
 
@@ -205,7 +210,7 @@ def _run_in_process(
         result = agent_fn(problem)
         result_queue.put(("success", result))
     except Exception as e:
-        result_queue.put(("error", str(e)))
+        result_queue.put(("error", {"type": type(e).__name__, "message": str(e)}))
 
 
 def execute_single_problem(
@@ -290,10 +295,18 @@ def execute_single_problem(
                     proxy_calls=proxy_calls or None,
                     status=SandboxProblemStatus.SUCCESS,
                 )
+            error_payload: Union[str, ErrorInfo]
+            if isinstance(data, dict):
+                error_payload = ErrorInfo(
+                    type=str(data.get("type", "RuntimeError")),
+                    message=str(data.get("message", "")),
+                )
+            else:
+                error_payload = str(data)
             return ExecutionResult(
                 query=query,
                 success=False,
-                error=data,
+                error=error_payload,
                 execution_time=execution_time,
                 problem_id=problem_id,
                 inference_failure_count=inf_failures,
@@ -341,8 +354,6 @@ def _format_single_result(result: ExecutionResult) -> str:
     dialogue: Optional[List[Dict]] = None
     if result.success and isinstance(result.result, list):
         dialogue = result.result
-        # Decorate dialogue steps as before — preserves backward compat for
-        # downstream consumers that look at extra_info.
         for i, step in enumerate(dialogue):
             step.setdefault("extra_info", {})
             step["extra_info"].setdefault("step", i + 1)
@@ -379,19 +390,22 @@ def _format_single_result(result: ExecutionResult) -> str:
             for idx, calls in buckets.items():
                 dialogue[idx]["extra_info"]["proxy_calls"] = calls
 
-    error_obj: Optional[Dict] = None
-    if not result.success and result.error:
-        error_obj = {
-            "type": _classify_error_type(result.error, result.status),
-            "message": result.error,
-        }
+    error_obj: Optional[Dict[str, Any]] = None
+    if not result.success and result.error is not None:
+        if isinstance(result.error, ErrorInfo):
+            error_obj = {"type": result.error.type, "message": result.error.message}
+        else:
+            error_obj = {
+                "type": _classify_error_type(result.error, result.status),
+                "message": result.error,
+            }
 
     envelope = {
         "problem_id": result.problem_id,
         "status": result.status.value,
         "execution_time": result.execution_time,
-        "inference_failure_count": result.inference_failure_count or 0,
-        "inference_total": result.inference_total or 0,
+        "inference_failure_count": result.inference_failure_count,
+        "inference_total": result.inference_total,
         "error": error_obj,
         "dialogue": dialogue,
     }
