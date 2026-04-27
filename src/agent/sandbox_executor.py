@@ -344,9 +344,12 @@ def _format_single_result(result: ExecutionResult) -> Optional[str]:
         step_timestamps = [
             s.get("extra_info", {}).get("timestamp", 0) for s in dialogue_steps
         ]
+        # Per-attempt entries (kind="attempt") are diagnostic only — keep
+        # them out of the trajectory the judge sees.
+        summary_calls = [c for c in result.proxy_calls if c.get("kind") != "attempt"]
         # Bucket each call into the latest step whose timestamp <= call timestamp
         buckets: Dict[int, List[Dict]] = {}
-        for call in result.proxy_calls:
+        for call in summary_calls:
             call_ts = call.get("timestamp", 0)
             target = 0
             for i, st in enumerate(step_timestamps):

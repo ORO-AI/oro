@@ -42,6 +42,7 @@ class RequestLog:
         if not self._log_file:
             return
         entry = {
+            "kind": "summary",
             "method": method,
             "path": path,
             "timestamp": int(time.time() * 1000),
@@ -71,6 +72,41 @@ class RequestLog:
                     ]
             else:
                 entry["response"] = response_body
+        self._write(entry)
+
+    def record_attempt(
+        self,
+        method: str,
+        path: str,
+        attempt: int,
+        duration_ms: float,
+        status_code: Optional[int] = None,
+        error_class: Optional[str] = None,
+    ) -> None:
+        """Record one HTTP attempt inside the retry loop.
+
+        Per-attempt entries are written to the same JSONL file with
+        ``kind="attempt"`` so consumers (the reasoning judge bucketing) can
+        filter them out of the per-call summary view. The point is to make
+        a hung request visible: a stuck call shows up as one attempt entry
+        whose ``duration_ms`` matches or exceeds the configured timeout.
+        """
+        if not self._log_file:
+            return
+        entry = {
+            "kind": "attempt",
+            "method": method,
+            "path": path,
+            "timestamp": int(time.time() * 1000),
+            "attempt": attempt,
+            "duration_ms": round(duration_ms, 1),
+            "status_code": status_code,
+        }
+        if error_class:
+            entry["error_class"] = error_class
+        self._write(entry)
+
+    def _write(self, entry: Dict) -> None:
         with self._lock:
             try:
                 with open(self._log_file, "a") as f:
@@ -190,7 +226,8 @@ class ProxyClient:
     def _make_request_with_retries(
         self,
         request_func: Callable[[], requests.Response],
-        operation_name: str = "request",
+        method: str,
+        path: str,
     ) -> Optional[requests.Response]:
         """
         Make an HTTP request with retry logic.
@@ -199,17 +236,33 @@ class ProxyClient:
         backoff (5s base) so transient capacity issues don't exhaust the normal
         retry budget.
 
+        Each attempt's wall-clock duration and outcome (status code or
+        exception class) is logged via ``RequestLog.record_attempt`` so a
+        hung HTTP call is visible as a single attempt with ``duration_ms``
+        at or beyond the configured timeout.
+
         Args:
             request_func: Function that makes the HTTP request and returns a Response
-            operation_name: Name of the operation for logging
+            method: HTTP method (e.g., "GET", "POST"), recorded per attempt
+            path: Request path (e.g., "/inference/chat"), recorded per attempt
 
         Returns:
             Response object if successful, None otherwise
         """
+        operation_name = f"{method} {path}"
         for i in range(self.max_retries):
+            attempt_t0 = time.monotonic()
+            status_code: Optional[int] = None
+            error_class: Optional[str] = None
             try:
                 response = request_func()
+                status_code = response.status_code
                 if response.status_code == 200:
+                    self.request_log.record_attempt(
+                        method, path, i,
+                        (time.monotonic() - attempt_t0) * 1000,
+                        status_code=status_code,
+                    )
                     return response
                 if response.status_code == 429:
                     logger.warning(
@@ -222,10 +275,18 @@ class ProxyClient:
                         f"retry {i + 1}/{self.max_retries}"
                     )
             except requests.RequestException as e:
+                error_class = type(e).__name__
                 logger.error(
                     f"{operation_name} error, retry {i + 1}/{self.max_retries}: {e}"
                 )
                 response = None
+
+            self.request_log.record_attempt(
+                method, path, i,
+                (time.monotonic() - attempt_t0) * 1000,
+                status_code=status_code,
+                error_class=error_class,
+            )
 
             if i < self.max_retries - 1:
                 is_rate_limited = response is not None and response.status_code == 429
@@ -244,7 +305,7 @@ class ProxyClient:
             return requests.get(url, timeout=self.timeout)
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, f"GET {path}")
+        response = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
         result = response.json() if response else None
 
@@ -274,7 +335,7 @@ class ProxyClient:
             return response
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, f"POST {path}")
+        response = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
 
         if "/inference/" in path:
