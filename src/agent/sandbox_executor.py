@@ -13,7 +13,9 @@ from concurrent.futures import (
     as_completed,
 )
 from typing import Dict, List, Optional, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from src.agent.sandbox_status import SandboxProblemStatus
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,10 @@ class ExecutionResult:
     inference_failure_count: int = 0
     inference_total: int = 0
     proxy_calls: Optional[List[Dict]] = None
+    # FAILED is the safe default — every successful exit path sets SUCCESS,
+    # every timeout path sets TIMED_OUT explicitly. Only the unexpected
+    # construction omits status.
+    status: SandboxProblemStatus = field(default=SandboxProblemStatus.FAILED)
 
 
 def load_problems(problem_file: str) -> List[Dict]:
