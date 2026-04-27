@@ -1,6 +1,7 @@
 """Validator parses envelope format from ORO-907."""
 
 import json
+import logging as _stdlib_logging
 import sys
 import types
 from pathlib import Path
@@ -14,8 +15,6 @@ import pytest
 # breakage with async_substrate_interface), so we substitute a lightweight
 # logging facade.
 _btlogging = types.ModuleType("bittensor.utils.btlogging")
-import logging as _stdlib_logging
-
 _btlogging.logging = _stdlib_logging.getLogger("bittensor")
 sys.modules.setdefault("bittensor", types.ModuleType("bittensor"))
 sys.modules.setdefault("bittensor.utils", types.ModuleType("bittensor.utils"))
@@ -24,9 +23,9 @@ sys.modules["bittensor.utils.btlogging"] = _btlogging
 # Add subnet to path so `validator.progress_reporter` resolves
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from oro_sdk.models import ProblemStatus
+from oro_sdk.models import ProblemStatus  # noqa: E402
 
-from validator.progress_reporter import ProgressReporter
+from validator.progress_reporter import ProgressReporter  # noqa: E402
 
 
 def _write_envelope(path: Path, **fields):
