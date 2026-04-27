@@ -82,8 +82,7 @@ class OutputWatcher:
                 new_lines = f.readlines()
                 self._file_position = f.tell()
         except OSError as e:
-            logging.warning(f"OutputWatcher: read failed: {e}")
-            self._file_position = 0
+            logging.warning(f"OutputWatcher: read failed, retry next poll: {e}")
             return
 
         for line in new_lines:
@@ -97,11 +96,16 @@ class OutputWatcher:
     @staticmethod
     def _parse(line: str) -> Optional[ProblemRecord]:
         try:
-            line = line.replace("\x00", "")
-            envelope = json.loads(line)
-        except json.JSONDecodeError as e:
+            return OutputWatcher._parse_unsafe(line)
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
             logging.warning(f"Skipping malformed envelope line: {e}")
             return None
+
+    @staticmethod
+    def _parse_unsafe(line: str) -> Optional[ProblemRecord]:
+        # Sandbox kill mid-write can leave NUL bytes in the line.
+        line = line.replace("\x00", "")
+        envelope = json.loads(line)
         if not isinstance(envelope, dict):
             logging.warning(
                 f"Skipping non-dict envelope line: {type(envelope).__name__}"

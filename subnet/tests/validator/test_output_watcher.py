@@ -108,6 +108,3 @@ class TestOutputWatcher:
         assert len(records) == 1
         # Status MUST be the typed enum so callers can use `is` comparisons.
         assert records[0].status is SandboxProblemStatus.SUCCESS
-        assert not isinstance(records[0].status, str) or isinstance(
-            records[0].status, SandboxProblemStatus
-        )
