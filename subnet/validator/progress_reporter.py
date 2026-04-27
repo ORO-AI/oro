@@ -8,7 +8,6 @@ Architecture:
   - Aggregate score is computed on-demand from _results
 """
 
-import json
 import time
 import traceback
 import threading
@@ -30,6 +29,7 @@ from subnet.sandbox import attach_title_embeddings
 import requests
 
 from .backend_client import BackendClient, BackendError
+from .output_watcher import ErrorInfo, OutputWatcher
 
 
 @dataclass
@@ -105,7 +105,7 @@ class ProgressReporter:
         self._stop_event = threading.Event()
         self._hard_deadline: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
-        self._file_position = 0
+        self._watcher = OutputWatcher(output_file)
         self._lock = threading.Lock()
 
         # Single source of truth for all problem results
@@ -186,7 +186,7 @@ class ProgressReporter:
         """Start the background monitoring loop."""
         self._stop_event.clear()
         self._hard_deadline = None
-        self._file_position = 0
+        self._watcher.reset()
         self._results = {}
         self._last_reported_count = 0
         self._last_report_time = 0.0
@@ -381,120 +381,57 @@ class ProgressReporter:
             time.sleep(self.poll_interval)
 
     def _read_and_dispatch(self) -> int:
-        """Read new envelope lines from output file.
+        """Read new records from the OutputWatcher and act on each.
 
-        SUCCESS envelopes are dispatched to the scoring pool; FAILED and
-        TIMED_OUT envelopes are recorded directly without scoring.
+        SUCCESS records are dispatched to the scoring pool; FAILED and
+        TIMED_OUT records are stored directly without scoring.
 
         Returns the number of newly dispatched (SUCCESS) problems.
         """
         newly_dispatched = 0
-        try:
-            if not self.output_file.exists():
-                return 0
-
-            file_size = self.output_file.stat().st_size
-            if file_size < self._file_position:
-                logging.info("Output file truncated, resetting position")
-                self._file_position = 0
-
-            with open(self.output_file) as f:
-                f.seek(self._file_position)
-                new_lines = f.readlines()
-                self._file_position = f.tell()
-
-            for line in new_lines:
-                line = line.strip()
-                if not line:
+        for record in self._watcher.read_new():
+            with self._lock:
+                if (
+                    record.problem_id in self._results
+                    or record.problem_id in self._scoring_futures
+                ):
                     continue
+                self._envelope_meta[record.problem_id] = EnvelopeMeta(
+                    inference_failure_count=record.inference_failure_count,
+                    inference_total=record.inference_total,
+                    execution_time=record.execution_time,
+                )
 
-                envelope = self._parse_envelope(line)
-                if envelope is None:
-                    continue
+            if record.status is SandboxProblemStatus.SUCCESS:
+                future = self._scoring_executor.submit(
+                    self._score_problem,
+                    record.dialogue or [],
+                    record.problem_id,
+                )
+                self._scoring_futures[record.problem_id] = future
+                newly_dispatched += 1
+            else:
+                # FAILED / TIMED_OUT — record directly, no scoring dispatch.
+                terminal = self._build_terminal_result(
+                    problem_id=record.problem_id,
+                    status=record.status,
+                    error=record.error,
+                )
+                if terminal is not None:
+                    with self._lock:
+                        self._results[record.problem_id] = terminal
 
-                problem_id = envelope.get("problem_id")
-                status: SandboxProblemStatus = envelope["status"]
-                if not problem_id:
-                    continue
-                problem_id = str(problem_id)
-
-                with self._lock:
-                    if problem_id in self._results:
-                        continue
-                    if problem_id in self._scoring_futures:
-                        continue
-                    self._envelope_meta[problem_id] = EnvelopeMeta(
-                        inference_failure_count=int(
-                            envelope.get("inference_failure_count", 0)
-                        ),
-                        inference_total=int(envelope.get("inference_total", 0)),
-                        execution_time=float(envelope.get("execution_time", 0.0)),
-                    )
-
-                if status is SandboxProblemStatus.SUCCESS:
-                    dialogue = envelope.get("dialogue") or []
-                    future = self._scoring_executor.submit(
-                        self._score_problem, dialogue, problem_id
-                    )
-                    self._scoring_futures[problem_id] = future
-                    newly_dispatched += 1
-                else:
-                    # FAILED / TIMED_OUT — record directly, no scoring dispatch.
-                    terminal = self._build_terminal_result(
-                        problem_id=problem_id,
-                        status=status,
-                        error=envelope.get("error"),
-                    )
-                    if terminal is not None:
-                        with self._lock:
-                            self._results[problem_id] = terminal
-
-                if self._hard_deadline is not None and time.time() >= self._hard_deadline:
-                    break
-
-        except (OSError, IOError) as e:
-            logging.warning(f"Error reading output file: {e}")
-            self._file_position = 0
+            if self._hard_deadline is not None and time.time() >= self._hard_deadline:
+                break
 
         return newly_dispatched
-
-    def _parse_envelope(self, line: str) -> Optional[Dict[str, Any]]:
-        """Parse one envelope line. Returns None for malformed input.
-
-        Coerces ``status`` to ``SandboxProblemStatus`` once at the boundary;
-        unrecognized values cause the line to be skipped entirely so callers
-        can rely on `envelope["status"]` being a typed enum.
-        """
-        try:
-            line = line.replace("\x00", "")
-            envelope = json.loads(line)
-        except json.JSONDecodeError as e:
-            logging.warning(f"Skipping malformed envelope line: {e}")
-            return None
-        if not isinstance(envelope, dict):
-            logging.warning(
-                f"Skipping non-dict envelope line: {type(envelope).__name__}"
-            )
-            return None
-        raw_status = envelope.get("status")
-        if not raw_status:
-            logging.warning("Skipping envelope without status field")
-            return None
-        try:
-            envelope["status"] = SandboxProblemStatus(raw_status)
-        except ValueError:
-            logging.warning(
-                f"Skipping envelope with unrecognized status '{raw_status}'"
-            )
-            return None
-        return envelope
 
     def _build_terminal_result(
         self,
         *,
         problem_id: str,
         status: SandboxProblemStatus,
-        error: Optional[Dict[str, Any]],
+        error: Optional[ErrorInfo],
     ) -> Optional["ProblemResult"]:
         """Build a non-success ProblemResult from envelope-only data."""
         problem = self._id_to_problem.get(problem_id)
@@ -508,12 +445,10 @@ class ProgressReporter:
         inf_fail = meta.inference_failure_count if meta else 0
         inf_total = meta.inference_total if meta else 0
         exec_time = meta.execution_time if meta else 0.0
-        if error:
-            err_msg = error.get("message") if isinstance(error, dict) else None
-            if err_msg:
-                logging.info(
-                    f"Recording terminal {status} for {problem_id}: {err_msg[:80]}"
-                )
+        if error and error.message:
+            logging.info(
+                f"Recording terminal {status} for {problem_id}: {error.message[:80]}"
+            )
         return ProblemResult(
             problem_id=problem_id,
             category=category,
