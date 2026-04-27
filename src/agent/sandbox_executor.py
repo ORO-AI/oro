@@ -316,62 +316,86 @@ def execute_single_problem(
         result_queue.close()
 
 
-def _format_single_result(result: ExecutionResult) -> Optional[str]:
-    """Format a single ExecutionResult as a JSONL line for dialogue output.
+def _classify_error_type(
+    error_message: Optional[str], status: SandboxProblemStatus
+) -> str:
+    """Best-effort error type classification from message + status.
 
-    Returns the JSON string (without trailing newline), or None if the
-    result should be skipped (failed, wrong format).
+    No traceback — sandbox stderr already captured in the logs bundle.
     """
-    if not result.success:
-        return None
+    if status == SandboxProblemStatus.TIMED_OUT:
+        return "TimeoutError"
+    if not error_message:
+        return "UnknownError"
+    # Cheap heuristic: error_message often starts with the exception class name
+    head = error_message.split(":", 1)[0].strip()
+    return head if head.isidentifier() else "RuntimeError"
 
-    if not isinstance(result.result, list):
-        return None
 
-    dialogue_steps = result.result
+def _format_single_result(result: ExecutionResult) -> str:
+    """Format an ExecutionResult as one JSONL envelope line.
 
-    for i, step in enumerate(dialogue_steps):
-        if "extra_info" not in step:
-            step["extra_info"] = {
-                "step": i + 1,
-                "query": result.query,
-                "timestamp": int(time.time() * 1000),
-            }
-        if "query" not in step.get("extra_info", {}):
-            step.setdefault("extra_info", {})["query"] = result.query
-        if result.problem_id and "problem_id" not in step.get("extra_info", {}):
-            step.setdefault("extra_info", {})["problem_id"] = result.problem_id
+    Always returns a non-empty line — failures emit with dialogue=null so the
+    validator's ProgressReporter sees every problem outcome through one channel.
+    """
+    dialogue: Optional[List[Dict]] = None
+    if result.success and isinstance(result.result, list):
+        dialogue = result.result
+        # Decorate dialogue steps as before — preserves backward compat for
+        # downstream consumers that look at extra_info.
+        for i, step in enumerate(dialogue):
+            step.setdefault("extra_info", {})
+            step["extra_info"].setdefault("step", i + 1)
+            step["extra_info"].setdefault("query", result.query)
+            step["extra_info"].setdefault("timestamp", int(time.time() * 1000))
+            if result.problem_id:
+                step["extra_info"].setdefault("problem_id", result.problem_id)
+        # Stamp per-problem execution time onto the first step only — consumers
+        # that look at dialogue[0].extra_info still find it there.
+        if dialogue:
+            dialogue[0]["extra_info"].setdefault("execution_time", result.execution_time)
+        # Distribute proxy calls across steps by timestamp approximation.
+        # Calls before the first step go to step 0; calls between step N and
+        # N+1 go to step N.
+        if result.proxy_calls and dialogue:
+            step_timestamps = [
+                s["extra_info"].get("timestamp", 0) for s in dialogue
+            ]
+            # Per-attempt entries (kind="attempt") are diagnostic only — keep
+            # them out of the trajectory the judge sees.
+            summary_calls = [
+                c for c in result.proxy_calls if c.get("kind") != "attempt"
+            ]
+            buckets: Dict[int, List[Dict]] = {}
+            for call in summary_calls:
+                call_ts = call.get("timestamp", 0)
+                target = 0
+                for i, st in enumerate(step_timestamps):
+                    if st <= call_ts:
+                        target = i
+                    else:
+                        break
+                buckets.setdefault(target, []).append(call)
+            for idx, calls in buckets.items():
+                dialogue[idx]["extra_info"]["proxy_calls"] = calls
 
-    # Stamp per-problem execution time onto the first step only — consumers
-    # (validator progress_reporter) read it from dialogue[0].extra_info.
-    if dialogue_steps:
-        dialogue_steps[0].setdefault("extra_info", {})["execution_time"] = result.execution_time
+    error_obj: Optional[Dict] = None
+    if not result.success and result.error:
+        error_obj = {
+            "type": _classify_error_type(result.error, result.status),
+            "message": result.error,
+        }
 
-    # Distribute proxy calls across steps by timestamp approximation.
-    # Calls before the first step go to step 0; calls between step N and N+1
-    # go to step N.
-    if result.proxy_calls and dialogue_steps:
-        step_timestamps = [
-            s.get("extra_info", {}).get("timestamp", 0) for s in dialogue_steps
-        ]
-        # Per-attempt entries (kind="attempt") are diagnostic only — keep
-        # them out of the trajectory the judge sees.
-        summary_calls = [c for c in result.proxy_calls if c.get("kind") != "attempt"]
-        # Bucket each call into the latest step whose timestamp <= call timestamp
-        buckets: Dict[int, List[Dict]] = {}
-        for call in summary_calls:
-            call_ts = call.get("timestamp", 0)
-            target = 0
-            for i, st in enumerate(step_timestamps):
-                if st <= call_ts:
-                    target = i
-                else:
-                    break
-            buckets.setdefault(target, []).append(call)
-        for idx, calls in buckets.items():
-            dialogue_steps[idx].setdefault("extra_info", {})["proxy_calls"] = calls
-
-    return json.dumps(dialogue_steps)
+    envelope = {
+        "problem_id": result.problem_id,
+        "status": result.status.value,
+        "execution_time": result.execution_time,
+        "inference_failure_count": result.inference_failure_count or 0,
+        "inference_total": result.inference_total or 0,
+        "error": error_obj,
+        "dialogue": dialogue,
+    }
+    return json.dumps(envelope)
 
 
 def execute_problems_parallel(
@@ -439,9 +463,8 @@ def execute_problems_parallel(
 
                     if fout is not None:
                         line = _format_single_result(result)
-                        if line is not None:
-                            fout.write(line + "\n")
-                            fout.flush()
+                        fout.write(line + "\n")
+                        fout.flush()
 
                 except FutureTimeoutError:
                     problem = future_to_problem[future]

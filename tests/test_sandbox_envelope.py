@@ -1,9 +1,10 @@
 """Envelope format tests for ORO-907 sandbox->validator IPC."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 from src.agent import sandbox_executor
-from src.agent.sandbox_executor import ExecutionResult
+from src.agent.sandbox_executor import ExecutionResult, _format_single_result
 from src.agent.sandbox_status import SandboxProblemStatus
 
 
@@ -85,3 +86,66 @@ class TestExecuteSingleProblemStatus:
             )
         assert result.status == SandboxProblemStatus.FAILED
         assert result.success is False
+
+
+def _parse(line: str) -> dict:
+    obj = json.loads(line)
+    assert isinstance(obj, dict), f"Envelope must be a dict, got {type(obj)}"
+    return obj
+
+
+class TestFormatSingleResultEnvelope:
+    def test_success_envelope(self):
+        result = ExecutionResult(
+            query="q",
+            success=True,
+            result=[{"role": "user", "content": "hi", "extra_info": {"step": 1}}],
+            execution_time=2.5,
+            problem_id="p1",
+            inference_failure_count=0,
+            inference_total=4,
+            status=SandboxProblemStatus.SUCCESS,
+        )
+        env = _parse(_format_single_result(result))
+        assert env["problem_id"] == "p1"
+        assert env["status"] == "SUCCESS"
+        assert env["execution_time"] == 2.5
+        assert env["inference_failure_count"] == 0
+        assert env["inference_total"] == 4
+        assert env["error"] is None
+        assert isinstance(env["dialogue"], list) and len(env["dialogue"]) == 1
+
+    def test_failure_envelope_emits_with_null_dialogue(self):
+        result = ExecutionResult(
+            query="q",
+            success=False,
+            error="boom",
+            execution_time=0.5,
+            problem_id="p2",
+            inference_failure_count=1,
+            inference_total=2,
+            status=SandboxProblemStatus.FAILED,
+        )
+        env = _parse(_format_single_result(result))
+        assert env["problem_id"] == "p2"
+        assert env["status"] == "FAILED"
+        assert env["dialogue"] is None
+        assert env["error"]["message"] == "boom"
+        assert env["error"]["type"]  # non-empty
+
+    def test_timeout_envelope_marks_status_and_records_partial_counts(self):
+        result = ExecutionResult(
+            query="q",
+            success=False,
+            error="Execution exceeded timeout of 300s",
+            execution_time=300.0,
+            problem_id="p3",
+            inference_failure_count=0,
+            inference_total=3,
+            status=SandboxProblemStatus.TIMED_OUT,
+        )
+        env = _parse(_format_single_result(result))
+        assert env["status"] == "TIMED_OUT"
+        assert env["dialogue"] is None
+        assert env["inference_total"] == 3
+        assert env["error"]["type"] == "TimeoutError"
