@@ -272,6 +272,7 @@ def execute_single_problem(
             inference_failure_count=inf_failures,
             inference_total=inf_total,
             proxy_calls=proxy_calls or None,
+            status=SandboxProblemStatus.TIMED_OUT,
         )
 
     try:
@@ -287,6 +288,7 @@ def execute_single_problem(
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
                     proxy_calls=proxy_calls or None,
+                    status=SandboxProblemStatus.SUCCESS,
                 )
             return ExecutionResult(
                 query=query,
@@ -297,6 +299,7 @@ def execute_single_problem(
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
                 proxy_calls=proxy_calls or None,
+                status=SandboxProblemStatus.FAILED,
             )
         return ExecutionResult(
             query=query,
@@ -307,6 +310,7 @@ def execute_single_problem(
             inference_failure_count=inf_failures,
             inference_total=inf_total,
             proxy_calls=proxy_calls or None,
+            status=SandboxProblemStatus.FAILED,
         )
     finally:
         result_queue.close()
@@ -442,6 +446,7 @@ def execute_problems_parallel(
                 except FutureTimeoutError:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
+                    problem_id = problem.get("problem_id") or problem.get("id")
                     logger.error(
                         f"Future for problem '{query}' timed out during result retrieval"
                     )
@@ -451,11 +456,14 @@ def execute_problems_parallel(
                             success=False,
                             error="Future timeout during result retrieval",
                             execution_time=timeout_per_problem,
+                            problem_id=problem_id,
+                            status=SandboxProblemStatus.TIMED_OUT,
                         )
                     )
                 except Exception as e:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
+                    problem_id = problem.get("problem_id") or problem.get("id")
                     logger.error(
                         f"Unexpected error retrieving result for '{query}': {e}"
                     )
@@ -465,6 +473,8 @@ def execute_problems_parallel(
                             success=False,
                             error=f"Unexpected error: {str(e)}",
                             execution_time=0.0,
+                            problem_id=problem_id,
+                            status=SandboxProblemStatus.FAILED,
                         )
                     )
     finally:
