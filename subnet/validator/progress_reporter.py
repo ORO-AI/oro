@@ -383,10 +383,8 @@ class ProgressReporter:
     def _read_and_dispatch(self) -> int:
         """Read new envelope lines from output file.
 
-        SUCCESS envelopes are dispatched to the scoring pool. FAILED and
-        TIMED_OUT envelopes are recorded directly without scoring (no dialogue
-        to score). Per-problem inference counts and execution_time come from
-        the envelope itself — no sidecar reads on the validator side.
+        SUCCESS envelopes are dispatched to the scoring pool; FAILED and
+        TIMED_OUT envelopes are recorded directly without scoring.
 
         Returns the number of newly dispatched (SUCCESS) problems.
         """
@@ -427,10 +425,10 @@ class ProgressReporter:
                         continue
                     self._envelope_meta[problem_id] = EnvelopeMeta(
                         inference_failure_count=int(
-                            envelope.get("inference_failure_count") or 0
+                            envelope.get("inference_failure_count", 0)
                         ),
-                        inference_total=int(envelope.get("inference_total") or 0),
-                        execution_time=float(envelope.get("execution_time") or 0.0),
+                        inference_total=int(envelope.get("inference_total", 0)),
+                        execution_time=float(envelope.get("execution_time", 0.0)),
                     )
 
                 if status is SandboxProblemStatus.SUCCESS:
@@ -536,11 +534,7 @@ class ProgressReporter:
                 logging.error(f"Scoring worker failed for {pid}: {exc}")
 
     def _score_problem(self, dialogue: list, problem_id: str) -> None:
-        """Score a single problem end-to-end. Runs in a worker thread.
-
-        Receives the parsed dialogue (list of step dicts) directly from the
-        envelope, instead of reparsing a JSONL line.
-        """
+        """Score a single problem end-to-end. Runs in a worker thread."""
         if not self._scorers:
             return
 
@@ -724,11 +718,8 @@ class ProgressReporter:
     def _mark_remaining_timed_out(self) -> None:
         """Mark all unscored problems as TIMED_OUT in local results.
 
-        After ORO-907 the envelope path records FAILED/TIMED_OUT results
-        directly when their envelopes arrive. This sweep therefore only
-        reaches problems that genuinely never produced an envelope — typically
-        a sandbox death before write, a never-started problem, or a partial
-        run cut off by hard deadline.
+        Only reaches problems that never produced an envelope (sandbox death
+        before write, never-started, or partial run cut off by hard deadline).
         """
         with self._lock:
             scored_ids = set(self._results.keys())
