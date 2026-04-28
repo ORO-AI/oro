@@ -101,47 +101,30 @@ class TestHeartbeatManager:
         manager.stop()
         assert mock_backend_client.heartbeat.call_count >= 2
 
-    def test_passes_service_versions_to_heartbeat(self, mock_backend_client):
-        versions = {"search-server": "sha256:abc123def4", "proxy": "sha256:def456abc7"}
+    @pytest.mark.parametrize(
+        "service_versions,metrics",
+        [
+            (None, None),
+            ({"search-server": "sha256:abc123def4"}, None),
+            (None, {"cpu_pct": 12.5, "ram_pct": 30.0}),
+            ({"search-server": "sha256:abc123def4"}, {"cpu_pct": 12.5}),
+        ],
+    )
+    def test_forwards_payload_to_heartbeat(
+        self, mock_backend_client, service_versions, metrics
+    ):
         manager = HeartbeatManager(
             backend_client=mock_backend_client,
             eval_run_id="run-123",
             interval_seconds=0.1,
-            service_versions=versions,
+            service_versions=service_versions,
+            resource_metrics_provider=(lambda: metrics) if metrics is not None else None,
         )
         manager.start()
         time.sleep(0.15)
         manager.stop()
         mock_backend_client.heartbeat.assert_called_with(
-            "run-123", service_versions=versions, resource_metrics=None
-        )
-
-    def test_no_service_versions_by_default(self, mock_backend_client):
-        manager = HeartbeatManager(
-            backend_client=mock_backend_client,
-            eval_run_id="run-123",
-            interval_seconds=0.1,
-        )
-        manager.start()
-        time.sleep(0.15)
-        manager.stop()
-        mock_backend_client.heartbeat.assert_called_with(
-            "run-123", service_versions=None, resource_metrics=None
-        )
-
-    def test_passes_resource_metrics_to_heartbeat(self, mock_backend_client):
-        metrics = {"cpu_pct": 12.5, "ram_pct": 30.0}
-        manager = HeartbeatManager(
-            backend_client=mock_backend_client,
-            eval_run_id="run-123",
-            interval_seconds=0.1,
-            resource_metrics_provider=lambda: metrics,
-        )
-        manager.start()
-        time.sleep(0.15)
-        manager.stop()
-        mock_backend_client.heartbeat.assert_called_with(
-            "run-123", service_versions=None, resource_metrics=metrics
+            "run-123", service_versions=service_versions, resource_metrics=metrics
         )
 
     def test_resource_metrics_provider_failure_does_not_break_heartbeat(
