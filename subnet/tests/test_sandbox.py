@@ -5,7 +5,12 @@ import os
 from unittest import mock
 
 
-from subnet.sandbox import host_path, load_problems, build_sandbox_command, attach_title_embeddings
+from subnet.sandbox import (
+    host_path,
+    load_problems,
+    build_sandbox_command,
+    attach_title_embeddings,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +193,9 @@ class TestBuildSandboxCommand:
         # Non-root user
         user_idx = cmd.index("--user")
         assert cmd[user_idx + 1] == "1000:1000"
+        # CPU shares — sandbox at half the default so validator preempts under contention
+        shares_idx = cmd.index("--cpu-shares")
+        assert cmd[shares_idx + 1] == "512"
 
     def test_chutes_access_token_injected(self):
         cmd = build_sandbox_command(

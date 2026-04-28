@@ -11,9 +11,7 @@ from typing import List, Optional, Tuple
 
 
 # Docker configuration — shared between test_runner and validator
-SANDBOX_IMAGE = os.environ.get(
-    "SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest"
-)
+SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
 
@@ -150,6 +148,11 @@ def build_sandbox_command(
         "256",
         "--ulimit",
         "nofile=1024:1024",
+        # CPU priority — validator + search-server (default cpu-shares=1024) preempt the
+        # sandbox under contention so heartbeats and the work-claim loop stay responsive.
+        # Sandbox still uses idle CPU; this only matters when the host is saturated.
+        "--cpu-shares",
+        "512",
         "--user",
         "1000:1000",
         # Security hardening — minimize container attack surface
