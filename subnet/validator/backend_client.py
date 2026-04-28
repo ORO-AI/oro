@@ -36,6 +36,7 @@ from oro_sdk.models.lease_expired_error import LeaseExpiredError
 from oro_sdk.models.missing_score_error import MissingScoreError
 from oro_sdk.models.not_run_owner_error import NotRunOwnerError
 from oro_sdk.models.run_already_complete_error import RunAlreadyCompleteError
+from oro_sdk.models.heartbeat_request import HeartbeatRequest as SdkHeartbeatRequest
 from oro_sdk.models.heartbeat_response import HeartbeatResponse
 from oro_sdk.models.presign_upload_request import PresignUploadRequest
 from oro_sdk.models.presign_upload_response import PresignUploadResponse
@@ -53,29 +54,21 @@ _HEARTBEAT_METRIC_KEYS = ("cpu_pct", "ram_pct", "disk_pct", "docker_container_co
 def _build_heartbeat_body(
     service_versions: Optional[dict[str, str]],
     resource_metrics: Optional[dict[str, Any]],
-) -> Optional[Any]:
+) -> Optional[SdkHeartbeatRequest]:
     """Build an SdkHeartbeatRequest from optional inputs, or None if both empty.
 
     Centralised so claim_work and heartbeat construct the body the same way.
     """
-    has_metrics = bool(resource_metrics) and any(
-        resource_metrics.get(k) is not None for k in _HEARTBEAT_METRIC_KEYS
-    )
-    if service_versions is None and not has_metrics:
-        return None
-
-    from oro_sdk.models.heartbeat_request import (
-        HeartbeatRequest as SdkHeartbeatRequest,
-    )
-
     body_kwargs: dict[str, Any] = {}
     if service_versions is not None:
         body_kwargs["service_versions"] = service_versions
-    if has_metrics:
+    if resource_metrics:
         for key in _HEARTBEAT_METRIC_KEYS:
-            value = resource_metrics.get(key) if resource_metrics else None
+            value = resource_metrics.get(key)
             if value is not None:
                 body_kwargs[key] = value
+    if not body_kwargs:
+        return None
     return SdkHeartbeatRequest(**body_kwargs)
 
 
