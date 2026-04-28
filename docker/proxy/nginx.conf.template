@@ -59,6 +59,34 @@ http {
             js_content validate_model.validate;
         }
 
+        # Internal location: fetch the allowed-models list from the ORO Backend
+        # so the proxy stays in sync without an image rebuild. njs subrequests
+        # this on cache miss; per-worker cache TTL lives in validate_model.js.
+        location = /_backend_models {
+            internal;
+
+            resolver 1.1.1.1 ipv6=off valid=300s;
+            set $backend_models_url ${BACKEND_URL}/v1/public/inference/models;
+            proxy_method GET;
+            proxy_pass $backend_models_url;
+            proxy_ssl_server_name on;
+            proxy_http_version 1.1;
+            # Strip parent-request headers + body and overwrite the framing
+            # ones — CloudFront WAF 403s if it sees a Content-Length without
+            # a body or the parent's Content-Type on a GET.
+            proxy_pass_request_headers off;
+            proxy_pass_request_body off;
+            proxy_set_header Host ${BACKEND_HOST};
+            proxy_set_header Content-Length "0";
+            proxy_set_header Content-Type "";
+            proxy_set_header Accept "application/json";
+            proxy_set_header User-Agent "oro-proxy/1.0";
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 5s;
+            proxy_read_timeout 5s;
+        }
+
         # Internal location for proxying validated requests to Chutes API
         location /_chutes_proxy/ {
             internal;
