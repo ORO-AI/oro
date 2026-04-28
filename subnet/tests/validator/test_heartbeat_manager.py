@@ -113,7 +113,7 @@ class TestHeartbeatManager:
         time.sleep(0.15)
         manager.stop()
         mock_backend_client.heartbeat.assert_called_with(
-            "run-123", service_versions=versions
+            "run-123", service_versions=versions, resource_metrics=None
         )
 
     def test_no_service_versions_by_default(self, mock_backend_client):
@@ -126,5 +126,40 @@ class TestHeartbeatManager:
         time.sleep(0.15)
         manager.stop()
         mock_backend_client.heartbeat.assert_called_with(
-            "run-123", service_versions=None
+            "run-123", service_versions=None, resource_metrics=None
         )
+
+    def test_passes_resource_metrics_to_heartbeat(self, mock_backend_client):
+        metrics = {"cpu_pct": 12.5, "ram_pct": 30.0}
+        manager = HeartbeatManager(
+            backend_client=mock_backend_client,
+            eval_run_id="run-123",
+            interval_seconds=0.1,
+            resource_metrics_provider=lambda: metrics,
+        )
+        manager.start()
+        time.sleep(0.15)
+        manager.stop()
+        mock_backend_client.heartbeat.assert_called_with(
+            "run-123", service_versions=None, resource_metrics=metrics
+        )
+
+    def test_resource_metrics_provider_failure_does_not_break_heartbeat(
+        self, mock_backend_client
+    ):
+        def boom():
+            raise RuntimeError("psutil exploded")
+
+        manager = HeartbeatManager(
+            backend_client=mock_backend_client,
+            eval_run_id="run-123",
+            interval_seconds=0.1,
+            resource_metrics_provider=boom,
+        )
+        manager.start()
+        time.sleep(0.15)
+        manager.stop()
+        mock_backend_client.heartbeat.assert_called_with(
+            "run-123", service_versions=None, resource_metrics=None
+        )
+        assert manager.is_healthy()

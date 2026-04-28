@@ -2,7 +2,7 @@
 
 import threading
 import logging
-from typing import Optional
+from typing import Any, Callable, Optional
 from uuid import UUID
 
 from .backend_client import BackendClient, BackendError
@@ -22,11 +22,13 @@ class HeartbeatManager:
         eval_run_id: UUID,
         interval_seconds: int = 30,
         service_versions: dict[str, str] | None = None,
+        resource_metrics_provider: Optional[Callable[[], dict[str, Any]]] = None,
     ):
         self.backend_client = backend_client
         self.eval_run_id = eval_run_id
         self.interval_seconds = interval_seconds
         self.service_versions = service_versions
+        self.resource_metrics_provider = resource_metrics_provider
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -71,8 +73,19 @@ class HeartbeatManager:
         """Background thread main loop."""
         while not self._stop_event.is_set():
             try:
+                resource_metrics: Optional[dict[str, Any]] = None
+                if self.resource_metrics_provider is not None:
+                    try:
+                        resource_metrics = self.resource_metrics_provider()
+                    except Exception:
+                        logging.debug(
+                            "resource_metrics_provider raised; sending heartbeat without metrics",
+                            exc_info=True,
+                        )
                 response = self.backend_client.heartbeat(
-                    self.eval_run_id, service_versions=self.service_versions
+                    self.eval_run_id,
+                    service_versions=self.service_versions,
+                    resource_metrics=resource_metrics,
                 )
                 with self._lock:
                     self._healthy = True

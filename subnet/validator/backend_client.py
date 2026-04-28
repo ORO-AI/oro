@@ -47,6 +47,38 @@ from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
 
 
+_HEARTBEAT_METRIC_KEYS = ("cpu_pct", "ram_pct", "disk_pct", "docker_container_count")
+
+
+def _build_heartbeat_body(
+    service_versions: Optional[dict[str, str]],
+    resource_metrics: Optional[dict[str, Any]],
+) -> Optional[Any]:
+    """Build an SdkHeartbeatRequest from optional inputs, or None if both empty.
+
+    Centralised so claim_work and heartbeat construct the body the same way.
+    """
+    has_metrics = bool(resource_metrics) and any(
+        resource_metrics.get(k) is not None for k in _HEARTBEAT_METRIC_KEYS
+    )
+    if service_versions is None and not has_metrics:
+        return None
+
+    from oro_sdk.models.heartbeat_request import (
+        HeartbeatRequest as SdkHeartbeatRequest,
+    )
+
+    body_kwargs: dict[str, Any] = {}
+    if service_versions is not None:
+        body_kwargs["service_versions"] = service_versions
+    if has_metrics:
+        for key in _HEARTBEAT_METRIC_KEYS:
+            value = resource_metrics.get(key) if resource_metrics else None
+            if value is not None:
+                body_kwargs[key] = value
+    return SdkHeartbeatRequest(**body_kwargs)
+
+
 class BackendError(Exception):
     """Backend API error with typed error details.
 
@@ -287,12 +319,16 @@ class BackendClient:
             )
 
     def claim_work(
-        self, service_versions: Optional[dict[str, str]] = None
+        self,
+        service_versions: Optional[dict[str, str]] = None,
+        resource_metrics: Optional[dict[str, Any]] = None,
     ) -> Optional[ClaimWorkResponse]:
         """Claim the next available work item.
 
         Args:
             service_versions: Optional Docker image digests for validator stack services.
+            resource_metrics: Optional host metrics dict — keys cpu_pct, ram_pct,
+                disk_pct, docker_container_count. Each is independently optional.
 
         Returns:
             ClaimWorkResponse if work is available, None if no work (204).
@@ -307,12 +343,9 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        if service_versions is not None:
-            from oro_sdk.models.heartbeat_request import (
-                HeartbeatRequest as SdkHeartbeatRequest,
-            )
-
-            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
+        body = _build_heartbeat_body(service_versions, resource_metrics)
+        if body is not None:
+            kwargs["body"] = body
 
         return self._call_api(
             claim_work.sync_detailed,
@@ -325,12 +358,14 @@ class BackendClient:
         self,
         eval_run_id: UUID,
         service_versions: Optional[dict[str, str]] = None,
+        resource_metrics: Optional[dict[str, Any]] = None,
     ) -> HeartbeatResponse:
         """Send heartbeat to maintain lease.
 
         Args:
             eval_run_id: The evaluation run ID.
             service_versions: Optional Docker image digests for validator stack services.
+            resource_metrics: Optional host metrics dict — same keys as claim_work.
 
         Returns:
             HeartbeatResponse with updated lease expiration.
@@ -346,13 +381,9 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        # Pass service_versions as request body if available
-        if service_versions is not None:
-            from oro_sdk.models.heartbeat_request import (
-                HeartbeatRequest as SdkHeartbeatRequest,
-            )
-
-            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
+        body = _build_heartbeat_body(service_versions, resource_metrics)
+        if body is not None:
+            kwargs["body"] = body
 
         return self._call_api(
             heartbeat.sync_detailed,
