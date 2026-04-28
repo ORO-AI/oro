@@ -9,7 +9,7 @@ dependencies = [
     "bittensor-wallet==4.0.1",
     "oro-sdk==1.0.50",
     "psutil>=5.9.0",
-    "requests==2.32.5",
+    "requests==2.33.0",
     "sentence-transformers==5.3.0",
     "torch>=2.11.0,<3",
     "ujson==5.12.0",
