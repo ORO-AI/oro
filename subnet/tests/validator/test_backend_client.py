@@ -55,12 +55,13 @@ class TestBackendClientClaimWork:
         with patch(
             "validator.backend_client.claim_work.sync_detailed",
             return_value=mock_response,
-        ):
+        ) as mock_call:
             result = client.claim_work()
 
         assert result is not None
         assert result.eval_run_id == UUID("12345678-1234-1234-1234-123456789012")
         assert result.code_download_url == "https://example.com/code.py"
+        assert "body" not in mock_call.call_args.kwargs
 
     def test_claim_work_with_service_versions(self, mock_wallet):
         from oro_sdk.models.claim_work_response import ClaimWorkResponse
@@ -93,6 +94,34 @@ class TestBackendClientClaimWork:
         assert "body" in call_kwargs.kwargs
         body = call_kwargs.kwargs["body"]
         assert body.service_versions == versions
+
+    def test_claim_work_with_resource_metrics(self, mock_wallet):
+        from oro_sdk.models.claim_work_response import ClaimWorkResponse
+
+        client = BackendClient("https://api.example.com", mock_wallet)
+        sdk_response = ClaimWorkResponse(
+            eval_run_id=UUID("12345678-1234-1234-1234-123456789012"),
+            agent_version_id=UUID("87654321-4321-4321-4321-210987654321"),
+            suite_id=789,
+            lease_expires_at=datetime(2025, 1, 13, 12, 0, 0),
+            code_download_url="https://example.com/code.py",
+        )
+        metrics = {
+            "cpu_pct": 42.5,
+            "ram_pct": 31.0,
+            "disk_pct": 18.7,
+            "docker_container_count": 4,
+        }
+
+        with patch(
+            "validator.backend_client.claim_work.sync_detailed",
+            return_value=_create_response(200, sdk_response),
+        ) as mock_call:
+            client.claim_work(resource_metrics=metrics)
+
+        body = mock_call.call_args.kwargs["body"]
+        for key, value in metrics.items():
+            assert getattr(body, key) == value
 
     def test_claim_work_no_work_available(self, mock_wallet):
         client = BackendClient("https://api.example.com", mock_wallet)

@@ -36,6 +36,7 @@ from oro_sdk.models.lease_expired_error import LeaseExpiredError
 from oro_sdk.models.missing_score_error import MissingScoreError
 from oro_sdk.models.not_run_owner_error import NotRunOwnerError
 from oro_sdk.models.run_already_complete_error import RunAlreadyCompleteError
+from oro_sdk.models.heartbeat_request import HeartbeatRequest as SdkHeartbeatRequest
 from oro_sdk.models.heartbeat_response import HeartbeatResponse
 from oro_sdk.models.presign_upload_request import PresignUploadRequest
 from oro_sdk.models.presign_upload_response import PresignUploadResponse
@@ -45,6 +46,30 @@ from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
+
+
+_HEARTBEAT_METRIC_KEYS = ("cpu_pct", "ram_pct", "disk_pct", "docker_container_count")
+
+
+def _build_heartbeat_body(
+    service_versions: Optional[dict[str, str]],
+    resource_metrics: Optional[dict[str, Any]],
+) -> Optional[SdkHeartbeatRequest]:
+    """Build an SdkHeartbeatRequest from optional inputs, or None if both empty.
+
+    Centralised so claim_work and heartbeat construct the body the same way.
+    """
+    body_kwargs: dict[str, Any] = {}
+    if service_versions is not None:
+        body_kwargs["service_versions"] = service_versions
+    if resource_metrics:
+        for key in _HEARTBEAT_METRIC_KEYS:
+            value = resource_metrics.get(key)
+            if value is not None:
+                body_kwargs[key] = value
+    if not body_kwargs:
+        return None
+    return SdkHeartbeatRequest(**body_kwargs)
 
 
 class BackendError(Exception):
@@ -287,12 +312,16 @@ class BackendClient:
             )
 
     def claim_work(
-        self, service_versions: Optional[dict[str, str]] = None
+        self,
+        service_versions: Optional[dict[str, str]] = None,
+        resource_metrics: Optional[dict[str, Any]] = None,
     ) -> Optional[ClaimWorkResponse]:
         """Claim the next available work item.
 
         Args:
             service_versions: Optional Docker image digests for validator stack services.
+            resource_metrics: Optional host metrics dict — keys cpu_pct, ram_pct,
+                disk_pct, docker_container_count. Each is independently optional.
 
         Returns:
             ClaimWorkResponse if work is available, None if no work (204).
@@ -307,12 +336,9 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        if service_versions is not None:
-            from oro_sdk.models.heartbeat_request import (
-                HeartbeatRequest as SdkHeartbeatRequest,
-            )
-
-            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
+        body = _build_heartbeat_body(service_versions, resource_metrics)
+        if body is not None:
+            kwargs["body"] = body
 
         return self._call_api(
             claim_work.sync_detailed,
@@ -325,12 +351,14 @@ class BackendClient:
         self,
         eval_run_id: UUID,
         service_versions: Optional[dict[str, str]] = None,
+        resource_metrics: Optional[dict[str, Any]] = None,
     ) -> HeartbeatResponse:
         """Send heartbeat to maintain lease.
 
         Args:
             eval_run_id: The evaluation run ID.
             service_versions: Optional Docker image digests for validator stack services.
+            resource_metrics: Optional host metrics dict — same keys as claim_work.
 
         Returns:
             HeartbeatResponse with updated lease expiration.
@@ -346,13 +374,9 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        # Pass service_versions as request body if available
-        if service_versions is not None:
-            from oro_sdk.models.heartbeat_request import (
-                HeartbeatRequest as SdkHeartbeatRequest,
-            )
-
-            kwargs["body"] = SdkHeartbeatRequest(service_versions=service_versions)
+        body = _build_heartbeat_body(service_versions, resource_metrics)
+        if body is not None:
+            kwargs["body"] = body
 
         return self._call_api(
             heartbeat.sync_detailed,

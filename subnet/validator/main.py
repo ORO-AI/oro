@@ -22,6 +22,7 @@ from src.agent.scoring import blend_final_score
 from src.agent.types import SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
+from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
@@ -461,7 +462,8 @@ class Validator:
                     # Claim work from Backend
                     logging.info("Claiming work from Backend...")
                     work = self.backend_client.claim_work(
-                        service_versions=self.service_versions
+                        service_versions=self.service_versions,
+                        resource_metrics=collect_resource_metrics(),
                     )
 
                     if work is None:
@@ -653,6 +655,7 @@ class Validator:
             eval_run_id=eval_run_id,
             interval_seconds=self.config.heartbeat_interval,
             service_versions=self.service_versions,
+            resource_metrics_provider=collect_resource_metrics,
         )
         heartbeat_mgr.start()
         logging.info(f"Heartbeat manager started for {eval_run_id_str}")
