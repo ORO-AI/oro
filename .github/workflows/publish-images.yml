@@ -136,14 +136,18 @@ jobs:
           name: digest-proxy-linux-amd64
           path: /tmp/digests/proxy
 
-      # Override ENTRYPOINT so argv runs our import check instead of booting
-      # a live validator. Validator deps live in a uv-managed venv, so we
-      # enter through `uv run` rather than the system python.
+      # Use the baked-in venv at .venv/bin/python — the same interpreter the
+      # ENTRYPOINT runs in production. Going through `uv run` instead would
+      # re-resolve deps from pyproject.toml at exec time and silently install
+      # anything missing from the image, hiding lockfile drift. v1.0.59 shipped
+      # exactly that bug: psutil was added to pyproject.toml but uv.lock wasn't
+      # regenerated, so `uv sync --frozen` skipped psutil at build time and
+      # the validator ImportError'd at runtime.
       - name: Smoke test validator image
         run: |
           digest=$(ls /tmp/digests/validator | head -1)
-          docker run --rm --entrypoint uv ${{ env.IMAGE_PREFIX }}/validator@sha256:$digest \
-            run python -c "import subnet.validator.main; print('Validator module OK')"
+          docker run --rm --entrypoint .venv/bin/python ${{ env.IMAGE_PREFIX }}/validator@sha256:$digest \
+            -c "import subnet.validator.main; print('Validator module OK')"
 
       - name: Smoke test sandbox image
         run: |
