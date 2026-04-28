@@ -130,6 +130,12 @@ jobs:
           name: digest-sandbox-linux-amd64
           path: /tmp/digests/sandbox
 
+      - name: Download proxy digest (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-proxy-linux-amd64
+          path: /tmp/digests/proxy
+
       # Override ENTRYPOINT so argv runs our import check instead of booting
       # a live validator. Validator deps live in a uv-managed venv, so we
       # enter through `uv run` rather than the system python.
@@ -144,6 +150,33 @@ jobs:
           digest=$(ls /tmp/digests/sandbox | head -1)
           docker run --rm --entrypoint python ${{ env.IMAGE_PREFIX }}/sandbox@sha256:$digest \
             -c "import src.agent.agent_interface; print('Sandbox module OK')"
+
+      # Boot the proxy with the same env vars that docker-compose.yml exports
+      # to a real validator deploy. If a new ${VAR} is added to
+      # nginx.conf.template without either (a) a default in the proxy
+      # Dockerfile CMD or (b) a corresponding entry in docker-compose.yml,
+      # envsubst writes empty, nginx fails with `[emerg] invalid number of
+      # arguments`, and the container exits — failing this step before the
+      # tag is published. Without this guard, v1.0.56 shipped that exact
+      # regression to staging.
+      - name: Smoke test proxy image
+        run: |
+          digest=$(ls /tmp/digests/proxy | head -1)
+          docker run -d --name proxy-smoke \
+            -e SEARCH_SERVER_URL=search-server \
+            -e SEARCH_SERVER_PORT=5632 \
+            -e CHUTES_HOST=llm.chutes.ai \
+            ${{ env.IMAGE_PREFIX }}/proxy@sha256:$digest
+          sleep 5
+          state=$(docker inspect -f '{{.State.Status}}' proxy-smoke)
+          if [ "$state" != "running" ]; then
+            echo "::error::Proxy state is '$state' (expected 'running') — nginx config likely failed to render"
+            docker logs proxy-smoke 2>&1 || true
+            docker rm -f proxy-smoke 2>/dev/null || true
+            exit 1
+          fi
+          echo "Proxy nginx config rendered and started cleanly"
+          docker rm -f proxy-smoke
 
   merge:
     needs: [determine-tag, smoke-test]
