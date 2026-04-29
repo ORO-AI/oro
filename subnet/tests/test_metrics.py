@@ -18,33 +18,22 @@ def _names() -> set[str]:
 
 
 class TestMetricsRegistration:
-    """Verify each metric is registered under the documented name."""
+    """Each metric is registered under its expected base name.
 
-    def test_active_runs_registered(self):
-        assert "validator_active_runs" in _names()
+    `prometheus_client` strips the `_total` suffix from Counter names in the
+    registry — it's only re-added on exposition.
+    """
 
-    def test_heartbeat_total_registered(self):
-        # Counter names get "_total" suffix from prometheus_client only on
-        # exposition; the metric.name attribute already includes it via the
-        # explicit name we passed, so the registry sees the bare base name.
-        assert (
-            "validator_heartbeat" in _names() or "validator_heartbeat_total" in _names()
-        )
-
-    def test_claim_work_seconds_registered(self):
-        assert "validator_claim_work_seconds" in _names()
-
-    def test_claim_work_total_registered(self):
-        assert (
-            "validator_claim_work" in _names()
-            or "validator_claim_work_total" in _names()
-        )
-
-    def test_sandbox_active_registered(self):
-        assert "validator_sandbox_active" in _names()
-
-    def test_sandbox_duration_registered(self):
-        assert "validator_sandbox_duration_seconds" in _names()
+    def test_all_metrics_registered(self):
+        names = _names()
+        assert {
+            "validator_active_runs",
+            "validator_heartbeat",
+            "validator_claim_work_seconds",
+            "validator_claim_work",
+            "validator_sandbox_active",
+            "validator_sandbox_duration_seconds",
+        }.issubset(names)
 
 
 class TestMetricBehavior:

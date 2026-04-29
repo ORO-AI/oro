@@ -388,7 +388,9 @@ class Validator:
                 return None, metadata
 
         except subprocess.TimeoutExpired:
-            metadata["duration_seconds"] = round(time.time() - start_time, 1)
+            duration = time.time() - start_time
+            SANDBOX_DURATION_SECONDS.observe(duration)
+            metadata["duration_seconds"] = round(duration, 1)
             metadata["exit_code"] = -1
             if stderr_log.exists():
                 stderr_content = stderr_log.read_text()
