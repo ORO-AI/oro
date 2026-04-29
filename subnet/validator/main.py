@@ -112,8 +112,8 @@ class Validator:
         parser.add_argument(
             "--poll-interval",
             type=int,
-            default=int(os.environ.get("ORO_POLL_INTERVAL", "30")),
-            help="Seconds between work claim attempts when no work (env: ORO_POLL_INTERVAL)",
+            default=int(os.environ.get("ORO_POLL_INTERVAL", "60")),
+            help="Seconds between work claim attempts when no work (env: ORO_POLL_INTERVAL, default: 60)",
         )
         parser.add_argument(
             "--heartbeat-interval",
