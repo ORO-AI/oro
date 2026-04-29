@@ -18,6 +18,16 @@ import requests
 # Base delay for rate-limit retries (seconds). Matches ProxyClient convention.
 RATE_LIMIT_RETRY_DELAY = 5
 
+# Per-call timeout for the judge HTTP request. 235B-class models
+# (MiniMax-M2.5, Qwen3-32B) generate the judge JSON in ~10–30s under light
+# load but tail out to 60s+ under race-time contention from multiple validators
+# hitting the same Chutes instance. Setting this too tight causes the call to
+# time out on the validator side and rotate to the busier fallback models,
+# which 429 immediately when the others are saturated — the eval then bleeds
+# all 8 retries on infra failure rather than waiting one slow but successful
+# call out.
+JUDGE_REQUEST_TIMEOUT = 90
+
 logger = logging.getLogger(__name__)
 
 PROXY_URL = "http://proxy:80"
@@ -436,7 +446,7 @@ def score_reasoning_quality(
                         {"role": "user", "content": trajectory_text},
                     ],
                 },
-                timeout=30,
+                timeout=JUDGE_REQUEST_TIMEOUT,
             )
 
             if resp.status_code == 200:
