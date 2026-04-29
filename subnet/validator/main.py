@@ -48,6 +48,55 @@ def _rewrite_localhost_url(url: str) -> str:
     return url
 
 
+def _split_output_by_problem(
+    output_file: Path,
+    problem_ids: list[UUID],
+) -> dict[str, bytes]:
+    """Read sandbox output.jsonl and group per-problem upload payloads.
+
+    Sandbox writes one envelope dict per line (ORO-907 IPC):
+    ``{"problem_id": "...", "status": "...", "dialogue": [steps], ...}``.
+    The Frontend's ``Trajectory`` type is ``TrajectoryStep[]``, so we
+    extract ``dialogue`` and use *that* JSON array as the upload payload —
+    not the whole envelope. The envelope's status / timing / error fields
+    are not lost: they flow back via the progress-report path
+    (ProgressReporter → Backend → eval-run detail endpoint).
+
+    Returns ``{problem_id_str: bytes_to_upload}`` (un-gzipped — caller
+    handles compression). If parsing produces zero entries we fall back
+    to uploading the entire file under ``problem_ids[0]`` so a corrupt
+    run still has *some* artifact attached for forensics.
+    """
+    problem_lines: dict[str, bytes] = {}
+
+    for raw_line in output_file.read_bytes().splitlines():
+        if not raw_line.strip():
+            continue
+        try:
+            envelope = json.loads(raw_line)
+        except json.JSONDecodeError:
+            logging.debug(f"Skipping unparseable JSONL line in {output_file}")
+            continue
+
+        if not (isinstance(envelope, dict) and envelope.get("problem_id")):
+            logging.debug(
+                f"Skipping line missing problem_id envelope in {output_file}"
+            )
+            continue
+
+        pid = str(envelope["problem_id"])
+        dialogue = envelope.get("dialogue") or []
+        problem_lines[pid] = json.dumps(dialogue).encode("utf-8")
+
+    if not problem_lines and problem_ids:
+        logging.warning(
+            "Could not split output by problem_id, uploading as single file"
+        )
+        problem_lines[str(problem_ids[0])] = output_file.read_bytes()
+
+    return problem_lines
+
+
 class Validator:
     def __init__(self):
         self.config = self.get_config()
@@ -831,30 +880,7 @@ class Validator:
                 logging.warning("No problem_ids available for log upload, skipping")
                 return ""
 
-            # Parse JSONL and group lines by problem_id
-            problem_lines: dict[str, bytes] = {}
-            for raw_line in output_file.read_bytes().splitlines():
-                if not raw_line.strip():
-                    continue
-                try:
-                    steps = json.loads(raw_line)
-                    # Extract problem_id from first step's extra_info
-                    if isinstance(steps, list) and steps:
-                        pid = steps[0].get("extra_info", {}).get("problem_id")
-                        if pid:
-                            problem_lines[pid] = raw_line
-                            continue
-                except (json.JSONDecodeError, KeyError):
-                    pass
-                # Fallback: couldn't parse, skip this line
-                logging.debug(f"Skipping unparseable JSONL line in {output_file}")
-
-            if not problem_lines:
-                # Fall back to uploading entire file under first problem_id
-                logging.warning(
-                    "Could not split output by problem_id, uploading as single file"
-                )
-                problem_lines[str(problem_ids[0])] = output_file.read_bytes()
+            problem_lines = _split_output_by_problem(output_file, problem_ids)
 
             last_s3_key = ""
             uploaded_keys: dict[UUID, str] = {}  # problem_id → s3_key
