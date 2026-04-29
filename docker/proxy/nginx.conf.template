@@ -15,6 +15,21 @@ http {
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
+    # Local-only stub_status endpoint for nginx-prometheus-exporter. On a
+    # separate listener so it never conflicts with the public proxy paths
+    # and can never be reached from the sandbox network.
+    server {
+        listen 8081;
+        access_log off;
+
+        location /stub_status {
+            stub_status;
+            allow 127.0.0.1;
+            allow 172.16.0.0/12;
+            deny all;
+        }
+    }
+
     server {
         listen 80;
 
