@@ -41,6 +41,11 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
     "yes",
 )
 
+# Port the Prometheus /metrics endpoint listens on inside the container.
+# Hardcoded because the bundled prometheus.yml scrapes this exact port; an
+# operator-tunable arg adds surface area without buying anything.
+METRICS_PORT = 9100
+
 
 def _rewrite_localhost_url(url: str) -> str:
     """Rewrite localhost URLs to host.docker.internal for Docker connectivity."""
@@ -253,7 +258,11 @@ class Validator:
         stdout_log = eval_dir / "sandbox_stdout.log"
         stderr_log = eval_dir / "sandbox_stderr.log"
 
-        metadata: SandboxMetadata = {"exit_code": None, "duration_seconds": None, "stderr_tail": None}
+        metadata: SandboxMetadata = {
+            "exit_code": None,
+            "duration_seconds": None,
+            "stderr_tail": None,
+        }
 
         workspace_dir = Path(self.config.workspace_dir)
         ws = str(workspace_dir)
@@ -424,6 +433,15 @@ class Validator:
     def run(self):
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
+
+        # Expose a /metrics endpoint for the bundled Prometheus to scrape.
+        # Default registry already includes Python process collectors (CPU,
+        # memory, fd count, GC). Bound to 0.0.0.0 inside the container; the
+        # docker network keeps it off the public internet.
+        from prometheus_client import start_http_server
+
+        start_http_server(METRICS_PORT)
+        logging.info(f"Prometheus /metrics server listening on :{METRICS_PORT}")
 
         # Track current execution state for debugging
         self._current_eval_run_id = None
@@ -647,7 +665,9 @@ class Validator:
         # Validate the token can actually make inference calls
         token_valid, token_reason = self._validate_chutes_token(chutes_access_token)
         if not token_valid:
-            self._complete_with_failure(eval_run_id, TerminalStatus.FAILED, token_reason)
+            self._complete_with_failure(
+                eval_run_id, TerminalStatus.FAILED, token_reason
+            )
             return
 
         # Start heartbeat manager only after token validation passes
@@ -709,7 +729,9 @@ class Validator:
 
             if not sandbox_output:
                 self._complete_with_failure(
-                    eval_run_id, TerminalStatus.FAILED, "Sandbox execution failed",
+                    eval_run_id,
+                    TerminalStatus.FAILED,
+                    "Sandbox execution failed",
                     sandbox_metadata=sandbox_metadata,
                 )
                 return
@@ -746,12 +768,20 @@ class Validator:
                 )
                 return
 
-            score = blend_final_score(success_rate, reasoning_result["reasoning_quality"])
+            score = blend_final_score(
+                success_rate, reasoning_result["reasoning_quality"]
+            )
 
             aggregate["reasoning_quality"] = reasoning_result["reasoning_quality"]
-            aggregate["reasoning_coefficient"] = reasoning_result["reasoning_coefficient"]
-            aggregate["judge_inference_failed"] = reasoning_result["judge_inference_failed"]
-            aggregate["judge_inference_total"] = reasoning_result["judge_inference_total"]
+            aggregate["reasoning_coefficient"] = reasoning_result[
+                "reasoning_coefficient"
+            ]
+            aggregate["judge_inference_failed"] = reasoning_result[
+                "judge_inference_failed"
+            ]
+            aggregate["judge_inference_total"] = reasoning_result[
+                "judge_inference_total"
+            ]
 
             logging.info(
                 f"Score: final={score:.4f} "
@@ -779,8 +809,12 @@ class Validator:
             logging.error(f"Evaluation cycle failed: {e}")
             traceback.print_exc()
             self._complete_with_failure(
-                eval_run_id, TerminalStatus.FAILED, str(e),
-                sandbox_metadata=sandbox_metadata if 'sandbox_metadata' in locals() else None,
+                eval_run_id,
+                TerminalStatus.FAILED,
+                str(e),
+                sandbox_metadata=sandbox_metadata
+                if "sandbox_metadata" in locals()
+                else None,
             )
         finally:
             heartbeat_mgr.stop()
@@ -980,12 +1014,18 @@ class Validator:
                 return False, "Chutes token invalid or expired (HTTP 401)"
             if resp.status_code == 402:
                 detail = resp.json().get("detail", {})
-                msg = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+                msg = (
+                    detail.get("message", str(detail))
+                    if isinstance(detail, dict)
+                    else str(detail)
+                )
                 return False, f"Miner's Chutes account has no credits ({msg})"
             if resp.status_code == 429:
                 # Rate limited — token is valid, just throttled
                 return True, ""
-            logging.warning("Chutes token validation inconclusive: status=%s", resp.status_code)
+            logging.warning(
+                "Chutes token validation inconclusive: status=%s", resp.status_code
+            )
             return True, ""
         except Exception as exc:
             logging.warning("Chutes token validation error: %s", exc)

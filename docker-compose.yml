@@ -132,6 +132,44 @@ services:
       - main
     restart: unless-stopped
 
+  # Prometheus + nginx-prometheus-exporter. Default: local-only, 9090 bound
+  # to 127.0.0.1 so the metrics surface never leaks to the public internet.
+  # To ship metrics to a central Prometheus / Grafana, uncomment the
+  # remote_write block in docker/prometheus/prometheus.yml.
+  # Footprint: ~150 MB RAM, <1% of one core idle.
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: shoppingbench-prometheus
+    profiles:
+      - validator
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.listen-address=:9090
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - main
+    restart: unless-stopped
+
+  proxy-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.0
+    container_name: shoppingbench-proxy-exporter
+    profiles:
+      - validator
+    command:
+      - --nginx.scrape-uri=http://proxy:8081/stub_status
+    networks:
+      - main
+    depends_on:
+      proxy:
+        condition: service_healthy
+    restart: unless-stopped
+
   watchtower:
     image: containrrr/watchtower:latest
     container_name: shoppingbench-watchtower
@@ -182,6 +220,7 @@ services:
 
 volumes:
   validator-data:
+  prometheus-data:
 
 networks:
   main:

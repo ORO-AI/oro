@@ -1,0 +1,77 @@
+{
+  "title": "ORO Validator",
+  "schemaVersion": 39,
+  "editable": true,
+  "tags": ["oro", "validator"],
+  "timezone": "browser",
+  "time": {"from": "now-1h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Validator process up",
+      "targets": [
+        {"expr": "up{job=\"validator\"}", "legendFormat": "validator"}
+      ],
+      "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Proxy exporter up",
+      "targets": [
+        {"expr": "up{job=\"proxy\"}", "legendFormat": "proxy"}
+      ],
+      "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Validator CPU (seconds/sec)",
+      "targets": [
+        {"expr": "rate(process_cpu_seconds_total{job=\"validator\"}[1m])", "legendFormat": "cpu"}
+      ],
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8}
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Validator RSS (bytes)",
+      "targets": [
+        {"expr": "process_resident_memory_bytes{job=\"validator\"}", "legendFormat": "rss"}
+      ],
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Validator open file descriptors",
+      "targets": [
+        {"expr": "process_open_fds{job=\"validator\"}", "legendFormat": "fds"}
+      ],
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8}
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Proxy active connections",
+      "targets": [
+        {"expr": "nginx_connections_active", "legendFormat": "active"},
+        {"expr": "nginx_connections_reading", "legendFormat": "reading"},
+        {"expr": "nginx_connections_writing", "legendFormat": "writing"},
+        {"expr": "nginx_connections_waiting", "legendFormat": "waiting"}
+      ],
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8}
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Proxy requests/sec",
+      "targets": [
+        {"expr": "rate(nginx_http_requests_total[1m])", "legendFormat": "req/s"}
+      ],
+      "gridPos": {"x": 0, "y": 20, "w": 24, "h": 8}
+    }
+  ]
+}
