@@ -72,6 +72,62 @@
         {"expr": "rate(nginx_http_requests_total[1m])", "legendFormat": "req/s"}
       ],
       "gridPos": {"x": 0, "y": 20, "w": 24, "h": 8}
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Active evaluation runs",
+      "targets": [
+        {"expr": "validator_active_runs", "legendFormat": "runs"}
+      ],
+      "gridPos": {"x": 0, "y": 28, "w": 6, "h": 4}
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Active sandboxes",
+      "targets": [
+        {"expr": "validator_sandbox_active", "legendFormat": "sandboxes"}
+      ],
+      "gridPos": {"x": 6, "y": 28, "w": 6, "h": 4}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Heartbeats/min by result",
+      "targets": [
+        {"expr": "60 * rate(validator_heartbeat_total[5m])", "legendFormat": "{{result}}"}
+      ],
+      "gridPos": {"x": 12, "y": 28, "w": 12, "h": 8}
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "claim_work outcomes/min",
+      "targets": [
+        {"expr": "60 * rate(validator_claim_work_total[5m])", "legendFormat": "{{result}}"}
+      ],
+      "gridPos": {"x": 0, "y": 36, "w": 12, "h": 8}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "claim_work latency p50 / p99",
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(validator_claim_work_seconds_bucket[5m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(validator_claim_work_seconds_bucket[5m])))", "legendFormat": "p99"}
+      ],
+      "gridPos": {"x": 12, "y": 36, "w": 12, "h": 8}
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Sandbox duration p50 / p95",
+      "targets": [
+        {"expr": "histogram_quantile(0.5, sum by (le) (rate(validator_sandbox_duration_seconds_bucket[15m])))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(validator_sandbox_duration_seconds_bucket[15m])))", "legendFormat": "p95"}
+      ],
+      "gridPos": {"x": 0, "y": 44, "w": 24, "h": 8}
     }
   ]
 }
