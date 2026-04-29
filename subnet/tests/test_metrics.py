@@ -2,7 +2,7 @@
 
 from prometheus_client import REGISTRY
 
-from subnet.validator.metrics import (
+from validator.metrics import (
     ACTIVE_RUNS,
     CLAIM_WORK_SECONDS,
     CLAIM_WORK_TOTAL,
