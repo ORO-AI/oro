@@ -22,6 +22,7 @@ from src.agent.scoring import blend_final_score
 from src.agent.types import SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
+from .output_split import split_output_by_problem
 from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
@@ -831,30 +832,7 @@ class Validator:
                 logging.warning("No problem_ids available for log upload, skipping")
                 return ""
 
-            # Parse JSONL and group lines by problem_id
-            problem_lines: dict[str, bytes] = {}
-            for raw_line in output_file.read_bytes().splitlines():
-                if not raw_line.strip():
-                    continue
-                try:
-                    steps = json.loads(raw_line)
-                    # Extract problem_id from first step's extra_info
-                    if isinstance(steps, list) and steps:
-                        pid = steps[0].get("extra_info", {}).get("problem_id")
-                        if pid:
-                            problem_lines[pid] = raw_line
-                            continue
-                except (json.JSONDecodeError, KeyError):
-                    pass
-                # Fallback: couldn't parse, skip this line
-                logging.debug(f"Skipping unparseable JSONL line in {output_file}")
-
-            if not problem_lines:
-                # Fall back to uploading entire file under first problem_id
-                logging.warning(
-                    "Could not split output by problem_id, uploading as single file"
-                )
-                problem_lines[str(problem_ids[0])] = output_file.read_bytes()
+            problem_lines = split_output_by_problem(output_file, problem_ids)
 
             last_s3_key = ""
             uploaded_keys: dict[UUID, str] = {}  # problem_id → s3_key
