@@ -301,6 +301,7 @@ class Validator:
         logging.info(f"Sandbox command: {' '.join(log_cmd)}")
 
         SANDBOX_ACTIVE.inc()
+        start_time = time.time()
         try:
             return self._run_sandbox_inner(
                 cmd=cmd,
@@ -311,6 +312,9 @@ class Validator:
                 metadata=metadata,
             )
         finally:
+            duration = time.time() - start_time
+            SANDBOX_DURATION_SECONDS.observe(duration)
+            metadata["duration_seconds"] = round(duration, 1)
             SANDBOX_ACTIVE.dec()
 
     def _run_sandbox_inner(
@@ -324,7 +328,6 @@ class Validator:
         metadata: SandboxMetadata,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
-            start_time = time.time()
             with (
                 open(stdout_log, "w") as stdout_file,
                 open(stderr_log, "w") as stderr_file,
@@ -335,9 +338,6 @@ class Validator:
                     stderr=stderr_file,
                     timeout=self.config.sandbox_timeout,
                 )
-            duration = time.time() - start_time
-            SANDBOX_DURATION_SECONDS.observe(duration)
-            metadata["duration_seconds"] = round(duration, 1)
             metadata["exit_code"] = result.returncode
 
             # Always log sandbox output for debugging
@@ -388,9 +388,6 @@ class Validator:
                 return None, metadata
 
         except subprocess.TimeoutExpired:
-            duration = time.time() - start_time
-            SANDBOX_DURATION_SECONDS.observe(duration)
-            metadata["duration_seconds"] = round(duration, 1)
             metadata["exit_code"] = -1
             if stderr_log.exists():
                 stderr_content = stderr_log.read_text()
