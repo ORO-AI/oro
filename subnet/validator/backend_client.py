@@ -10,6 +10,7 @@ Error Handling:
 """
 
 import logging
+import time
 from typing import Any, Callable, Optional
 from uuid import UUID
 
@@ -176,30 +177,56 @@ class BackendError(Exception):
 class BackendClient:
     """HTTP client for ORO Backend API using oro-sdk.
 
-    This class wraps the oro-sdk and returns SDK types directly.
-    All validator endpoints require authentication via the BittensorAuthClient
-    which signs requests using the wallet's hotkey.
+    The httpx pool can wedge after a Backend rollover or stale TLS session
+    (see ORO-955); recovery is to drop the pool and re-create the auth
+    client. _call_api counts consecutive transient failures and recreates
+    after _CIRCUIT_THRESHOLD in a row, throttled to once per minute.
     """
+
+    _CIRCUIT_THRESHOLD = 3
+    _RECREATE_COOLDOWN_S = 60
 
     def __init__(self, base_url: str, wallet: Wallet, timeout: int = 30):
         self.base_url = base_url.rstrip("/")
         self.wallet = wallet
         self.timeout = timeout
-
-        # Create authenticated client for validator endpoints
-        self._auth_client = BittensorAuthClient(
-            base_url=self.base_url,
-            wallet=wallet,
-            timeout=httpx.Timeout(timeout),
-            raise_on_unexpected_status=False,
-        )
-
-        # Create public client for unauthenticated endpoints
+        self._consecutive_failures = 0
+        self._last_recreate_at: float = 0.0
+        self._auth_client = self._build_auth_client()
         self._public_client = Client(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout),
             raise_on_unexpected_status=False,
         )
+
+    def _build_auth_client(self) -> BittensorAuthClient:
+        return BittensorAuthClient(
+            base_url=self.base_url,
+            wallet=self.wallet,
+            timeout=httpx.Timeout(self.timeout),
+            raise_on_unexpected_status=False,
+        )
+
+    def _record_failure(self) -> None:
+        """Track a transient failure and recreate the auth client if the circuit trips."""
+        self._consecutive_failures += 1
+        now = time.monotonic()
+        if (
+            self._consecutive_failures < self._CIRCUIT_THRESHOLD
+            or now - self._last_recreate_at < self._RECREATE_COOLDOWN_S
+        ):
+            return
+        logging.warning(
+            "BackendClient: %d consecutive transient failures; recreating auth client",
+            self._consecutive_failures,
+        )
+        try:
+            self._auth_client.get_httpx_client().close()
+        except Exception as exc:
+            logging.warning("Old auth client failed to close cleanly: %s", exc)
+        self._auth_client = self._build_auth_client()
+        self._last_recreate_at = now
+        self._consecutive_failures = 0
 
     def _handle_response(
         self,
@@ -279,13 +306,24 @@ class BackendClient:
         Raises:
             BackendError: For any API error (transient or permanent).
         """
+        # Public-client failures don't trip the circuit breaker — only the
+        # auth client's pool wedges in the way ORO-955 describes.
+        is_auth_call = kwargs.get("client") is self._auth_client
+
         try:
             response = api_func(**kwargs)
+            # Any HTTP response means the pool is healthy — reset before
+            # _handle_response so a 4xx/5xx still clears the counter.
+            if is_auth_call:
+                self._consecutive_failures = 0
             return self._handle_response(response, operation, allow_204)
-
         except httpx.TimeoutException:
+            if is_auth_call:
+                self._record_failure()
             raise BackendError(f"{operation}: Request timed out")
         except httpx.ConnectError as e:
+            if is_auth_call:
+                self._record_failure()
             raise BackendError(f"{operation}: Connection error: {e}")
         except sdk_errors.UnexpectedStatus as e:
             body = ""
@@ -303,7 +341,8 @@ class BackendClient:
             logging.exception(
                 "%s: SDK response parsing failed (%s). Check for proxy/WAF "
                 "interference or SDK/Backend version mismatch.",
-                operation, type(e).__name__,
+                operation,
+                type(e).__name__,
             )
             raise BackendError(
                 f"{operation}: Response parsing failed ({type(e).__name__}: {e}). "
@@ -566,8 +605,11 @@ class BackendClient:
         )
         problems = []
         for p in response.problems:
-            metadata = p.metadata.to_dict() if p.metadata and not isinstance(p.metadata, Unset) else {}
+            metadata = (
+                p.metadata.to_dict()
+                if p.metadata and not isinstance(p.metadata, Unset)
+                else {}
+            )
             metadata["problem_id"] = str(p.problem_id)
             problems.append(metadata)
         return problems
-
