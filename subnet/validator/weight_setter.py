@@ -60,21 +60,27 @@ class WeightSetterThread:
     def _build_weights(
         self, top_miner_hotkey: str, emission_wt: float = 1.0
     ) -> list[float]:
-        """Build weight vector with top miner and optional burn via UID 0."""
+        """Build weight vector with top miner and optional burn via UID 0.
+
+        If the top miner is not in the metagraph (e.g. deregistered
+        between leaderboard fetch and weight set), all emissions go to
+        the UID 0 burn so weights are still set.
+        """
         n = len(self.metagraph.hotkeys)
-        try:
-            top_idx = self.metagraph.hotkeys.index(top_miner_hotkey)
-        except ValueError:
-            logging.warning(
-                f"Top miner {top_miner_hotkey} not found in metagraph, skipping weight update"
-            )
+        if n == 0:
             return []
 
         weights = [0.0] * n
-        weights[top_idx] = emission_wt
-        burn_wt = 1.0 - emission_wt
-        if burn_wt > 0:
-            weights[0] += burn_wt
+        try:
+            top_idx = self.metagraph.hotkeys.index(top_miner_hotkey)
+            weights[top_idx] = emission_wt
+        except ValueError:
+            logging.warning(
+                f"Top miner {top_miner_hotkey} not found in metagraph, "
+                "burning all emissions to UID 0"
+            )
+            emission_wt = 0.0
+        weights[0] += 1.0 - emission_wt
         return weights
 
     def _run(self) -> None:
@@ -98,7 +104,7 @@ class WeightSetterThread:
                     top.top_miner_hotkey, emission_wt=emission_wt
                 )
                 if not weights:
-                    logging.info("Skipping weight update (top miner not in metagraph)")
+                    logging.warning("Skipping weight update (empty metagraph)")
                 else:
                     self.subtensor.set_weights(
                         netuid=self.netuid,
@@ -107,7 +113,7 @@ class WeightSetterThread:
                         weights=weights,
                         wait_for_inclusion=True,
                     )
-                    logging.info("Successfully set weight for top miner only")
+                    logging.info("Successfully set weights")
             except BackendError as e:
                 if e.is_auth_error:
                     # Authentication errors are permanent - log and continue
