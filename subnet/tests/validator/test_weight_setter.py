@@ -85,7 +85,7 @@ class TestWeightSetterThread:
         assert weights[1] == 1.0
         assert weights[2] == 0.0
 
-    def test_skips_weights_when_top_miner_not_in_metagraph(
+    def test_burns_to_uid_zero_when_top_miner_not_in_metagraph(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
         mock_backend_client.get_top_miner.return_value = TopAgentResponse(
@@ -94,6 +94,7 @@ class TestWeightSetterThread:
             top_miner_hotkey="5UnknownHotkey...",
             top_score=0.92,
             computed_at=datetime.now(),
+            emission_weight=0.25,
         )
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -107,8 +108,11 @@ class TestWeightSetterThread:
         time.sleep(0.15)
         setter.stop()
 
-        # Should NOT call set_weights when top miner isn't in metagraph
-        mock_subtensor.set_weights.assert_not_called()
+        mock_subtensor.set_weights.assert_called()
+        call_args = mock_subtensor.set_weights.call_args
+        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
+        assert weights[0] == 1.0
+        assert all(w == 0.0 for w in weights[1:])
 
     def test_emission_decay_splits_weight_to_burn_uid(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
