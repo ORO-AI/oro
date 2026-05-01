@@ -3,14 +3,21 @@
 //
 // The allowlist is fetched from the ORO Backend (`GET /v1/public/inference/models`)
 // via the internal `/_backend_models` location. Each nginx worker caches the
-// fetched list for CACHE_TTL_MS. If the Backend is unreachable on cache miss,
-// we fail closed with 503 — a stale fallback would only paper over a deeper
-// outage (the validator is broken anyway when the Backend is down).
+// fetched list for CACHE_TTL_MS. After the cache expires we attempt a refresh;
+// if Backend returns a non-200 (rate-limited, unreachable, malformed), we keep
+// serving the previous allowlist for STALE_GRACE_MS instead of failing closed.
+// Failing closed turns a transient Backend hiccup (e.g. a 429 from the global
+// IP rate limit) into a 503 storm where every inference call is rejected and
+// agent evaluations collapse mid-run.
 
 var CACHE_TTL_MS = 15 * 60 * 1000;
+// Window beyond CACHE_TTL_MS where we still serve the cached list if a
+// refresh fails. After this we give up and fail closed.
+var STALE_GRACE_MS = 60 * 60 * 1000;
 
 var cachedList = null;
 var cacheExpiresAt = 0;
+var cacheStaleUntil = 0;
 
 function getAllowlist(r, callback) {
   if (cachedList && Date.now() < cacheExpiresAt) {
@@ -25,6 +32,7 @@ function getAllowlist(r, callback) {
         if (data && Array.isArray(data.models) && data.models.length > 0) {
           cachedList = data.models;
           cacheExpiresAt = Date.now() + CACHE_TTL_MS;
+          cacheStaleUntil = cacheExpiresAt + STALE_GRACE_MS;
           callback(cachedList);
           return;
         }
@@ -34,6 +42,17 @@ function getAllowlist(r, callback) {
     } else {
       r.error("Backend models fetch returned status " + reply.status);
     }
+
+    if (cachedList && Date.now() < cacheStaleUntil) {
+      r.error(
+        "Serving stale allowlist after fetch failure (" +
+          ((cacheStaleUntil - Date.now()) / 1000).toFixed(0) +
+          "s grace remaining)"
+      );
+      callback(cachedList);
+      return;
+    }
+
     callback(null);
   });
 }
