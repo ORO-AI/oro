@@ -2,7 +2,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from unittest.mock import MagicMock
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -11,25 +12,62 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models import TopAgentResponse
 
+from validator.weight_distribution import U16_MAX, compute_top_burn_weights
 from validator.weight_setter import WeightSetterThread
 
 
-class TestWeightSetterThread:
-    """Tests for WeightSetterThread.
+def _empty_history():
+    """A `get_race_history` response with no races — drives the fallback path."""
+    history = MagicMock()
+    history.races = []
+    return history
 
-    Uses mock_backend_client_with_top_miner, mock_metagraph, mock_subtensor,
-    and mock_wallet_simple fixtures from conftest.py.
+
+def _race_complete_history(race_id: UUID):
+    history = MagicMock()
+    race = MagicMock()
+    race.race_id = race_id
+    race.status = "RACE_COMPLETE"
+    history.races = [race]
+    return history
+
+
+def _race_detail(qualifiers: list[dict]):
+    """Build a mock RaceDetailResponse with the supplied qualifier dicts.
+
+    Each dict needs `miner_hotkey`, `agent_version_id`, `race_score`.
+    """
+    detail = MagicMock()
+    detail.qualifiers = []
+    for q in qualifiers:
+        m = MagicMock()
+        m.miner_hotkey = q["miner_hotkey"]
+        m.agent_version_id = q["agent_version_id"]
+        m.race_score = q["race_score"]
+        detail.qualifiers.append(m)
+    return detail
+
+
+class TestWeightSetterThread:
+    """Integration tests for WeightSetterThread.
+
+    Uses fixtures from conftest.py.
     """
 
     @pytest.fixture
     def mock_backend_client(self, mock_backend_client_with_top_miner):
-        """Alias to use the pre-configured top miner fixture."""
+        """Top-miner fixture extended with an empty race history so tests
+        that don't set up a race fall through to the fallback path."""
+        mock_backend_client_with_top_miner.get_race_history.return_value = (
+            _empty_history()
+        )
         return mock_backend_client_with_top_miner
 
     @pytest.fixture
     def mock_wallet(self, mock_wallet_simple):
-        """Alias to use simple wallet (no signing needed)."""
         return mock_wallet_simple
+
+    # --- thread lifecycle ---
 
     def test_start_creates_thread(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
@@ -62,30 +100,23 @@ class TestWeightSetterThread:
         setter.stop()
         assert not setter._thread.is_alive()
 
-    def test_sets_weights_for_top_miner_only(
+    def test_invalid_ratio_raises_at_construction(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        setter = WeightSetterThread(
-            backend_client=mock_backend_client,
-            subtensor=mock_subtensor,
-            metagraph=mock_metagraph,
-            wallet=mock_wallet,
-            netuid=1,
-            interval_seconds=0.1,
-        )
-        setter.start()
-        time.sleep(0.15)
-        setter.stop()
+        with pytest.raises(ValueError):
+            WeightSetterThread(
+                backend_client=mock_backend_client,
+                subtensor=mock_subtensor,
+                metagraph=mock_metagraph,
+                wallet=mock_wallet,
+                netuid=1,
+                t_top=0.6,
+                t_burn=0.5,  # sum > 1
+            )
 
-        mock_subtensor.set_weights.assert_called()
-        call_args = mock_subtensor.set_weights.call_args
-        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
-        # Index 1 is the top miner (5GrwvaEF...) - only they get weight
-        assert weights[0] == 0.0
-        assert weights[1] == 1.0
-        assert weights[2] == 0.0
+    # --- top-miner fallback (no completed race) ---
 
-    def test_burns_to_uid_zero_when_top_miner_not_in_metagraph(
+    def test_fallback_burns_when_top_miner_not_in_metagraph(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
         mock_backend_client.get_top_miner.return_value = TopAgentResponse(
@@ -94,7 +125,7 @@ class TestWeightSetterThread:
             top_miner_hotkey="5UnknownHotkey...",
             top_score=0.92,
             computed_at=datetime.now(),
-            emission_weight=0.25,
+            emission_weight=1.0,
         )
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -109,23 +140,45 @@ class TestWeightSetterThread:
         setter.stop()
 
         mock_subtensor.set_weights.assert_called()
-        call_args = mock_subtensor.set_weights.call_args
-        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
-        assert weights[0] == 1.0
-        assert all(w == 0.0 for w in weights[1:])
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        _, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        assert weights[0] == burn_u16
+        assert all(w == 0 for w in weights[1:])
 
-    def test_emission_decay_splits_weight_to_burn_uid(
+    def test_fallback_top_miner_full_emission(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
+        """emission_weight == 1.0 → top miner gets full top_u16, burn slot full burn_u16."""
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=mock_metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        assert weights[0] == burn_u16  # uid 0 = burn
+        assert weights[1] == top_u16  # 5GrwvaEF... index in fixture
+        assert weights[2] == 0
+
+    def test_fallback_emission_weight_partial(
+        self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
+    ):
+        """emission_weight=0.5 scales top slot to half top_u16; burn slot keeps full share."""
         mock_backend_client.get_top_miner.return_value = TopAgentResponse(
             suite_id=789,
             top_agent_version_id=UUID("87654321-4321-4321-4321-210987654321"),
             top_miner_hotkey="5GrwvaEF...",
             top_score=0.92,
             computed_at=datetime.now(),
-            emission_weight=0.97,
+            emission_weight=0.5,
         )
-
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
             subtensor=mock_subtensor,
@@ -138,65 +191,10 @@ class TestWeightSetterThread:
         time.sleep(0.15)
         setter.stop()
 
-        call_args = mock_subtensor.set_weights.call_args
-        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
-        assert abs(weights[0] - 0.03) < 1e-9  # burn UID gets remainder
-        assert abs(weights[1] - 0.97) < 1e-9  # top miner gets emission_wt
-        assert weights[2] == 0.0
-
-    def test_emission_weight_none_treated_as_full(
-        self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
-    ):
-        setter = WeightSetterThread(
-            backend_client=mock_backend_client,
-            subtensor=mock_subtensor,
-            metagraph=mock_metagraph,
-            wallet=mock_wallet,
-            netuid=1,
-            interval_seconds=0.1,
-        )
-        setter.start()
-        time.sleep(0.15)
-        setter.stop()
-
-        call_args = mock_subtensor.set_weights.call_args
-        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
-        assert weights[0] == 0.0  # no burn
-        assert weights[1] == 1.0  # full weight
-
-    def test_emission_decay_top_miner_is_uid_zero(
-        self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
-    ):
-        """When top miner IS UID 0, they get emission_wt + burn_wt = 1.0."""
-        mock_backend_client.get_top_miner.return_value = TopAgentResponse(
-            suite_id=789,
-            top_agent_version_id=UUID("87654321-4321-4321-4321-210987654321"),
-            top_miner_hotkey="5BurnAddr...",
-            top_score=0.92,
-            computed_at=datetime.now(),
-            emission_weight=0.90,
-        )
-
-        # Make UID 0 the top miner's hotkey
-        mock_metagraph.hotkeys = ["5BurnAddr...", "5GrwvaEF...", "5FHneW46..."]
-
-        setter = WeightSetterThread(
-            backend_client=mock_backend_client,
-            subtensor=mock_subtensor,
-            metagraph=mock_metagraph,
-            wallet=mock_wallet,
-            netuid=1,
-            interval_seconds=0.1,
-        )
-        setter.start()
-        time.sleep(0.15)
-        setter.stop()
-
-        call_args = mock_subtensor.set_weights.call_args
-        weights = call_args.kwargs.get("weights") or call_args[1].get("weights")
-        assert abs(weights[0] - 1.0) < 1e-9  # 0.90 + 0.10 = 1.0
-        assert weights[1] == 0.0
-        assert weights[2] == 0.0
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        assert weights[0] == burn_u16
+        assert weights[1] == round(top_u16 * 0.5)
 
     def test_continues_on_error(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
@@ -209,6 +207,7 @@ class TestWeightSetterThread:
                 top_miner_hotkey="5GrwvaEF...",
                 top_score=0.92,
                 computed_at=datetime.now(),
+                emission_weight=1.0,
             ),
         ]
         setter = WeightSetterThread(
@@ -224,3 +223,77 @@ class TestWeightSetterThread:
         setter.stop()
 
         assert mock_backend_client.get_top_miner.call_count >= 2
+
+    # --- race-based path ---
+
+    def test_race_path_distributes_to_top_half(
+        self, mock_backend_client, mock_subtensor, mock_wallet
+    ):
+        """With a completed race of 6 entrants, the top 3 (floor(6/2)) get
+        non-zero u16 weights and the bottom 3 get 0."""
+        # 6 entrants, scores descending; metagraph indexes them after the burn uid.
+        entrants = [
+            {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
+            for i in range(6)
+        ]
+
+        metagraph = MagicMock()
+        metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in entrants]
+        metagraph.uids = list(range(len(metagraph.hotkeys)))
+
+        race_id = uuid4()
+        mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
+        mock_backend_client.get_race_detail.return_value = _race_detail(entrants)
+
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        # Burn slot.
+        assert weights[0] == burn_u16
+        # Rank 1 entrant — uid 1 in this metagraph.
+        assert weights[1] == top_u16
+        # Ranks 2..K (K=3) — taper K-1, K-2 = 2, 1.
+        assert weights[2] == 2
+        assert weights[3] == 1
+        # Bottom half — zero.
+        assert weights[4] == 0
+        assert weights[5] == 0
+        assert weights[6] == 0
+
+    def test_race_path_skipped_when_status_not_complete(
+        self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
+    ):
+        """Latest race in QUALIFYING_OPEN → fall back to top-miner path."""
+        history = MagicMock()
+        race = MagicMock()
+        race.race_id = uuid4()
+        race.status = "QUALIFYING_OPEN"
+        history.races = [race]
+        mock_backend_client.get_race_history.return_value = history
+
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=mock_metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        # `get_race_detail` should never be called when status is not complete.
+        mock_backend_client.get_race_detail.assert_not_called()
+        mock_backend_client.get_top_miner.assert_called()
