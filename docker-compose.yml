@@ -213,20 +213,9 @@ services:
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:${IMAGE_TAG:-stable}}
       - SANDBOX_NETWORK=sandbox-network
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
-    # Prefer the venv interpreter (current images install deps via uv into
-    # `/app/.venv/`), but fall back to bare `python` so older cached images
-    # — which installed deps system-wide and have no `.venv/` — still work
-    # without forcing miners to `docker compose pull` first.
-    entrypoint:
-      - "sh"
-      - "-c"
-      - |
-        if [ -x /app/.venv/bin/python ]; then
-          exec /app/.venv/bin/python -m subnet.test_runner "$@"
-        else
-          exec python -m subnet.test_runner "$@"
-        fi
-      - "--"
+    # Use the venv interpreter — bare `python` is the system Python and
+    # has no project dependencies installed (e.g. `requests`).
+    entrypoint: [".venv/bin/python", "-m", "subnet.test_runner"]
     networks:
       - main
     restart: "no"
