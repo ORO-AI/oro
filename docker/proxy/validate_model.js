@@ -2,26 +2,49 @@
 // allowlist before forwarding to Chutes.
 //
 // The allowlist is fetched from the ORO Backend (`GET /v1/public/inference/models`)
-// via the internal `/_backend_models` location. Each nginx worker caches the
-// fetched list for CACHE_TTL_MS. After the cache expires we attempt a refresh;
-// if Backend returns a non-200 (rate-limited, unreachable, malformed), we keep
-// serving the previous allowlist for STALE_GRACE_MS instead of failing closed.
-// Failing closed turns a transient Backend hiccup (e.g. a 429 from the global
-// IP rate limit) into a 503 storm where every inference call is rejected and
-// agent evaluations collapse mid-run.
+// via the internal `/_backend_models` location and cached in an nginx
+// shared-dict zone (`oro_models`, declared in nginx.conf.template) so all
+// worker processes share the same cache. njs module-level vars are
+// per-worker, so the previous per-worker cache made every worker cold-start
+// independently — 8 workers × 1 fetch each can already exhaust the
+// Backend's 100/min global IP rate limit, leaving most workers permanently
+// uncached and answering every inference call with 503.
+//
+// After the cache expires we attempt a refresh; if Backend returns a non-200
+// (rate-limited, unreachable, malformed), we keep serving the previous
+// allowlist for STALE_GRACE_MS instead of failing closed.
 
 var CACHE_TTL_MS = 15 * 60 * 1000;
 // Window beyond CACHE_TTL_MS where we still serve the cached list if a
 // refresh fails. After this we give up and fail closed.
 var STALE_GRACE_MS = 60 * 60 * 1000;
 
-var cachedList = null;
-var cacheExpiresAt = 0;
-var cacheStaleUntil = 0;
+var ZONE = "oro_models";
+var STATE_KEY = "state";
+
+function _readState() {
+  var raw = ngx.shared[ZONE].get(STATE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function _writeState(allowlist, expiresAt) {
+  ngx.shared[ZONE].set(
+    STATE_KEY,
+    JSON.stringify({ allowlist: allowlist, expiresAt: expiresAt })
+  );
+}
 
 function getAllowlist(r, callback) {
-  if (cachedList && Date.now() < cacheExpiresAt) {
-    callback(cachedList);
+  var state = _readState();
+  if (state && state.allowlist && Date.now() < state.expiresAt) {
+    callback(state.allowlist);
     return;
   }
 
@@ -30,12 +53,11 @@ function getAllowlist(r, callback) {
       try {
         var data = JSON.parse(reply.responseText);
         if (data && Array.isArray(data.models) && data.models.length > 0) {
-          cachedList = data.models;
-          cacheExpiresAt = Date.now() + CACHE_TTL_MS;
-          cacheStaleUntil = cacheExpiresAt + STALE_GRACE_MS;
-          callback(cachedList);
+          _writeState(data.models, Date.now() + CACHE_TTL_MS);
+          callback(data.models);
           return;
         }
+        r.error("Backend models response missing or empty 'models' array");
       } catch (e) {
         r.error("Backend models JSON parse failed: " + e.message);
       }
@@ -43,13 +65,19 @@ function getAllowlist(r, callback) {
       r.error("Backend models fetch returned status " + reply.status);
     }
 
-    if (cachedList && Date.now() < cacheStaleUntil) {
-      r.error(
-        "Serving stale allowlist after fetch failure (" +
-          ((cacheStaleUntil - Date.now()) / 1000).toFixed(0) +
-          "s grace remaining)"
-      );
-      callback(cachedList);
+    // Re-read in case another worker just succeeded while this one was
+    // waiting on a failing subrequest.
+    state = _readState();
+    if (state && state.allowlist && Date.now() < state.expiresAt + STALE_GRACE_MS) {
+      var graceLeft = state.expiresAt + STALE_GRACE_MS - Date.now();
+      if (graceLeft < STALE_GRACE_MS) {
+        r.error(
+          "Serving stale allowlist after fetch failure (" +
+            (graceLeft / 1000).toFixed(0) +
+            "s grace remaining)"
+        );
+      }
+      callback(state.allowlist);
       return;
     }
 
