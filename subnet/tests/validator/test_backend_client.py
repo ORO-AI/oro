@@ -1,11 +1,13 @@
 """Tests for backend_client using oro-sdk."""
 
+import contextlib
 import sys
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
 
@@ -617,8 +619,6 @@ class TestBackendClientCircuitBreaker:
                     client.claim_work()
 
     def test_below_threshold_keeps_same_client(self, mock_wallet):
-        import httpx
-
         client = BackendClient("https://api.example.com", mock_wallet)
         original = client._auth_client
         self._drain(client, client._CIRCUIT_THRESHOLD - 1, httpx.TimeoutException("t"))
@@ -629,10 +629,8 @@ class TestBackendClientCircuitBreaker:
     @pytest.mark.parametrize(
         "exc",
         [
-            pytest.param(__import__("httpx").TimeoutException("t"), id="timeout"),
-            pytest.param(
-                __import__("httpx").ConnectError("refused"), id="connect-error"
-            ),
+            pytest.param(httpx.TimeoutException("t"), id="timeout"),
+            pytest.param(httpx.ConnectError("refused"), id="connect-error"),
         ],
     )
     def test_threshold_recreates_client(self, mock_wallet, exc):
@@ -646,21 +644,12 @@ class TestBackendClientCircuitBreaker:
     @pytest.mark.parametrize(
         "recovery_response",
         [
-            pytest.param(
-                _create_response(
-                    200,
-                    # ClaimWorkResponse is constructed lazily so the import only happens
-                    # if this branch runs — keeps the parametrize block readable.
-                    None,
-                ),
-                id="200-success",
-            ),
+            pytest.param(_create_response(200, None), id="200-success"),
             pytest.param(_create_response(500, None), id="500-server-error"),
         ],
     )
     def test_round_trip_resets_counter(self, mock_wallet, recovery_response):
         """Any HTTP response (200 or 5xx) round-trips and clears the counter."""
-        import httpx
         from oro_sdk.models.claim_work_response import ClaimWorkResponse
 
         if recovery_response.status_code == 200:
@@ -676,20 +665,18 @@ class TestBackendClientCircuitBreaker:
         self._drain(client, 2, httpx.TimeoutException("t"))
         assert client._consecutive_failures == 2
 
-        with patch(
-            "validator.backend_client.claim_work.sync_detailed",
-            return_value=recovery_response,
+        with (
+            patch(
+                "validator.backend_client.claim_work.sync_detailed",
+                return_value=recovery_response,
+            ),
+            contextlib.suppress(BackendError),
         ):
-            try:
-                client.claim_work()
-            except BackendError:
-                pass  # 5xx still counts as a round-trip
+            client.claim_work()
         assert client._consecutive_failures == 0
 
     def test_recreate_throttled_within_cooldown(self, mock_wallet):
         """Once recreated, the client doesn't recreate again for the cooldown window."""
-        import httpx
-
         client = BackendClient("https://api.example.com", mock_wallet)
         self._drain(client, client._CIRCUIT_THRESHOLD, httpx.TimeoutException("t"))
         first_client, first_at = client._auth_client, client._last_recreate_at
