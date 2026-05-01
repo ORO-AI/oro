@@ -63,6 +63,13 @@ class WeightSetterThread:
     Runs in a background thread, independent of the evaluation loop.
     """
 
+    # How far back to scan `get_race_history` for the most recent
+    # `RACE_COMPLETE`. The newest race may be `QUALIFYING_OPEN` or
+    # `RACE_RUNNING` for ~24h of every cycle; we still want to protect
+    # last race's finishers during that window. 5 covers typical race
+    # cadence (one in-progress + a handful of completed) without paging.
+    _RACE_HISTORY_SCAN_LIMIT = 5
+
     def __init__(
         self,
         backend_client: BackendClient,
@@ -116,22 +123,32 @@ class WeightSetterThread:
                 )
 
     def _fetch_race_finishers(self) -> Optional[list[RankedFinisher]]:
-        """Return finishers from the latest completed race, or None.
+        """Return finishers from the most recent completed race, or None.
 
-        Returns None when there is no completed race yet, or when fetching
-        the race details fails — the caller falls back to the top-miner
-        path so weight setting is never silently skipped on transient errors.
+        Walks `get_race_history` newest-first and returns finishers from
+        the first race in `RACE_COMPLETE` status. When the newest race is
+        in progress (`QUALIFYING_OPEN`, `RACE_RUNNING`, etc.) we still
+        want to protect last race's finishers between races — using only
+        `limit=1` would skip the prior completed race and lose the
+        protection for the entire current cycle.
+
+        Returns None only when there is no completed race in the recent
+        history (fresh subnet, recovery from race-system rollback). The
+        caller then falls back to the top-miner path so weight setting
+        is never silently skipped.
         """
-        history = self.backend_client.get_race_history(limit=1)
+        history = self.backend_client.get_race_history(
+            limit=self._RACE_HISTORY_SCAN_LIMIT
+        )
         races = history.races if history.races is not UNSET else []
-        if not races:
-            return None
-        latest = races[0]
-        if str(latest.status) != "RACE_COMPLETE":
-            return None
-        detail = self.backend_client.get_race_detail(latest.race_id)
-        qualifiers = detail.qualifiers if detail.qualifiers is not UNSET else []
-        return _qualifiers_to_finishers(qualifiers)
+        for race in races:
+            if str(race.status) == "RACE_COMPLETE":
+                detail = self.backend_client.get_race_detail(race.race_id)
+                qualifiers = (
+                    detail.qualifiers if detail.qualifiers is not UNSET else []
+                )
+                return _qualifiers_to_finishers(qualifiers)
+        return None
 
     def _build_weights_from_race(
         self, finishers: list[RankedFinisher]

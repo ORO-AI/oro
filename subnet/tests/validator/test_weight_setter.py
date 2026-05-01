@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models import TopAgentResponse
 
-from validator.weight_distribution import U16_MAX, compute_top_burn_weights
+from validator.weight_distribution import compute_top_burn_weights
 from validator.weight_setter import WeightSetterThread
 
 
@@ -29,6 +29,19 @@ def _race_complete_history(race_id: UUID):
     race.race_id = race_id
     race.status = "RACE_COMPLETE"
     history.races = [race]
+    return history
+
+
+def _race_with_status(race_id: UUID, status: str):
+    race = MagicMock()
+    race.race_id = race_id
+    race.status = status
+    return race
+
+
+def _history_with_races(races: list):
+    history = MagicMock()
+    history.races = races
     return history
 
 
@@ -271,16 +284,19 @@ class TestWeightSetterThread:
         assert weights[5] == 0
         assert weights[6] == 0
 
-    def test_race_path_skipped_when_status_not_complete(
+    def test_race_path_falls_back_when_no_completed_race_in_history(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        """Latest race in QUALIFYING_OPEN → fall back to top-miner path."""
-        history = MagicMock()
-        race = MagicMock()
-        race.race_id = uuid4()
-        race.status = "QUALIFYING_OPEN"
-        history.races = [race]
-        mock_backend_client.get_race_history.return_value = history
+        """Every race in history is in-progress → fall back to top-miner path.
+
+        Only happens on a fresh subnet or after a race-system rollback.
+        """
+        mock_backend_client.get_race_history.return_value = _history_with_races(
+            [
+                _race_with_status(uuid4(), "QUALIFYING_OPEN"),
+                _race_with_status(uuid4(), "RACE_RUNNING"),
+            ]
+        )
 
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -294,6 +310,55 @@ class TestWeightSetterThread:
         time.sleep(0.15)
         setter.stop()
 
-        # `get_race_detail` should never be called when status is not complete.
+        # `get_race_detail` should never be called when no race is complete.
         mock_backend_client.get_race_detail.assert_not_called()
         mock_backend_client.get_top_miner.assert_called()
+
+    def test_race_path_skips_in_progress_and_uses_prior_completed_race(
+        self, mock_backend_client, mock_subtensor, mock_wallet
+    ):
+        """Newest race is `QUALIFYING_OPEN` (current cycle) — we still want
+        last race's finishers protected. Walk the history and use the most
+        recent `RACE_COMPLETE`.
+        """
+        finishers = [
+            {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
+            for i in range(6)
+        ]
+
+        metagraph = MagicMock()
+        metagraph.hotkeys = ["5BurnUid"] + [f["miner_hotkey"] for f in finishers]
+        metagraph.uids = list(range(len(metagraph.hotkeys)))
+
+        in_progress_id = uuid4()
+        completed_id = uuid4()
+        mock_backend_client.get_race_history.return_value = _history_with_races(
+            [
+                _race_with_status(in_progress_id, "QUALIFYING_OPEN"),
+                _race_with_status(completed_id, "RACE_COMPLETE"),
+            ]
+        )
+        # Detail call should target the completed race, not the in-progress one.
+        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
+
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        # Loop may tick more than once at this interval; what matters is
+        # the call always targeted the completed race id, never the
+        # in-progress one.
+        assert mock_backend_client.get_race_detail.call_count >= 1
+        for call in mock_backend_client.get_race_detail.call_args_list:
+            assert call.args == (completed_id,) or call.kwargs == {"race_id": completed_id}
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, _ = compute_top_burn_weights(0.25, 0.75)
+        assert weights[1] == top_u16  # rank-1 finisher protected
