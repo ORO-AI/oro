@@ -213,7 +213,9 @@ services:
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:${IMAGE_TAG:-stable}}
       - SANDBOX_NETWORK=sandbox-network
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
-    entrypoint: ["python", "-m", "subnet.test_runner"]
+    # Use the venv interpreter — bare `python` is the system Python and
+    # has no project dependencies installed (e.g. `requests`).
+    entrypoint: [".venv/bin/python", "-m", "subnet.test_runner"]
     networks:
       - main
     restart: "no"

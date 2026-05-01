@@ -184,6 +184,15 @@ def run_test(
         Score (0.0 - 1.0), or -1.0 on failure.
     """
     agent_path = Path(agent_file)
+    # Resolve relative paths against the read-only /workspace mount used
+    # by `docker compose run test` so `--agent-file my_agent.py` works
+    # without forcing miners to think about container paths.
+    if not agent_path.is_absolute() and not agent_path.exists():
+        for prefix in [Path("/workspace"), Path("/app"), Path(".")]:
+            candidate = prefix / agent_file
+            if candidate.exists():
+                agent_path = candidate
+                break
     if not agent_path.exists():
         print(f"Error: Agent file not found: {agent_path}", file=sys.stderr)
         return -1.0
@@ -301,6 +310,19 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Fail fast on a missing/empty Chutes key — without one the agent's
+    # inference calls hit the proxy, get 429'd, and silently retry for
+    # ~3 minutes before the run aborts.
+    if not os.environ.get("CHUTES_API_KEY"):
+        print(
+            "Error: CHUTES_API_KEY is not set.\n"
+            "  Set it in your shell or copy .env.example to .env and fill it in.\n"
+            "  Get a key at https://chutes.ai/",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     score = run_test(args.agent_file, args.problem_file, args.max_workers, args.timeout, args.skip_reasoning)
 
     if score < 0:
