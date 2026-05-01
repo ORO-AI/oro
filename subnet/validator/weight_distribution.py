@@ -203,12 +203,13 @@ def build_metagraph_weight_vector(
     if n_meta == 0:
         return [], []
 
-    ranked = rank_finishers(qualifiers)
-    k = len(ranked) // 2
-    tail_sum = _tail_sum_for(k)
+    # Materialise once — `qualifiers` may be a one-shot iterable, and we
+    # need its length here and again inside `compute_hotkey_weights`.
+    finishers = list(qualifiers)
+    tail_sum = _tail_sum_for(len(finishers) // 2)
     _, burn_u16 = compute_pinned_weights(t_top, t_burn, tail_sum)
 
-    hotkey_weights = compute_hotkey_weights(ranked, t_top, t_burn)
+    hotkey_weights = compute_hotkey_weights(finishers, t_top, t_burn)
 
     weights = [0] * n_meta
     hotkey_to_idx = {hk: i for i, hk in enumerate(metagraph_hotkeys)}
