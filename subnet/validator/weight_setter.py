@@ -19,7 +19,7 @@ from .backend_client import BackendClient, BackendError
 from .weight_distribution import (
     RankedFinisher,
     build_metagraph_weight_vector,
-    compute_top_burn_weights,
+    compute_pinned_weights,
 )
 
 
@@ -93,8 +93,10 @@ class WeightSetterThread:
         self.burn_uid = burn_uid
 
         # Fail fast on misconfiguration — the validator process should not
-        # start setting weights with invalid ratios.
-        compute_top_burn_weights(t_top, t_burn)
+        # start setting weights with invalid ratios. tail_sum=0 is the
+        # smallest case (any t_top + t_burn = 1 will pass), validating the
+        # ratio constraint without requiring a representative N.
+        compute_pinned_weights(t_top, t_burn, tail_sum=0)
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -181,7 +183,11 @@ class WeightSetterThread:
         if n == 0:
             return [], []
 
-        top_u16, burn_u16 = compute_top_burn_weights(self.t_top, self.t_burn)
+        # No race tail in the fallback path, so tail_sum=0 — the pinned
+        # weights collapse to the simple two-slot ratio.
+        top_u16, burn_u16 = compute_pinned_weights(
+            self.t_top, self.t_burn, tail_sum=0
+        )
 
         weights = [0] * n
         if 0 <= self.burn_uid < n:

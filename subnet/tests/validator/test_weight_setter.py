@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models import TopAgentResponse
 
-from validator.weight_distribution import compute_top_burn_weights
+from validator.weight_distribution import compute_pinned_weights
 from validator.weight_setter import WeightSetterThread
 
 
@@ -154,7 +154,7 @@ class TestWeightSetterThread:
 
         mock_subtensor.set_weights.assert_called()
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        _, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        _, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
         assert weights[0] == burn_u16
         assert all(w == 0 for w in weights[1:])
 
@@ -175,7 +175,7 @@ class TestWeightSetterThread:
         setter.stop()
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
         assert weights[0] == burn_u16  # uid 0 = burn
         assert weights[1] == top_u16  # 5GrwvaEF... index in fixture
         assert weights[2] == 0
@@ -205,7 +205,7 @@ class TestWeightSetterThread:
         setter.stop()
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
         assert weights[0] == burn_u16
         assert weights[1] == round(top_u16 * 0.5)
 
@@ -271,7 +271,8 @@ class TestWeightSetterThread:
         setter.stop()
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
+        # K=3, tail = [2, 1] → tail_sum = 3.
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=3)
         # Burn slot.
         assert weights[0] == burn_u16
         # Rank 1 finisher — uid 1 in this metagraph.
@@ -360,5 +361,6 @@ class TestWeightSetterThread:
         for call in mock_backend_client.get_race_detail.call_args_list:
             assert call.args == (completed_id,) or call.kwargs == {"race_id": completed_id}
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, _ = compute_top_burn_weights(0.25, 0.75)
+        # K=3, tail = [2, 1] → tail_sum = 3.
+        top_u16, _ = compute_pinned_weights(0.25, 0.75, tail_sum=3)
         assert weights[1] == top_u16  # rank-1 finisher protected
