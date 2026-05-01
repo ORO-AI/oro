@@ -6,6 +6,14 @@ http {
     # Load njs validation script
     js_import validate_model from /etc/nginx/validate_model.js;
 
+    # Cross-worker shared cache for the inference allowlist. njs module-level
+    # vars are per-worker, so 8 workers each cold-start with an empty cache
+    # and 8 simultaneous fetches storm the Backend, where some get 429 and
+    # those workers never warm up. A shared zone lets one successful fetch
+    # serve every worker. 64K holds well under 1KB of state today; the
+    # headroom is for future entries.
+    js_shared_dict_zone zone=oro_models:64K timeout=24h;
+
     # Limit request body size (prevents memory exhaustion from oversized payloads)
     client_max_body_size 10m;
 
@@ -76,7 +84,7 @@ http {
 
         # Internal location: fetch the allowed-models list from the ORO Backend
         # so the proxy stays in sync without an image rebuild. njs subrequests
-        # this on cache miss; per-worker cache TTL lives in validate_model.js.
+        # this on cache miss; shared-cache TTL lives in validate_model.js.
         location = /_backend_models {
             internal;
 
