@@ -271,6 +271,66 @@ class TestScoreReasoningQuality:
         assert result["inference_failed"] == 0
         assert result["inference_total"] == 1
 
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_blacklists_model_after_unparseable_response(self, mock_post, _mock_sleep):
+        """A model that returns an empty 200 must not be selected again in
+        the same eval — Chutes occasionally serves an unhealthy TEE
+        instance that returns empty content on every call, and burning the
+        full retry budget on it causes the eval to FAIL needlessly."""
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {"choices": [{"message": {"content": ""}}]}),
+            MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": '{"reasoning_quality": 0.7, "explanation": "ok"}'}}]
+                },
+            ),
+        ]
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+        assert result["score"] == 0.7
+        # The two POSTs must have hit different models — proves the
+        # first-attempt model was skipped on the second attempt.
+        first_model = mock_post.call_args_list[0].kwargs["json"]["model"]
+        second_model = mock_post.call_args_list[1].kwargs["json"]["model"]
+        assert first_model != second_model
+        assert result["model"] == second_model
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_aborts_when_all_models_blacklisted(self, mock_post, _mock_sleep):
+        """Once every model has returned an unparseable 200 in this eval,
+        the loop must exit immediately rather than spinning through the
+        remaining retry budget on already-broken models."""
+        mock_post.return_value = MagicMock(
+            status_code=200,
+            json=lambda: {"choices": [{"message": {"content": ""}}]},
+        )
+        # max_retries far exceeds model count; expect attempts == len(JUDGE_MODELS).
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key", max_retries=20)
+        assert result["score"] == 0.0
+        assert result["inference_total"] == len(JUDGE_MODELS)
+        assert result["inference_failed"] == len(JUDGE_MODELS)
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_no_backoff_sleep_on_unparseable_response(self, mock_post, mock_sleep):
+        """Empty-content responses are model-health failures, not rate
+        limits — rotate immediately with no exponential backoff. Backoff
+        on empty content compounds with the per-call timeout and pushes
+        evals past the 900s scoring window."""
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {"choices": [{"message": {"content": ""}}]}),
+            MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [{"message": {"content": '{"reasoning_quality": 0.6, "explanation": "ok"}'}}]
+                },
+            ),
+        ]
+        score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+        mock_sleep.assert_not_called()
+
     def test_empty_dialogue_returns_zero(self):
         result = score_reasoning_quality([], api_key="test-key")
         assert result["score"] == 0.0

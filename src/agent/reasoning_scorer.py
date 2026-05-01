@@ -614,10 +614,24 @@ def score_reasoning_quality(
     headers = {"Authorization": f"Bearer {api_key}"}
 
     models = _select_models_by_utilization()
+    # Models that returned an unparseable 200 in this eval. Skipped on
+    # subsequent rotation steps so a single broken model (e.g. Chutes
+    # serving empty `content` for one TEE variant while reporting healthy
+    # active_instance_count) doesn't burn the full retry budget.
+    bad_models: set[str] = set()
     model_idx = 0
     inference_failed = 0
     inference_total = 0
     for attempt in range(max_retries):
+        if len(bad_models) >= len(models):
+            logger.error(
+                f"All {len(models)} judge models returned unparseable responses "
+                f"this eval; aborting after {attempt} attempts"
+            )
+            break
+        # Skip blacklisted models without consuming a retry slot.
+        while models[model_idx % len(models)] in bad_models:
+            model_idx += 1
         model = models[model_idx % len(models)]
         inference_total += 1
 
@@ -654,15 +668,18 @@ def score_reasoning_quality(
                         "inference_failed": inference_failed,
                         "inference_total": inference_total,
                     }
-                # 200 OK with empty/unparseable body — transient judge failure,
-                # not score=0. Rotate and retry.
+                # 200 OK with empty/unparseable body — model is broken upstream
+                # (Chutes serving an unhealthy TEE instance). Blacklist it for
+                # this eval and rotate immediately, with no rate-limit backoff.
                 inference_failed += 1
+                bad_models.add(model)
                 logger.warning(
                     f"Judge response unparseable from {model} "
                     f"(attempt {attempt + 1}/{max_retries}); "
+                    f"blacklisting for this eval; "
                     f"content[:200]={content[:200]!r}"
                 )
-                model_idx = _rotate_and_backoff(model_idx, attempt)
+                model_idx += 1
                 continue
 
             inference_failed += 1
