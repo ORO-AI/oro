@@ -229,21 +229,21 @@ class TestWeightSetterThread:
     def test_race_path_distributes_to_top_half(
         self, mock_backend_client, mock_subtensor, mock_wallet
     ):
-        """With a completed race of 6 entrants, the top 3 (floor(6/2)) get
+        """With a completed race of 6 finishers, the top 3 (floor(6/2)) get
         non-zero u16 weights and the bottom 3 get 0."""
-        # 6 entrants, scores descending; metagraph indexes them after the burn uid.
-        entrants = [
+        # 6 finishers, scores descending; metagraph indexes them after the burn uid.
+        finishers = [
             {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
             for i in range(6)
         ]
 
         metagraph = MagicMock()
-        metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in entrants]
+        metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in finishers]
         metagraph.uids = list(range(len(metagraph.hotkeys)))
 
         race_id = uuid4()
         mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
-        mock_backend_client.get_race_detail.return_value = _race_detail(entrants)
+        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
 
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -261,7 +261,7 @@ class TestWeightSetterThread:
         top_u16, burn_u16 = compute_top_burn_weights(0.25, 0.75)
         # Burn slot.
         assert weights[0] == burn_u16
-        # Rank 1 entrant — uid 1 in this metagraph.
+        # Rank 1 finisher — uid 1 in this metagraph.
         assert weights[1] == top_u16
         # Ranks 2..K (K=3) — taper K-1, K-2 = 2, 1.
         assert weights[2] == 2

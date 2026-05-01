@@ -1,15 +1,23 @@
-"""Deterministic weight distribution for the top half of race entrants.
+"""Deterministic weight distribution for the top half of race finishers.
 
-Replaces the prior "all weight to the single top miner + burn" model with a
-linear-taper across the top `floor(N/2)` ranked entrants, so legitimate
-competitors retain `Emission[uid] > 0` and survive `get_neuron_to_prune`
-(which ranks by emission asc, reg_block asc, uid asc).
+A finisher is a qualifier from the most recent completed race that
+actually finished the race (has a non-null `race_score`). Qualifiers
+that DNF'd or were eliminated mid-race land in the public race detail
+with `race_score=null` and are dropped at the boundary in
+`weight_setter._qualifiers_to_finishers`. By the time finishers reach
+this module the list is already filtered.
 
-The function in this module is pure — same `(qualifiers, t_top, t_burn)`
-yields byte-identical u16 weight vectors across validators. That property
-is load-bearing for Yuma consensus on subnet 15 (`kappa = 0.5`): if
-validators emit different weight vectors for the tail, the median collapses
-to 0 and the protection fails.
+The protection target is the half of last race's finishers with the
+highest scores: those who actively competed and did not finish at the
+bottom of the pack. They keep `Emission[uid] > 0` between races and
+survive `get_neuron_to_prune` (which ranks by emission asc, reg_block
+asc, uid asc) when their `immunity_period` expires.
+
+The function in this module is pure — same `(finishers, t_top, t_burn)`
+yields byte-identical u16 weight vectors across validators. That
+property is load-bearing for Yuma consensus on subnet 15 (`kappa = 0.5`):
+if validators emit different weight vectors for the tail, the median
+collapses to 0 and the protection fails.
 """
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ U16_MAX = 65535
 
 
 @dataclass(frozen=True)
-class RankedEntrant:
+class RankedFinisher:
     """A single race qualifier reduced to the fields needed for ranking.
 
     Validators only need the score (for ordering), the agent_version_id
@@ -37,7 +45,7 @@ class RankedEntrant:
     race_score: float
 
 
-def rank_entrants(qualifiers: Iterable[RankedEntrant]) -> list[RankedEntrant]:
+def rank_finishers(qualifiers: Iterable[RankedFinisher]) -> list[RankedFinisher]:
     """Sort qualifiers into a canonical order shared by every validator.
 
     Primary key: `race_score` descending. Tie-break: `agent_version_id`
@@ -74,11 +82,11 @@ def compute_top_burn_weights(t_top: float, t_burn: float) -> tuple[int, int]:
 
 
 def compute_hotkey_weights(
-    qualifiers: Iterable[RankedEntrant],
+    qualifiers: Iterable[RankedFinisher],
     t_top: float,
     t_burn: float,
 ) -> dict[str, int]:
-    """Compute hotkey → u16 weight for the top 50% of race entrants.
+    """Compute hotkey → u16 weight for the top 50% of race finishers.
 
     Bottom 50% (and ties at the rank-K boundary, by tiebreak) get no entry.
 
@@ -86,7 +94,7 @@ def compute_hotkey_weights(
     values if `t_burn > t_top`). Ranks 2..K receive a linear taper
     `K + 1 - rank`, so rank 2 = K-1, rank 3 = K-2, ..., rank K = 1.
     """
-    ranked = rank_entrants(qualifiers)
+    ranked = rank_finishers(qualifiers)
     n = len(ranked)
     k = n // 2  # floor
     if k == 0:
@@ -105,7 +113,7 @@ def compute_hotkey_weights(
 
 
 def build_metagraph_weight_vector(
-    qualifiers: Iterable[RankedEntrant],
+    qualifiers: Iterable[RankedFinisher],
     metagraph_hotkeys: list[str],
     t_top: float,
     t_burn: float,

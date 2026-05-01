@@ -1,6 +1,6 @@
 """Background thread for periodic weight updates.
 
-Builds a deterministic top-50% race-entrant weight vector via
+Builds a deterministic top-50% race-finisher weight vector via
 `weight_distribution.build_metagraph_weight_vector` and submits it to the
 chain. Determinism across validators is load-bearing for Yuma consensus on
 subnet 15 (`kappa = 0.5`).
@@ -17,20 +17,29 @@ from oro_sdk.types import UNSET
 
 from .backend_client import BackendClient, BackendError
 from .weight_distribution import (
-    RankedEntrant,
+    RankedFinisher,
     build_metagraph_weight_vector,
     compute_top_burn_weights,
 )
 
 
-def _qualifiers_to_entrants(qualifiers) -> list[RankedEntrant]:
-    """Reduce SDK `RaceQualifierPublic` records to the ranking inputs.
+def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
+    """Reduce SDK `RaceQualifierPublic` records to ranked finishers.
 
-    Skips entries without a `race_score` or `miner_hotkey` — those are not
-    eligible for weight allocation. Drops `None` and `Unset` defensively
-    so a partial-data Backend response can't poison the ranking.
+    A "finisher" is a qualifier with a non-null `race_score` — i.e.
+    the agent ran the race to completion and got scored. Qualifiers
+    with `race_score=null` (DNF, eliminated mid-race, never executed)
+    are intentionally dropped: they did not finish the race, so they
+    are not protected from deregistration by this mechanism. A
+    `race_score=0.0` finisher is still a finisher (they completed but
+    scored zero) and competes for a top-half slot like everyone else;
+    the linear taper naturally drops them out of the protected set
+    when other finishers outscore them.
+
+    Also drops entries without a `miner_hotkey` defensively so a
+    partial-data Backend response can't poison the ranking.
     """
-    entrants: list[RankedEntrant] = []
+    finishers: list[RankedFinisher] = []
     for q in qualifiers:
         score = q.race_score
         if score is None or score is UNSET:
@@ -38,14 +47,14 @@ def _qualifiers_to_entrants(qualifiers) -> list[RankedEntrant]:
         hotkey = q.miner_hotkey
         if not hotkey or hotkey is UNSET:
             continue
-        entrants.append(
-            RankedEntrant(
+        finishers.append(
+            RankedFinisher(
                 miner_hotkey=str(hotkey),
                 agent_version_id=str(q.agent_version_id),
                 race_score=float(score),
             )
         )
-    return entrants
+    return finishers
 
 
 class WeightSetterThread:
@@ -106,8 +115,8 @@ class WeightSetterThread:
                     f"Weight setter thread did not stop within {join_timeout}s"
                 )
 
-    def _fetch_race_entrants(self) -> Optional[list[RankedEntrant]]:
-        """Return entrants from the latest completed race, or None.
+    def _fetch_race_finishers(self) -> Optional[list[RankedFinisher]]:
+        """Return finishers from the latest completed race, or None.
 
         Returns None when there is no completed race yet, or when fetching
         the race details fails — the caller falls back to the top-miner
@@ -122,10 +131,10 @@ class WeightSetterThread:
             return None
         detail = self.backend_client.get_race_detail(latest.race_id)
         qualifiers = detail.qualifiers if detail.qualifiers is not UNSET else []
-        return _qualifiers_to_entrants(qualifiers)
+        return _qualifiers_to_finishers(qualifiers)
 
     def _build_weights_from_race(
-        self, entrants: list[RankedEntrant]
+        self, finishers: list[RankedFinisher]
     ) -> tuple[list[int], list[int]]:
         """Compute the full `(uids, u16 weights)` vector for the metagraph.
 
@@ -134,7 +143,7 @@ class WeightSetterThread:
         Backend.
         """
         return build_metagraph_weight_vector(
-            entrants,
+            finishers,
             metagraph_hotkeys=list(self.metagraph.hotkeys),
             t_top=self.t_top,
             t_burn=self.t_burn,
@@ -196,9 +205,9 @@ class WeightSetterThread:
         """One iteration of the loop — race-based path with top-miner fallback."""
         self.metagraph.sync()
 
-        entrants: Optional[list[RankedEntrant]] = None
+        finishers: Optional[list[RankedFinisher]] = None
         try:
-            entrants = self._fetch_race_entrants()
+            finishers = self._fetch_race_finishers()
         except BackendError as e:
             # Don't crash the loop — fall back to the top-miner path so a
             # race-endpoint outage doesn't stop weight setting.
@@ -207,11 +216,11 @@ class WeightSetterThread:
             else:
                 logging.error(f"Race fetch error, using fallback: {e}")
 
-        if entrants:
-            uids, weights = self._build_weights_from_race(entrants)
+        if finishers:
+            uids, weights = self._build_weights_from_race(finishers)
             non_zero = sum(1 for w in weights if w > 0)
             logging.info(
-                f"Race-based weight vector: N={len(entrants)} entrants, "
+                f"Race-based weight vector: N={len(finishers)} finishers, "
                 f"{non_zero} non-zero metagraph slots"
             )
         else:

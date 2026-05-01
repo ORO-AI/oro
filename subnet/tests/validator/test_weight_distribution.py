@@ -13,22 +13,22 @@ import random
 import pytest
 
 from subnet.validator.weight_distribution import (
-    RankedEntrant,
+    RankedFinisher,
     U16_MAX,
     build_metagraph_weight_vector,
     compute_hotkey_weights,
     compute_top_burn_weights,
-    rank_entrants,
+    rank_finishers,
 )
 
 
-def _make_entrants(n: int, seed: int = 0) -> list[RankedEntrant]:
+def _make_finishers(n: int, seed: int = 0) -> list[RankedFinisher]:
     """Synthesise `n` qualifiers with deterministic-but-varied scores."""
     rng = random.Random(seed)
     out = []
     for i in range(n):
         out.append(
-            RankedEntrant(
+            RankedFinisher(
                 miner_hotkey=f"hk_{i:04d}",
                 agent_version_id=f"av_{i:04d}",
                 race_score=rng.uniform(0.4, 0.9),
@@ -80,24 +80,24 @@ def test_compute_top_burn_weights_rejects_invalid_ratios(t_top, t_burn):
 # --- ranking ---
 
 
-def test_rank_entrants_orders_by_score_desc_then_agent_version_id_asc():
-    entrants = [
-        RankedEntrant("hk_a", "av_b", 0.5),
-        RankedEntrant("hk_b", "av_a", 0.5),  # same score, av_a < av_b → first
-        RankedEntrant("hk_c", "av_c", 0.7),  # highest score
-        RankedEntrant("hk_d", "av_d", 0.3),
+def test_rank_finishers_orders_by_score_desc_then_agent_version_id_asc():
+    finishers = [
+        RankedFinisher("hk_a", "av_b", 0.5),
+        RankedFinisher("hk_b", "av_a", 0.5),  # same score, av_a < av_b → first
+        RankedFinisher("hk_c", "av_c", 0.7),  # highest score
+        RankedFinisher("hk_d", "av_d", 0.3),
     ]
-    ranked = rank_entrants(entrants)
+    ranked = rank_finishers(finishers)
     assert [r.miner_hotkey for r in ranked] == ["hk_c", "hk_b", "hk_a", "hk_d"]
 
 
-def test_rank_entrants_stable_under_input_shuffle():
+def test_rank_finishers_stable_under_input_shuffle():
     """Two validators receiving the same qualifiers in different orders
     must produce identical rankings."""
-    entrants = _make_entrants(50, seed=42)
-    shuffled = entrants.copy()
+    finishers = _make_finishers(50, seed=42)
+    shuffled = finishers.copy()
     random.Random(7).shuffle(shuffled)
-    assert rank_entrants(entrants) == rank_entrants(shuffled)
+    assert rank_finishers(finishers) == rank_finishers(shuffled)
 
 
 # --- compute_hotkey_weights expected shapes ---
@@ -108,14 +108,14 @@ def test_rank_entrants_stable_under_input_shuffle():
 def test_compute_hotkey_weights_shape_per_spec(n, t_top, t_burn):
     """The AC's algorithm: rank 1 = top_u16, ranks 2..K = K+1-rank,
     bottom 50% (and any ties at K) absent."""
-    entrants = _make_entrants(n, seed=n)
-    weights = compute_hotkey_weights(entrants, t_top, t_burn)
+    finishers = _make_finishers(n, seed=n)
+    weights = compute_hotkey_weights(finishers, t_top, t_burn)
 
     k = n // 2
     # Top half present, bottom half absent.
     assert len(weights) == k
 
-    ranked = rank_entrants(entrants)
+    ranked = rank_finishers(finishers)
     expected_top, _ = compute_top_burn_weights(t_top, t_burn)
 
     # Rank 1 = top_u16.
@@ -138,11 +138,11 @@ def test_compute_hotkey_weights_shape_per_spec(n, t_top, t_burn):
 
 
 @pytest.mark.parametrize("n", [0, 1])
-def test_compute_hotkey_weights_empty_for_too_few_entrants(n):
+def test_compute_hotkey_weights_empty_for_too_few_finishers(n):
     """N=0 yields no weights. N=1 yields no weights either — floor(1/2)=0,
     so there is no rank-1 to receive the top weight (the burn uid still
     fires unconditionally in `build_metagraph_weight_vector`)."""
-    weights = compute_hotkey_weights(_make_entrants(n), 0.25, 0.75)
+    weights = compute_hotkey_weights(_make_finishers(n), 0.25, 0.75)
     assert weights == {}
 
 
@@ -151,9 +151,9 @@ def test_compute_hotkey_weights_empty_for_too_few_entrants(n):
 
 def test_compute_hotkey_weights_matches_ac_examples_n30():
     """AC: N=30 K=15 tail_size=14 tail_sum=105 burn=65535 top=21845."""
-    entrants = _make_entrants(30, seed=30)
-    weights = compute_hotkey_weights(entrants, 0.25, 0.75)
-    ranked = rank_entrants(entrants)
+    finishers = _make_finishers(30, seed=30)
+    weights = compute_hotkey_weights(finishers, 0.25, 0.75)
+    ranked = rank_finishers(finishers)
 
     assert weights[ranked[0].miner_hotkey] == 21845  # top
     # tail weights 14, 13, ..., 1 → sum = 14*15/2 = 105
@@ -165,9 +165,9 @@ def test_compute_hotkey_weights_matches_ac_examples_n30():
 
 def test_compute_hotkey_weights_matches_ac_examples_n100():
     """AC: N=100 K=50 tail_size=49 tail_sum=1225."""
-    entrants = _make_entrants(100, seed=100)
-    weights = compute_hotkey_weights(entrants, 0.25, 0.75)
-    ranked = rank_entrants(entrants)
+    finishers = _make_finishers(100, seed=100)
+    weights = compute_hotkey_weights(finishers, 0.25, 0.75)
+    ranked = rank_finishers(finishers)
 
     assert weights[ranked[0].miner_hotkey] == 21845
     tail_sum = sum(
@@ -183,20 +183,20 @@ def test_two_validators_with_same_inputs_emit_byte_identical_weights():
     """Simulates two validators receiving the qualifiers in different
     orders and a metagraph with hotkeys in different orders. The final
     `(uids, weights)` vector must be byte-identical."""
-    entrants_a = _make_entrants(50, seed=1)
-    entrants_b = entrants_a.copy()
-    random.Random(2).shuffle(entrants_b)
+    finishers_a = _make_finishers(50, seed=1)
+    finishers_b = finishers_a.copy()
+    random.Random(2).shuffle(finishers_b)
 
-    metagraph_a = ["hk_burn"] + [e.miner_hotkey for e in entrants_a]
+    metagraph_a = ["hk_burn"] + [e.miner_hotkey for e in finishers_a]
     metagraph_b = list(metagraph_a)  # same ordering — required: validators
     # see the same metagraph (chain state). Re-shuffling here would not
     # be meaningful — uids are chain-assigned, not per-validator.
 
     uids_a, weights_a = build_metagraph_weight_vector(
-        entrants_a, metagraph_a, t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers_a, metagraph_a, t_top=0.25, t_burn=0.75, burn_uid=0
     )
     uids_b, weights_b = build_metagraph_weight_vector(
-        entrants_b, metagraph_b, t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers_b, metagraph_b, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     assert uids_a == uids_b
@@ -207,11 +207,11 @@ def test_two_validators_with_same_inputs_emit_byte_identical_weights():
 
 
 def test_build_metagraph_vector_places_burn_at_uid_0():
-    entrants = _make_entrants(10, seed=10)
-    metagraph = ["burn_hk"] + [e.miner_hotkey for e in entrants]
+    finishers = _make_finishers(10, seed=10)
+    metagraph = ["burn_hk"] + [e.miner_hotkey for e in finishers]
 
     _, weights = build_metagraph_weight_vector(
-        entrants, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     assert weights[0] == U16_MAX  # burn pinned
@@ -222,15 +222,15 @@ def test_build_metagraph_vector_drops_hotkeys_missing_from_metagraph():
     """A race winner deregistered between race close and weight set
     must not crash the algorithm — their weight is silently dropped and
     the burn share grows."""
-    entrants = _make_entrants(10, seed=10)
+    finishers = _make_finishers(10, seed=10)
     # Drop the rank-1 hotkey from the metagraph.
-    ranked = rank_entrants(entrants)
+    ranked = rank_finishers(finishers)
     metagraph = ["burn_hk"] + [
-        e.miner_hotkey for e in entrants if e.miner_hotkey != ranked[0].miner_hotkey
+        e.miner_hotkey for e in finishers if e.miner_hotkey != ranked[0].miner_hotkey
     ]
 
     _, weights = build_metagraph_weight_vector(
-        entrants, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     # Rank-1 hotkey is gone — no entry has the top-pin weight (21845).
@@ -240,19 +240,19 @@ def test_build_metagraph_vector_drops_hotkeys_missing_from_metagraph():
 
 
 def test_build_metagraph_vector_returns_aligned_uids():
-    entrants = _make_entrants(10, seed=10)
-    metagraph = ["burn_hk"] + [e.miner_hotkey for e in entrants]
+    finishers = _make_finishers(10, seed=10)
+    metagraph = ["burn_hk"] + [e.miner_hotkey for e in finishers]
     uids, weights = build_metagraph_weight_vector(
-        entrants, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
     assert uids == list(range(len(metagraph)))
     assert len(weights) == len(metagraph)
 
 
 def test_build_metagraph_vector_empty_metagraph_returns_empty():
-    entrants = _make_entrants(10, seed=10)
+    finishers = _make_finishers(10, seed=10)
     uids, weights = build_metagraph_weight_vector(
-        entrants, [], t_top=0.25, t_burn=0.75, burn_uid=0
+        finishers, [], t_top=0.25, t_burn=0.75, burn_uid=0
     )
     assert uids == []
     assert weights == []
