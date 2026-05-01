@@ -595,7 +595,9 @@ def score_reasoning_quality(
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
     Retries with model rotation on transient failures (429, 502-504).
-    Uses exponential backoff matching ProxyClient conventions.
+    Uses exponential backoff matching ProxyClient conventions on rate
+    limits; rotates without backoff and blacklists the model for the
+    rest of this eval when a 200 returns unparseable content.
     Stops immediately on auth failures (401, 403).
 
     Returns:
