@@ -161,9 +161,22 @@ class WeightSetterThread:
         method so tests can target the integration without exercising
         Backend.
         """
+        metagraph_hotkeys = list(self.metagraph.hotkeys)
+        # Audit: log finishers whose hotkeys aren't in the current
+        # metagraph, since their weight is silently dropped by
+        # `build_metagraph_weight_vector`. This is the deregistration
+        # / uid-recycle case — expected, not an error.
+        present = set(metagraph_hotkeys)
+        missing = [f.miner_hotkey for f in finishers if f.miner_hotkey not in present]
+        if missing:
+            logging.info(
+                f"{len(missing)} race finisher(s) not in current metagraph "
+                f"(deregistered between race close and weight set), "
+                f"weight skipped: {missing[:5]}{'…' if len(missing) > 5 else ''}"
+            )
         return build_metagraph_weight_vector(
             finishers,
-            metagraph_hotkeys=list(self.metagraph.hotkeys),
+            metagraph_hotkeys=metagraph_hotkeys,
             t_top=self.t_top,
             t_burn=self.t_burn,
             burn_uid=self.burn_uid,
