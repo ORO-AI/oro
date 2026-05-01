@@ -89,7 +89,20 @@ def _score_output(
             line = line.strip()
             if not line:
                 continue
-            output = json.loads(line)
+            parsed = json.loads(line)
+            if not parsed:
+                continue
+            # Sandbox writes one envelope per problem to output.jsonl —
+            # `{"problem_id": ..., "status": ..., "dialogue": [...]}`. Older
+            # sandbox images wrote the raw dialogue list instead, so accept
+            # both shapes.
+            if isinstance(parsed, dict):
+                if parsed.get("status") and parsed.get("status") != "SUCCESS":
+                    # FAILED / TIMED_OUT envelopes have no scorable dialogue.
+                    continue
+                output = parsed.get("dialogue") or []
+            else:
+                output = parsed
             if not output:
                 continue
             query = output[0].get("extra_info", {}).get("query", "")
