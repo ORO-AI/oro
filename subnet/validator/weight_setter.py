@@ -80,7 +80,6 @@ class WeightSetterThread:
         interval_seconds: int = 300,
         t_top: float = 0.25,
         t_burn: float = 0.75,
-        burn_uid: int = 0,
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -90,7 +89,6 @@ class WeightSetterThread:
         self.interval_seconds = interval_seconds
         self.t_top = t_top
         self.t_burn = t_burn
-        self.burn_uid = burn_uid
 
         # Fail fast on misconfiguration — the validator process should not
         # start setting weights with invalid ratios. tail_sum=0 is the
@@ -179,7 +177,6 @@ class WeightSetterThread:
             metagraph_hotkeys=metagraph_hotkeys,
             t_top=self.t_top,
             t_burn=self.t_burn,
-            burn_uid=self.burn_uid,
         )
 
     def _build_weights_top_miner_fallback(
@@ -203,8 +200,7 @@ class WeightSetterThread:
         )
 
         weights = [0] * n
-        if 0 <= self.burn_uid < n:
-            weights[self.burn_uid] = burn_u16
+        weights[0] = burn_u16
 
         try:
             top_idx = self.metagraph.hotkeys.index(top_miner_hotkey)
@@ -219,8 +215,8 @@ class WeightSetterThread:
         # configured top share (e.g. challenger margin not yet earned).
         # Scale the top u16 by it; the burn slot keeps its full share.
         scaled_top = int(round(top_u16 * emission_wt))
-        if self.burn_uid == top_idx:
-            weights[top_idx] += scaled_top
+        if top_idx == 0:
+            weights[0] += scaled_top
         else:
             weights[top_idx] = scaled_top
 
