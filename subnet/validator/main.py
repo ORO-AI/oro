@@ -450,6 +450,7 @@ class Validator:
         UPDATE_CHECK_INTERVAL = 300
         self._last_update_check = 0
 
+        # Start weight setter thread
         weight_setter = WeightSetterThread(
             backend_client=self.backend_client,
             subtensor=self.subtensor,
