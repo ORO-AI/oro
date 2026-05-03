@@ -450,6 +450,11 @@ class Validator:
         UPDATE_CHECK_INTERVAL = 300
         self._last_update_check = 0
 
+        # Start weight setter thread.
+        # `ORO_BURN_UID` lets test deployments target a non-uid-0 burn slot
+        # (e.g. testnet subnet 469 where uid 0 is the validator hotkey, not
+        # a dedicated burn address). Default 0 matches subnet 15 prod.
+        burn_uid = int(os.environ.get("ORO_BURN_UID", "0"))
         weight_setter = WeightSetterThread(
             backend_client=self.backend_client,
             subtensor=self.subtensor,
@@ -457,10 +462,12 @@ class Validator:
             wallet=self.wallet,
             netuid=self.config.netuid,
             interval_seconds=self.config.weight_update_interval,
+            burn_uid=burn_uid,
         )
         weight_setter.start()
         logging.info(
-            f"Weight setter started (interval: {self.config.weight_update_interval}s)"
+            f"Weight setter started (interval: {self.config.weight_update_interval}s, "
+            f"burn_uid={burn_uid})"
         )
 
         try:

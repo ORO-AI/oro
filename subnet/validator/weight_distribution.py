@@ -178,6 +178,7 @@ def build_metagraph_weight_vector(
     metagraph_hotkeys: list[str],
     t_top: float,
     t_burn: float,
+    burn_uid: int = 0,
 ) -> tuple[list[int], list[int]]:
     """Produce `(uids, weights_u16)` aligned to the metagraph.
 
@@ -190,7 +191,7 @@ def build_metagraph_weight_vector(
        race close and weight set) is silently dropped — its weight does
        not redistribute, so the burn share grows slightly. This matches
        the existing "top miner missing → burn everything" fallback.
-    4. Add `burn_u16` at uid 0 (the literal burn slot).
+    4. Add `burn_u16` at `burn_uid` (uid 0 on subnet 15 is a literal burn).
 
     Returns:
         Two parallel lists of length `len(metagraph_hotkeys)`. `uids[i]`
@@ -218,9 +219,10 @@ def build_metagraph_weight_vector(
             continue
         weights[idx] = w
 
-    # Burn uid 0 may coincidentally collide with a top-half hotkey on very
-    # small testnet metagraphs — the burn weight is additive so the slot
-    # is never accidentally zeroed by the top-half pass.
-    weights[0] += burn_u16
+    if 0 <= burn_uid < n_meta:
+        # Burn uid may coincidentally collide with a top-half hotkey on
+        # very small testnet metagraphs — the burn weight is additive so
+        # the slot is never accidentally zeroed by the top-half pass.
+        weights[burn_uid] += burn_u16
 
     return list(range(n_meta)), weights

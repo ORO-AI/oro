@@ -206,7 +206,7 @@ def test_top_miner_share_is_exactly_t_top_regardless_of_n(n):
     finishers = _make_finishers(n, seed=n)
     metagraph = ["hk_burn"] + [e.miner_hotkey for e in finishers]
     _, weights = build_metagraph_weight_vector(
-        finishers, metagraph, t_top=0.25, t_burn=0.75
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
     ranked = rank_finishers(finishers)
     rank1_idx = metagraph.index(ranked[0].miner_hotkey)
@@ -259,10 +259,10 @@ def test_two_validators_with_same_inputs_emit_byte_identical_weights():
     metagraph_b = list(metagraph_a)  # uids are chain-assigned, not per-validator
 
     uids_a, weights_a = build_metagraph_weight_vector(
-        finishers_a, metagraph_a, t_top=0.25, t_burn=0.75
+        finishers_a, metagraph_a, t_top=0.25, t_burn=0.75, burn_uid=0
     )
     uids_b, weights_b = build_metagraph_weight_vector(
-        finishers_b, metagraph_b, t_top=0.25, t_burn=0.75
+        finishers_b, metagraph_b, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     assert uids_a == uids_b
@@ -277,7 +277,7 @@ def test_build_metagraph_vector_places_burn_at_uid_0():
     metagraph = ["burn_hk"] + [e.miner_hotkey for e in finishers]
 
     _, weights = build_metagraph_weight_vector(
-        finishers, metagraph, t_top=0.25, t_burn=0.75
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     assert weights[0] == U16_MAX  # burn slot pinned
@@ -295,7 +295,7 @@ def test_build_metagraph_vector_drops_hotkeys_missing_from_metagraph():
     ]
 
     _, weights = build_metagraph_weight_vector(
-        finishers, metagraph, t_top=0.25, t_burn=0.75
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
 
     # Rank-1 hotkey is gone — no entry has the top u16.
@@ -307,7 +307,7 @@ def test_build_metagraph_vector_returns_aligned_uids():
     finishers = _make_finishers(10, seed=10)
     metagraph = ["burn_hk"] + [e.miner_hotkey for e in finishers]
     uids, weights = build_metagraph_weight_vector(
-        finishers, metagraph, t_top=0.25, t_burn=0.75
+        finishers, metagraph, t_top=0.25, t_burn=0.75, burn_uid=0
     )
     assert uids == list(range(len(metagraph)))
     assert len(weights) == len(metagraph)
@@ -316,7 +316,7 @@ def test_build_metagraph_vector_returns_aligned_uids():
 def test_build_metagraph_vector_empty_metagraph_returns_empty():
     finishers = _make_finishers(10, seed=10)
     uids, weights = build_metagraph_weight_vector(
-        finishers, [], t_top=0.25, t_burn=0.75
+        finishers, [], t_top=0.25, t_burn=0.75, burn_uid=0
     )
     assert uids == []
     assert weights == []
