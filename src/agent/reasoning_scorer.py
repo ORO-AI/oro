@@ -44,7 +44,6 @@ JUDGE_MODELS = [
     "zai-org/GLM-5.1-TEE",
     "google/gemma-4-31B-turbo-TEE",
     "zai-org/GLM-5-TEE",
-    "moonshotai/Kimi-K2.5-TEE",
 ]
 
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
@@ -644,7 +643,7 @@ def score_reasoning_quality(
                 json={
                     "model": model,
                     "temperature": 0,
-                    "max_tokens": 1024,
+                    "max_tokens": 3072,
                     "stream": False,
                     "messages": [
                         {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
