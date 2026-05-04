@@ -360,3 +360,22 @@ class TestWeightSetterThread:
         # K=3, tail = [2, 1] → tail_sum = 3.
         top_u16, _ = compute_pinned_weights(0.25, 0.75, tail_sum=3)
         assert weights[1] == top_u16  # rank-1 finisher protected
+
+    def test_shadow_mode_skips_chain_call(
+        self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
+    ):
+        """shadow_mode=True: weight vector is computed but never submitted."""
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=mock_metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+            shadow_mode=True,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        mock_subtensor.set_weights.assert_not_called()

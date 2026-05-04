@@ -481,6 +481,11 @@ class Validator:
         UPDATE_CHECK_INTERVAL = 300
         self._last_update_check = 0
 
+        shadow_mode = os.environ.get("ORO_WEIGHT_SETTER_SHADOW", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
         weight_setter = WeightSetterThread(
             backend_client=self.backend_client,
             subtensor=self.subtensor,
@@ -488,10 +493,12 @@ class Validator:
             wallet=self.wallet,
             netuid=self.config.netuid,
             interval_seconds=self.config.weight_update_interval,
+            shadow_mode=shadow_mode,
         )
         weight_setter.start()
         logging.info(
-            f"Weight setter started (interval: {self.config.weight_update_interval}s)"
+            f"Weight setter started (interval: {self.config.weight_update_interval}s, "
+            f"shadow_mode={shadow_mode})"
         )
 
         try:

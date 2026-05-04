@@ -80,6 +80,7 @@ class WeightSetterThread:
         interval_seconds: int = 300,
         t_top: float = 0.25,
         t_burn: float = 0.75,
+        shadow_mode: bool = False,
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -89,6 +90,7 @@ class WeightSetterThread:
         self.interval_seconds = interval_seconds
         self.t_top = t_top
         self.t_burn = t_burn
+        self.shadow_mode = shadow_mode
 
         # Fail fast on misconfiguration — the validator process should not
         # start setting weights with invalid ratios. tail_sum=0 is the
@@ -224,7 +226,20 @@ class WeightSetterThread:
 
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
         """Push `uids` / `weights` to the chain. No retries — the loop's
-        next tick will retry on transient blockchain failures."""
+        next tick will retry on transient blockchain failures.
+
+        In shadow mode, log the would-be submission and skip the chain call
+        so the new distribution can be exercised on a live validator without
+        actually moving emissions.
+        """
+        if self.shadow_mode:
+            non_zero = [(u, w) for u, w in zip(uids, weights) if w > 0]
+            logging.info(
+                f"[SHADOW] would set_weights netuid={self.netuid} "
+                f"non_zero={len(non_zero)} total_u16={sum(weights)} "
+                f"vector={non_zero}"
+            )
+            return
         self.subtensor.set_weights(
             netuid=self.netuid,
             wallet=self.wallet,
@@ -275,7 +290,10 @@ class WeightSetterThread:
             return
 
         self._submit_weights(uids, weights)
-        logging.info("Successfully set weights")
+        if self.shadow_mode:
+            logging.info("Shadow mode: skipped on-chain weight submission")
+        else:
+            logging.info("Successfully set weights")
 
     def _run(self) -> None:
         """Background thread main loop."""
