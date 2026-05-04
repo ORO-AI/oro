@@ -15,6 +15,8 @@ from typing import Any
 
 import requests
 
+from src.agent.types import Dialogue, JudgeResult
+
 # Base delay for rate-limit retries (seconds). Matches ProxyClient convention.
 RATE_LIMIT_RETRY_DELAY = 5
 
@@ -456,7 +458,7 @@ def _summarize_proxy_calls(proxy_calls: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def format_trajectory_for_judge(dialogue: list[dict[str, Any]]) -> str:
+def format_trajectory_for_judge(dialogue: Dialogue) -> str:
     """Format a dialogue trajectory into a readable string for the LLM judge.
 
     Truncates thinking text and tool results per step to keep total length
@@ -586,11 +588,11 @@ def _rotate_and_backoff(model_idx: int, attempt: int) -> int:
 
 
 def score_reasoning_quality(
-    dialogue: list[dict[str, Any]],
+    dialogue: Dialogue,
     api_key: str,
     proxy_url: str = PROXY_URL,
     max_retries: int = 8,
-) -> dict[str, Any]:
+) -> JudgeResult:
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
     Retries with model rotation on transient failures (429, 502-504).

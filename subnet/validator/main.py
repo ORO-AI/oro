@@ -19,7 +19,7 @@ from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
-from src.agent.types import SandboxMetadata
+from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -619,7 +619,7 @@ class Validator:
 
     def fetch_problems(
         self, suite_id: int, eval_run_id_str: str
-    ) -> tuple[Optional[Path], list[UUID], list[dict]]:
+    ) -> tuple[Optional[Path], list[UUID], list[ProblemDict]]:
         """Fetch problems from Backend API and save sanitized version to temp file.
 
         The full problem data (with reward/voucher) is returned in memory for

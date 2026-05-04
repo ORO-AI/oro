@@ -10,22 +10,17 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
-from typing import Any, Callable, TypedDict
+from typing import Any, Callable
 
 import psutil
+
+from .types import ResourceMetrics
 
 logger = logging.getLogger(__name__)
 
 # Sandbox workdirs live under SANDBOX_DIR; fall back to root when unset
 # since that's the volume holding the Docker image cache anyway.
 _SANDBOX_DIR_ENV = "SANDBOX_DIR"
-
-
-class ResourceMetrics(TypedDict, total=False):
-    cpu_pct: float
-    ram_pct: float
-    disk_pct: float
-    docker_container_count: int
 
 
 def _docker_container_count() -> int:
