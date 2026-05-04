@@ -9,4 +9,5 @@ colorama==0.4.6
 googlesearch-python==1.3.0
 bittensor==10.1.0
 oro-sdk==1.0.50
+prometheus-client>=0.20.0
 psutil>=5.9.0

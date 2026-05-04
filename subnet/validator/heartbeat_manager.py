@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional
 from uuid import UUID
 
 from .backend_client import BackendClient, BackendError
+from .metrics import HEARTBEAT_TOTAL
 
 
 class HeartbeatManager:
@@ -87,6 +88,7 @@ class HeartbeatManager:
                     service_versions=self.service_versions,
                     resource_metrics=resource_metrics,
                 )
+                HEARTBEAT_TOTAL.labels(result="success").inc()
                 with self._lock:
                     self._healthy = True
                     self._last_error = None
@@ -95,6 +97,7 @@ class HeartbeatManager:
                     f"lease expires at {response.lease_expires_at}"
                 )
             except BackendError as e:
+                HEARTBEAT_TOTAL.labels(result="failure").inc()
                 with self._lock:
                     self._healthy = False
                     self._last_error = e
@@ -119,6 +122,7 @@ class HeartbeatManager:
                 # Transient errors - log and continue
                 logging.warning(f"Heartbeat failed for {self.eval_run_id}: {e}")
             except Exception as e:
+                HEARTBEAT_TOTAL.labels(result="failure").inc()
                 with self._lock:
                     self._healthy = False
                     self._last_error = e

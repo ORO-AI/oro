@@ -23,6 +23,13 @@ from src.agent.types import SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
+from .metrics import (
+    ACTIVE_RUNS,
+    CLAIM_WORK_SECONDS,
+    CLAIM_WORK_TOTAL,
+    SANDBOX_ACTIVE,
+    SANDBOX_DURATION_SECONDS,
+)
 from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
@@ -293,8 +300,34 @@ class Validator:
         ]
         logging.info(f"Sandbox command: {' '.join(log_cmd)}")
 
+        SANDBOX_ACTIVE.inc()
+        start_time = time.time()
         try:
-            start_time = time.time()
+            return self._run_sandbox_inner(
+                cmd=cmd,
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+                output_file=output_file,
+                eval_run_id=eval_run_id,
+                metadata=metadata,
+            )
+        finally:
+            duration = time.time() - start_time
+            SANDBOX_DURATION_SECONDS.observe(duration)
+            metadata["duration_seconds"] = round(duration, 1)
+            SANDBOX_ACTIVE.dec()
+
+    def _run_sandbox_inner(
+        self,
+        *,
+        cmd: list[str],
+        stdout_log: Path,
+        stderr_log: Path,
+        output_file: Path,
+        eval_run_id: str,
+        metadata: SandboxMetadata,
+    ) -> tuple[Optional[Path], SandboxMetadata]:
+        try:
             with (
                 open(stdout_log, "w") as stdout_file,
                 open(stderr_log, "w") as stderr_file,
@@ -305,7 +338,6 @@ class Validator:
                     stderr=stderr_file,
                     timeout=self.config.sandbox_timeout,
                 )
-            metadata["duration_seconds"] = round(time.time() - start_time, 1)
             metadata["exit_code"] = result.returncode
 
             # Always log sandbox output for debugging
@@ -356,7 +388,6 @@ class Validator:
                 return None, metadata
 
         except subprocess.TimeoutExpired:
-            metadata["duration_seconds"] = round(time.time() - start_time, 1)
             metadata["exit_code"] = -1
             if stderr_log.exists():
                 stderr_content = stderr_log.read_text()
@@ -480,12 +511,18 @@ class Validator:
 
                     # Claim work from Backend
                     logging.info("Claiming work from Backend...")
-                    work = self.backend_client.claim_work(
-                        service_versions=self.service_versions,
-                        resource_metrics=collect_resource_metrics(),
-                    )
+                    with CLAIM_WORK_SECONDS.time():
+                        try:
+                            work = self.backend_client.claim_work(
+                                service_versions=self.service_versions,
+                                resource_metrics=collect_resource_metrics(),
+                            )
+                        except Exception:
+                            CLAIM_WORK_TOTAL.labels(result="error").inc()
+                            raise
 
                     if work is None:
+                        CLAIM_WORK_TOTAL.labels(result="empty").inc()
                         logging.info(
                             f"No work available, sleeping {self.config.poll_interval}s"
                         )
@@ -493,6 +530,7 @@ class Validator:
                         self.backoff.reset()
                         continue
 
+                    CLAIM_WORK_TOTAL.labels(result="success").inc()
                     logging.info(
                         f"Claimed work: {work.eval_run_id} "
                         f"(agent_version={work.agent_version_id}, suite={work.suite_id})"
@@ -501,10 +539,14 @@ class Validator:
 
                     # Track the current run
                     self._current_eval_run_id = work.eval_run_id
+                    ACTIVE_RUNS.inc()
 
                     # Execute evaluation cycle
                     logging.info(f"Starting evaluation cycle for {work.eval_run_id}")
-                    self.run_evaluation_cycle(work)
+                    try:
+                        self.run_evaluation_cycle(work)
+                    finally:
+                        ACTIVE_RUNS.dec()
                     logging.info(f"Completed evaluation cycle for {work.eval_run_id}")
 
                     # Clear the tracking
