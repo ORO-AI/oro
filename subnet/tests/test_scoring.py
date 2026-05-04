@@ -1,6 +1,5 @@
 """Tests for shared scoring module."""
 
-# pytest.ini adds src/agent to pythonpath, so bare imports work
 import pytest
 from scoring import (
     is_problem_successful,

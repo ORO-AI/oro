@@ -1,13 +1,9 @@
 """Tests for version_collector module."""
 
 import subprocess
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from validator.version_collector import (
     _get_container_image_digest,

@@ -46,9 +46,7 @@ jobs:
 
     - name: Run tests with pytest and coverage
       run: |
-        pytest tests/ subnet/tests/ --ignore=tests/integration -v --cov=src --cov-report=term-missing --cov-report=html
-      env:
-        PYTHONPATH: ${{ github.workspace }}
+        pytest --ignore=tests/integration -v --cov=src --cov-report=term-missing --cov-report=html
     
     - name: Upload coverage reports
       uses: actions/upload-artifact@v4

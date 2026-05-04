@@ -4,15 +4,10 @@ Uses temp_storage_path and mock_backend_client fixtures from conftest.py.
 """
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 from uuid import UUID
 
 import pytest
-
-# Add test-subnet to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models.terminal_status import TerminalStatus
 
