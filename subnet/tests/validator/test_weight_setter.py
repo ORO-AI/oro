@@ -360,10 +360,14 @@ class TestWeightSetterThread:
         top_u16, _ = compute_pinned_weights(0.25, 0.75, tail_sum=3)
         assert weights[1] == top_u16  # rank-1 finisher protected
 
-    def test_shadow_mode_skips_chain_call(
+    def test_shadow_mode_no_race_uses_fallback(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        """shadow_mode=True: weight vector is computed but never submitted."""
+        """shadow_mode=True with no completed race: still submits via fallback.
+
+        Shadow mode must never silently stop weight setting; the legacy
+        top-miner path stays live so prod doesn't lose vTrust on deploy.
+        """
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
             subtensor=mock_subtensor,
@@ -377,4 +381,60 @@ class TestWeightSetterThread:
         time.sleep(0.15)
         setter.stop()
 
-        mock_subtensor.set_weights.assert_not_called()
+        mock_subtensor.set_weights.assert_called()
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
+        assert weights[0] == burn_u16
+        assert weights[1] == top_u16  # 5GrwvaEF... fixture top miner
+
+    def test_shadow_mode_with_race_submits_fallback_vector(
+        self, mock_backend_client, mock_subtensor, mock_wallet
+    ):
+        """shadow_mode=True with a completed race: submits the legacy
+        top-miner vector (NOT the race-based one), even though a race
+        result is available. New algorithm only runs in live mode.
+        """
+        finishers = [
+            {
+                "miner_hotkey": f"5Hotkey{i}",
+                "agent_version_id": str(uuid4()),
+                "race_score": 0.9 - i * 0.1,
+            }
+            for i in range(6)
+        ]
+
+        metagraph = MagicMock()
+        metagraph.hotkeys = [
+            "5BurnUid",
+            "5GrwvaEF...",  # fallback top-miner fixture hotkey
+        ] + [f["miner_hotkey"] for f in finishers]
+        metagraph.uids = list(range(len(metagraph.hotkeys)))
+
+        completed_id = uuid4()
+        mock_backend_client.get_race_history.return_value = _race_complete_history(
+            completed_id
+        )
+        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
+
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+            shadow_mode=True,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        mock_subtensor.set_weights.assert_called()
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
+        # Fallback vector: only burn slot + top-miner slot get weight,
+        # race finishers (uids 2..7) all stay at 0 because the race
+        # path was suppressed by shadow_mode.
+        assert weights[0] == burn_u16
+        assert weights[1] == top_u16
+        assert all(w == 0 for w in weights[2:])

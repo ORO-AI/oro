@@ -226,20 +226,7 @@ class WeightSetterThread:
 
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
         """Push `uids` / `weights` to the chain. No retries — the loop's
-        next tick will retry on transient blockchain failures.
-
-        In shadow mode, log the would-be submission and skip the chain call
-        so the new distribution can be exercised on a live validator without
-        actually moving emissions.
-        """
-        if self.shadow_mode:
-            non_zero = [(u, w) for u, w in zip(uids, weights) if w > 0]
-            logging.info(
-                f"[SHADOW] would set_weights netuid={self.netuid} "
-                f"non_zero={len(non_zero)} total_u16={sum(weights)} "
-                f"vector={non_zero}"
-            )
-            return
+        next tick will retry on transient blockchain failures."""
         self.subtensor.set_weights(
             netuid=self.netuid,
             wallet=self.wallet,
@@ -248,8 +235,32 @@ class WeightSetterThread:
             wait_for_inclusion=True,
         )
 
+    def _log_shadow_race_vector(self, finishers: list[RankedFinisher]) -> None:
+        """Compute the would-be race-based vector and log it without submitting.
+
+        Used in shadow mode to verify the new distribution against real race
+        results while the legacy top-miner fallback continues to set weights
+        on chain — so a deploy can't accidentally stop weight setting.
+        """
+        uids, weights = self._build_weights_from_race(finishers)
+        non_zero = [(u, w) for u, w in zip(uids, weights) if w > 0]
+        logging.info(
+            f"[SHADOW] race-based vector (not submitted) "
+            f"netuid={self.netuid} N={len(finishers)} "
+            f"non_zero={len(non_zero)} total_u16={sum(weights)} "
+            f"vector={non_zero}"
+        )
+
     def _tick(self) -> None:
-        """One iteration of the loop — race-based path with top-miner fallback."""
+        """One iteration of the loop.
+
+        Shadow mode: always submit via the legacy top-miner fallback so prod
+        keeps setting weights, but additionally log the race-based vector
+        that *would* have been submitted for offline verification.
+
+        Live mode: submit the race-based vector when a completed race is
+        available, otherwise fall back to top-miner.
+        """
         self.metagraph.sync()
 
         finishers: Optional[list[RankedFinisher]] = None
@@ -263,7 +274,7 @@ class WeightSetterThread:
             else:
                 logging.error(f"Race fetch error, using fallback: {e}")
 
-        if finishers:
+        if finishers and not self.shadow_mode:
             uids, weights = self._build_weights_from_race(finishers)
             non_zero = sum(1 for w in weights if w > 0)
             logging.info(
@@ -271,6 +282,8 @@ class WeightSetterThread:
                 f"{non_zero} non-zero metagraph slots"
             )
         else:
+            if finishers and self.shadow_mode:
+                self._log_shadow_race_vector(finishers)
             top = self.backend_client.get_top_miner()
             emission_wt = (
                 top.emission_weight
@@ -278,8 +291,9 @@ class WeightSetterThread:
                 else 1.0
             )
             logging.info(
-                f"No completed race available — using top-miner fallback "
-                f"(top={top.top_miner_hotkey}, emission_weight={emission_wt:.3f})"
+                f"Using top-miner weight path "
+                f"(top={top.top_miner_hotkey}, emission_weight={emission_wt:.3f}, "
+                f"shadow_mode={self.shadow_mode})"
             )
             uids, weights = self._build_weights_top_miner_fallback(
                 top.top_miner_hotkey, emission_wt=emission_wt
@@ -290,10 +304,7 @@ class WeightSetterThread:
             return
 
         self._submit_weights(uids, weights)
-        if self.shadow_mode:
-            logging.info("Shadow mode: skipped on-chain weight submission")
-        else:
-            logging.info("Successfully set weights")
+        logging.info("Successfully set weights")
 
     def _run(self) -> None:
         """Background thread main loop."""
