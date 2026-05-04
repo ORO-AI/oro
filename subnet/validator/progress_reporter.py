@@ -12,7 +12,6 @@ import time
 import traceback
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from uuid import UUID
@@ -24,44 +23,18 @@ from bittensor.utils.btlogging import logging
 from src.agent.problem_scorer import ProblemScorer, clear_product_cache
 from src.agent.sandbox_status import SandboxProblemStatus
 from src.agent.scoring import is_problem_successful, compute_aggregate, reasoning_coefficient
-from src.agent.types import ScoreDict
+from src.agent.types import (
+    AggregateScore,
+    ProblemDict,
+    ReasoningSummary,
+    ScoreComponentsSummary,
+)
 from subnet.sandbox import attach_title_embeddings
 import requests
 
 from .backend_client import BackendClient, BackendError
 from .output_watcher import ErrorInfo, OutputWatcher
-
-
-@dataclass
-class EnvelopeMeta:
-    """Per-problem metadata captured from the sandbox envelope line.
-
-    Held under ``ProgressReporter._lock`` and read by both dispatch (terminal
-    branch) and the scoring worker thread.
-    """
-
-    inference_failure_count: int
-    inference_total: int
-    execution_time: float
-
-
-@dataclass
-class ProblemResult:
-    """Single source of truth for one problem's scoring outcome."""
-
-    problem_id: str
-    category: str
-    status: ProblemStatus
-    score: float
-    score_dict: ScoreDict = field(default_factory=dict)
-    inference_failures: int = 0
-    inference_total: int = 0
-    reasoning_score: float | None = None
-    reasoning_explanation: str = ""
-    reasoning_model: str = ""
-    reasoning_inf_failed: int = 0
-    reasoning_inf_total: int = 0
-    execution_time: float | None = None
+from .types import EnvelopeMeta, ProblemResult
 
 
 # Default number of concurrent scoring workers
@@ -86,7 +59,7 @@ class ProgressReporter:
         backend_client: BackendClient,
         eval_run_id: UUID,
         output_file: Path,
-        problems: List[Dict[str, Any]],
+        problems: List[ProblemDict],
         workspace_dir: Path,
         poll_interval: float = 1.0,
         scoring_timeout: float = 900.0,
@@ -132,7 +105,7 @@ class ProgressReporter:
         self._scoring_futures: Dict[str, Future] = {}
 
         # Build problem_id -> problem lookup
-        self._id_to_problem: Dict[str, Dict[str, Any]] = {}
+        self._id_to_problem: Dict[str, ProblemDict] = {}
         for problem in problems:
             problem_id = str(problem.get("problem_id") or problem.get("id"))
             if problem_id:
@@ -213,7 +186,7 @@ class ProgressReporter:
                 )
         self._scoring_executor.shutdown(wait=False)
 
-    def get_aggregate_score(self) -> Optional[Dict[str, Any]]:
+    def get_aggregate_score(self) -> Optional[AggregateScore]:
         """Compute aggregate score on demand from _results."""
         total = self._total_problems if self._total_problems > 0 else 1
 
@@ -238,7 +211,7 @@ class ProgressReporter:
 
         return aggregate
 
-    def get_reasoning_data(self) -> Dict[str, Any]:
+    def get_reasoning_data(self) -> ReasoningSummary:
         """Return aggregate reasoning metrics for run-level score_components.
 
         Per-problem reasoning data is now sent via progress reports.
@@ -623,7 +596,7 @@ class ProgressReporter:
         updates = []
         for r in results:
             # Include per-problem reasoning data if judge ran
-            scs = None
+            scs: Optional[ScoreComponentsSummary] = None
             if r.reasoning_score is not None:
                 scs = {
                     "reasoning_explanation": r.reasoning_explanation,

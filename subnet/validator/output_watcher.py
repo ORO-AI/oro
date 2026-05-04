@@ -13,11 +13,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Iterator, Optional
 
 from bittensor.utils.btlogging import logging
 
 from src.agent.sandbox_status import SandboxProblemStatus
+from src.agent.types import Dialogue
 
 
 @dataclass
@@ -38,7 +39,7 @@ class ProblemRecord:
     inference_failure_count: int
     inference_total: int
     error: Optional[ErrorInfo]
-    dialogue: Optional[List[Dict[str, Any]]]
+    dialogue: Optional[Dialogue]
 
 
 class OutputWatcher:
