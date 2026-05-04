@@ -7,7 +7,7 @@ state types that only validator components produce or consume.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, TypedDict
+from typing import TypedDict
 
 from oro_sdk.models import ProblemStatus
 
@@ -20,12 +20,6 @@ class ResourceMetrics(TypedDict, total=False):
     ram_pct: float
     disk_pct: float
     docker_container_count: int
-
-
-# Tuple of (metric name, collector callable). The collector raises on
-# failure so the caller can decide whether to record the metric or skip
-# it; never returns sentinel values.
-ResourceCollector = tuple[str, Callable[[], Any]]
 
 
 @dataclass

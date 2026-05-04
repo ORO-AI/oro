@@ -48,13 +48,12 @@ from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
 
-
-_HEARTBEAT_METRIC_KEYS = ("cpu_pct", "ram_pct", "disk_pct", "docker_container_count")
+from .types import ResourceMetrics
 
 
 def _build_heartbeat_body(
     service_versions: Optional[dict[str, str]],
-    resource_metrics: Optional[dict[str, Any]],
+    resource_metrics: Optional[ResourceMetrics],
 ) -> Optional[SdkHeartbeatRequest]:
     """Build an SdkHeartbeatRequest from optional inputs, or None if both empty.
 
@@ -64,7 +63,7 @@ def _build_heartbeat_body(
     if service_versions is not None:
         body_kwargs["service_versions"] = service_versions
     if resource_metrics:
-        for key in _HEARTBEAT_METRIC_KEYS:
+        for key in ResourceMetrics.__annotations__:
             value = resource_metrics.get(key)
             if value is not None:
                 body_kwargs[key] = value
@@ -353,7 +352,7 @@ class BackendClient:
     def claim_work(
         self,
         service_versions: Optional[dict[str, str]] = None,
-        resource_metrics: Optional[dict[str, Any]] = None,
+        resource_metrics: Optional[ResourceMetrics] = None,
     ) -> Optional[ClaimWorkResponse]:
         """Claim the next available work item.
 
@@ -390,7 +389,7 @@ class BackendClient:
         self,
         eval_run_id: UUID,
         service_versions: Optional[dict[str, str]] = None,
-        resource_metrics: Optional[dict[str, Any]] = None,
+        resource_metrics: Optional[ResourceMetrics] = None,
     ) -> HeartbeatResponse:
         """Send heartbeat to maintain lease.
 
