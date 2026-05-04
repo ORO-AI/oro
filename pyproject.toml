@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oro"
+version = "0.0.0"
+description = "ORO subnet: agent template, validator, sandbox, and search engine."
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "subnet*"]
+exclude = ["subnet.tests*", "tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "subnet/tests"]
+# `subnet` and `src/agent` on the path so bare `validator.X` / `agent.X`
+# imports in tests resolve without per-file sys.path manipulation.
+pythonpath = [".", "subnet", "src/agent"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

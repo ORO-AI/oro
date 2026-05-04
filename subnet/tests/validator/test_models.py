@@ -4,13 +4,7 @@ All other models (ClaimWorkResponse, HeartbeatResponse, etc.) are provided by
 the oro-sdk and are tested within that package.
 """
 
-import sys
-from pathlib import Path
 from uuid import UUID
-
-
-# Add test-subnet to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models.terminal_status import TerminalStatus
 

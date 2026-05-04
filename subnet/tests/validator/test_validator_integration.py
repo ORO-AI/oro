@@ -4,15 +4,10 @@ Uses mock_wallet, mock_subtensor, mock_metagraph, and temp_storage_path
 fixtures from conftest.py.
 """
 
-import sys
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 from uuid import UUID
-
-# Add test-subnet to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models import (
     ClaimWorkResponse,

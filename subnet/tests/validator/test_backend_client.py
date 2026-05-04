@@ -1,18 +1,13 @@
 """Tests for backend_client using oro-sdk."""
 
 import contextlib
-import sys
 from datetime import datetime
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
-
-# Add test-subnet to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
