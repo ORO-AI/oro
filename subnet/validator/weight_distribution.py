@@ -202,25 +202,45 @@ def build_metagraph_weight_vector(
     if n_meta == 0:
         return [], []
 
-    # Materialise once — `qualifiers` may be a one-shot iterable, and we
-    # need its length here and again inside `compute_hotkey_weights`.
     finishers = list(qualifiers)
-    tail_sum = _tail_sum_for(len(finishers) // 2)
-    _, burn_u16 = compute_pinned_weights(t_top, t_burn, tail_sum)
-
     hotkey_weights = compute_hotkey_weights(finishers, t_top, t_burn)
+    if not hotkey_weights:
+        # No protected entries (race too small for K >= 1) — burn everything.
+        weights = [0] * n_meta
+        weights[0] = U16_MAX
+        return list(range(n_meta)), weights
 
     weights = [0] * n_meta
     hotkey_to_idx = {hk: i for i, hk in enumerate(metagraph_hotkeys)}
+    ranked = rank_finishers(finishers)
+    top_hk = ranked[0].miner_hotkey
+    top_idx: int | None = None
+    tail_sum_actual = 0
     for hk, w in hotkey_weights.items():
         idx = hotkey_to_idx.get(hk)
         if idx is None:
             continue
-        weights[idx] = w
+        if hk == top_hk:
+            top_idx = idx
+        else:
+            weights[idx] = w
+            tail_sum_actual += w
 
-    # Burn uid 0 may coincidentally collide with a top-half hotkey on very
-    # small testnet metagraphs — the burn weight is additive so the slot
-    # is never accidentally zeroed by the top-half pass.
-    weights[0] += burn_u16
+    # Recompute pinned weights from the *actual* tail sum (after dropping
+    # deregistered finishers) so the top miner lands at exactly t_top of
+    # the submitted vector. Without this, missing tail u16 entries inflate
+    # both top and burn shares proportionally.
+    top_u16, burn_u16 = compute_pinned_weights(t_top, t_burn, tail_sum_actual)
+    if top_idx is not None:
+        # Burn uid 0 may collide with the rank-1 hotkey on very small
+        # testnet metagraphs; weights are additive on uid 0.
+        if top_idx == 0:
+            weights[0] = top_u16 + burn_u16
+        else:
+            weights[top_idx] = top_u16
+            weights[0] = burn_u16
+    else:
+        # Top miner deregistered — pin burn slot only.
+        weights[0] = burn_u16
 
     return list(range(n_meta)), weights

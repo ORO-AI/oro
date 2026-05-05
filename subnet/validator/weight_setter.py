@@ -5,8 +5,9 @@ Builds a deterministic top-50% race-finisher weight vector via
 chain. Determinism across validators is load-bearing for Yuma consensus on
 subnet 15 (`kappa = 0.5`).
 
-Falls back to the prior top-miner-only behaviour while no completed race
-is available (early subnet boot, race system temporarily unavailable).
+When no completed race is available (fresh subnet, race-system rollback,
+backend outage) the tick is skipped — weight setting waits for the next
+tick rather than submitting a stale or non-race vector.
 """
 
 import threading
@@ -80,7 +81,6 @@ class WeightSetterThread:
         interval_seconds: int = 300,
         t_top: float = 0.25,
         t_burn: float = 0.75,
-        shadow_mode: bool = False,
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -90,7 +90,6 @@ class WeightSetterThread:
         self.interval_seconds = interval_seconds
         self.t_top = t_top
         self.t_burn = t_burn
-        self.shadow_mode = shadow_mode
 
         # Fail fast on misconfiguration — the validator process should not
         # start setting weights with invalid ratios. tail_sum=0 is the
@@ -136,8 +135,8 @@ class WeightSetterThread:
 
         Returns None only when there is no completed race in the recent
         history (fresh subnet, recovery from race-system rollback). The
-        caller then falls back to the top-miner path so weight setting
-        is never silently skipped.
+        caller skips weight submission for this tick rather than falling
+        back to a stale vector.
         """
         history = self.backend_client.get_race_history(
             limit=self._RACE_HISTORY_SCAN_LIMIT
@@ -181,54 +180,6 @@ class WeightSetterThread:
             t_burn=self.t_burn,
         )
 
-    def _build_weights_top_miner_fallback(
-        self, top_miner_hotkey: str, emission_wt: float
-    ) -> tuple[list[int], list[int]]:
-        """Legacy fallback: top miner gets one slot, rest goes to burn uid.
-
-        Used while the subnet has no completed race yet, or when the race
-        endpoint is unavailable.
-
-        `emission_weight` from Backend is the LITERAL top share, matching
-        pre-rewrite semantics: 0.25 means 25% top / 75% burn, 1.0 means
-        100% top / 0% burn. Backend's value drives the split, the
-        validator's `t_top`/`t_burn` configuration is only consulted by
-        the race-based path.
-        """
-        n = len(self.metagraph.hotkeys)
-        if n == 0:
-            return [], []
-
-        # `compute_pinned_weights` pins the larger share at u16::MAX and
-        # derives the smaller — same algorithm as the race path, just
-        # parameterised by Backend's emission_wt instead of the static
-        # t_top/t_burn config.
-        top_u16, burn_u16 = compute_pinned_weights(
-            emission_wt, 1.0 - emission_wt, tail_sum=0
-        )
-
-        weights = [0] * n
-        weights[0] = burn_u16
-
-        try:
-            top_idx = self.metagraph.hotkeys.index(top_miner_hotkey)
-        except ValueError:
-            logging.warning(
-                f"Top miner {top_miner_hotkey} not found in metagraph, "
-                "burning all emissions to uid 0"
-            )
-            # Route everything to burn so we still set weights, even if
-            # emission_wt=1.0 left burn_u16 at 0.
-            weights[0] = 65535
-            return list(range(n)), weights
-
-        if top_idx == 0:
-            weights[0] += top_u16
-        else:
-            weights[top_idx] = top_u16
-
-        return list(range(n)), weights
-
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
         """Push `uids` / `weights` to the chain. No retries — the loop's
         next tick will retry on transient blockchain failures."""
@@ -240,69 +191,33 @@ class WeightSetterThread:
             wait_for_inclusion=True,
         )
 
-    def _log_shadow_race_vector(self, finishers: list[RankedFinisher]) -> None:
-        """Compute the would-be race-based vector and log it without submitting.
-
-        Used in shadow mode to verify the new distribution against real race
-        results while the legacy top-miner fallback continues to set weights
-        on chain — so a deploy can't accidentally stop weight setting.
-        """
-        uids, weights = self._build_weights_from_race(finishers)
-        non_zero = [(u, w) for u, w in zip(uids, weights) if w > 0]
-        logging.info(
-            f"[SHADOW] race-based vector (not submitted) "
-            f"netuid={self.netuid} N={len(finishers)} "
-            f"non_zero={len(non_zero)} total_u16={sum(weights)} "
-            f"vector={non_zero}"
-        )
-
     def _tick(self) -> None:
-        """One iteration of the loop.
-
-        Shadow mode: always submit via the legacy top-miner fallback so prod
-        keeps setting weights, but additionally log the race-based vector
-        that *would* have been submitted for offline verification.
-
-        Live mode: submit the race-based vector when a completed race is
-        available, otherwise fall back to top-miner.
-        """
+        """One iteration of the loop — race-based weight submission."""
         self.metagraph.sync()
 
         finishers: Optional[list[RankedFinisher]] = None
         try:
             finishers = self._fetch_race_finishers()
         except BackendError as e:
-            # Don't crash the loop — fall back to the top-miner path so a
-            # race-endpoint outage doesn't stop weight setting.
+            # Don't crash the loop — skip this tick; the next one retries.
             if e.is_transient:
-                logging.warning(f"Race fetch transient error, using fallback: {e}")
+                logging.warning(f"Race fetch transient error, skipping tick: {e}")
             else:
-                logging.error(f"Race fetch error, using fallback: {e}")
+                logging.error(f"Race fetch error, skipping tick: {e}")
+            return
 
-        if finishers and not self.shadow_mode:
-            uids, weights = self._build_weights_from_race(finishers)
-            non_zero = sum(1 for w in weights if w > 0)
-            logging.info(
-                f"Race-based weight vector: N={len(finishers)} finishers, "
-                f"{non_zero} non-zero metagraph slots"
+        if not finishers:
+            logging.warning(
+                "No completed race available — skipping weight submission for this tick"
             )
-        else:
-            if finishers and self.shadow_mode:
-                self._log_shadow_race_vector(finishers)
-            top = self.backend_client.get_top_miner()
-            emission_wt = (
-                top.emission_weight
-                if isinstance(top.emission_weight, (int, float))
-                else 1.0
-            )
-            logging.info(
-                f"Using top-miner weight path "
-                f"(top={top.top_miner_hotkey}, emission_weight={emission_wt:.3f}, "
-                f"shadow_mode={self.shadow_mode})"
-            )
-            uids, weights = self._build_weights_top_miner_fallback(
-                top.top_miner_hotkey, emission_wt=emission_wt
-            )
+            return
+
+        uids, weights = self._build_weights_from_race(finishers)
+        non_zero = sum(1 for w in weights if w > 0)
+        logging.info(
+            f"Race-based weight vector: N={len(finishers)} finishers, "
+            f"{non_zero} non-zero metagraph slots"
+        )
 
         if not weights:
             logging.warning("Skipping weight update (empty metagraph)")

@@ -481,16 +481,6 @@ class Validator:
         UPDATE_CHECK_INTERVAL = 300
         self._last_update_check = 0
 
-        # Shadow mode is the default for the new top-50% distribution while
-        # we exercise it on real validators. Operators must explicitly opt in
-        # to live submission via ORO_WEIGHT_SETTER_LIVE=true once they've
-        # verified the proposed weight vectors in logs.
-        live_mode = os.environ.get("ORO_WEIGHT_SETTER_LIVE", "false").lower() in (
-            "true",
-            "1",
-            "yes",
-        )
-        shadow_mode = not live_mode
         weight_setter = WeightSetterThread(
             backend_client=self.backend_client,
             subtensor=self.subtensor,
@@ -498,12 +488,10 @@ class Validator:
             wallet=self.wallet,
             netuid=self.config.netuid,
             interval_seconds=self.config.weight_update_interval,
-            shadow_mode=shadow_mode,
         )
         weight_setter.start()
         logging.info(
-            f"Weight setter started (interval: {self.config.weight_update_interval}s, "
-            f"shadow_mode={shadow_mode})"
+            f"Weight setter started (interval: {self.config.weight_update_interval}s)"
         )
 
         try:
