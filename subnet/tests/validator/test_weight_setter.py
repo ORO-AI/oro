@@ -149,14 +149,14 @@ class TestWeightSetterThread:
 
         mock_subtensor.set_weights.assert_called()
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        _, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
-        assert weights[0] == burn_u16
+        # Top missing AND emission_wt=1.0 → all to burn fallback.
+        assert weights[0] == 65535
         assert all(w == 0 for w in weights[1:])
 
     def test_fallback_top_miner_full_emission(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        """emission_weight == 1.0 → top miner gets full top_u16, burn slot full burn_u16."""
+        """emission_weight=1.0 → 100% to top, 0% to burn (literal share)."""
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
             subtensor=mock_subtensor,
@@ -170,22 +170,22 @@ class TestWeightSetterThread:
         setter.stop()
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
-        assert weights[0] == burn_u16  # uid 0 = burn
-        assert weights[1] == top_u16  # 5GrwvaEF... index in fixture
+        top_u16, burn_u16 = compute_pinned_weights(1.0, 0.0, tail_sum=0)
+        assert weights[0] == burn_u16  # 0 — no burn share
+        assert weights[1] == top_u16  # 65535 — full top share
         assert weights[2] == 0
 
-    def test_fallback_emission_weight_partial(
+    def test_fallback_emission_weight_quarter(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        """emission_weight=0.5 scales top slot to half top_u16; burn slot keeps full share."""
+        """emission_weight=0.25 → 25% top / 75% burn (matches pre-rewrite behaviour)."""
         mock_backend_client.get_top_miner.return_value = TopAgentResponse(
             suite_id=789,
             top_agent_version_id=UUID("87654321-4321-4321-4321-210987654321"),
             top_miner_hotkey="5GrwvaEF...",
             top_score=0.92,
             computed_at=datetime.now(),
-            emission_weight=0.5,
+            emission_weight=0.25,
         )
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -201,8 +201,9 @@ class TestWeightSetterThread:
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
         top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
-        assert weights[0] == burn_u16
-        assert weights[1] == round(top_u16 * 0.5)
+        # Burn pinned at u16::MAX, top derived = 21845 → 25/75 split.
+        assert weights[0] == burn_u16  # 65535
+        assert weights[1] == top_u16  # 21845
 
     def test_continues_on_error(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
@@ -383,7 +384,8 @@ class TestWeightSetterThread:
 
         mock_subtensor.set_weights.assert_called()
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
+        # Default fixture: emission_weight unset → 1.0 → 100% top, 0% burn.
+        top_u16, burn_u16 = compute_pinned_weights(1.0, 0.0, tail_sum=0)
         assert weights[0] == burn_u16
         assert weights[1] == top_u16  # 5GrwvaEF... fixture top miner
 
@@ -431,10 +433,12 @@ class TestWeightSetterThread:
 
         mock_subtensor.set_weights.assert_called()
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
-        # Fallback vector: only burn slot + top-miner slot get weight,
-        # race finishers (uids 2..7) all stay at 0 because the race
-        # path was suppressed by shadow_mode.
+        # Default fixture: emission_weight unset → 1.0 → fallback puts
+        # full top share in uid 1, zero in burn.
+        top_u16, burn_u16 = compute_pinned_weights(1.0, 0.0, tail_sum=0)
+        # Fallback vector: only top-miner slot gets weight here; race
+        # finishers (uids 2..7) all stay at 0 because the race path was
+        # suppressed by shadow_mode.
         assert weights[0] == burn_u16
         assert weights[1] == top_u16
         assert all(w == 0 for w in weights[2:])

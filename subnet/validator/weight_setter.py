@@ -187,18 +187,24 @@ class WeightSetterThread:
         """Legacy fallback: top miner gets one slot, rest goes to burn uid.
 
         Used while the subnet has no completed race yet, or when the race
-        endpoint is unavailable. Honours Backend's `emission_weight` so the
-        same operator-knob still controls the top/burn split during the
-        transition window.
+        endpoint is unavailable.
+
+        `emission_weight` from Backend is the LITERAL top share, matching
+        pre-rewrite semantics: 0.25 means 25% top / 75% burn, 1.0 means
+        100% top / 0% burn. Backend's value drives the split, the
+        validator's `t_top`/`t_burn` configuration is only consulted by
+        the race-based path.
         """
         n = len(self.metagraph.hotkeys)
         if n == 0:
             return [], []
 
-        # No race tail in the fallback path, so tail_sum=0 — the pinned
-        # weights collapse to the simple two-slot ratio.
+        # `compute_pinned_weights` pins the larger share at u16::MAX and
+        # derives the smaller — same algorithm as the race path, just
+        # parameterised by Backend's emission_wt instead of the static
+        # t_top/t_burn config.
         top_u16, burn_u16 = compute_pinned_weights(
-            self.t_top, self.t_burn, tail_sum=0
+            emission_wt, 1.0 - emission_wt, tail_sum=0
         )
 
         weights = [0] * n
@@ -211,16 +217,15 @@ class WeightSetterThread:
                 f"Top miner {top_miner_hotkey} not found in metagraph, "
                 "burning all emissions to uid 0"
             )
+            # Route everything to burn so we still set weights, even if
+            # emission_wt=1.0 left burn_u16 at 0.
+            weights[0] = 65535
             return list(range(n)), weights
 
-        # `emission_weight` < 1 means Backend asked for a smaller-than-
-        # configured top share (e.g. challenger margin not yet earned).
-        # Scale the top u16 by it; the burn slot keeps its full share.
-        scaled_top = int(round(top_u16 * emission_wt))
         if top_idx == 0:
-            weights[0] += scaled_top
+            weights[0] += top_u16
         else:
-            weights[top_idx] = scaled_top
+            weights[top_idx] = top_u16
 
         return list(range(n)), weights
 
