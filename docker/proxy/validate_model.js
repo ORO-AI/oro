@@ -1,9 +1,10 @@
-// Inference proxy: validates outgoing requests against the ORO inference
-// allowlist before forwarding to Chutes, or bypasses the allowlist and
-// forwards directly to OpenRouter when the bearer token starts with "sk-or-".
+// Inference proxy: validates outgoing requests against the per-provider
+// allowlist before forwarding to either Chutes or OpenRouter, dispatched
+// by the bearer token's prefix.
 //
-// The allowlist is fetched from the ORO Backend (`GET /v1/public/inference/models`)
-// via the internal `/_backend_models` location and cached in an nginx
+// The allowlists are fetched from the ORO Backend (`GET
+// /v1/public/inference/models?provider=<name>`) via the internal
+// `/_backend_models` location and cached per-provider in an nginx
 // shared-dict zone (`oro_models`, declared in nginx.conf.template) so all
 // worker processes share the same cache. njs module-level vars are
 // per-worker, so the previous per-worker cache made every worker cold-start
@@ -16,17 +17,14 @@
 // allowlist for STALE_GRACE_MS instead of failing closed.
 //
 // Provider dispatch:
-//   - Bearer token starts with "sk-or-" → OpenRouter (no allowlist check)
+//   - Bearer token starts with "sk-or-" → OpenRouter (allowlist enforced)
 //   - Any other token shape (e.g. cak_*) → Chutes (allowlist enforced)
 
 function detectProvider(r) {
   var auth = r.headersIn["Authorization"] || "";
-  // Bearer tokens issued by OpenRouter start with "sk-or-".
   if (auth.indexOf("Bearer sk-or-") === 0) {
     return "openrouter";
   }
-  // Default to Chutes for any other token shape (including the existing
-  // cak_* prefix). Keeps behavior unchanged for existing eval flows.
   return "chutes";
 }
 
@@ -36,10 +34,13 @@ var CACHE_TTL_MS = 15 * 60 * 1000;
 var STALE_GRACE_MS = 60 * 60 * 1000;
 
 var ZONE = "oro_models";
-var STATE_KEY = "state";
 
-function _readState() {
-  var raw = ngx.shared[ZONE].get(STATE_KEY);
+function _stateKey(provider) {
+  return "state:" + provider;
+}
+
+function _readState(provider) {
+  var raw = ngx.shared[ZONE].get(_stateKey(provider));
   if (!raw) {
     return null;
   }
@@ -50,55 +51,59 @@ function _readState() {
   }
 }
 
-function _writeState(allowlist, expiresAt) {
+function _writeState(provider, allowlist, expiresAt) {
   ngx.shared[ZONE].set(
-    STATE_KEY,
+    _stateKey(provider),
     JSON.stringify({ allowlist: allowlist, expiresAt: expiresAt })
   );
 }
 
-function getAllowlist(r, callback) {
-  var state = _readState();
+function getAllowlist(r, provider, callback) {
+  var state = _readState(provider);
   if (state && state.allowlist && Date.now() < state.expiresAt) {
     callback(state.allowlist);
     return;
   }
 
-  r.subrequest("/_backend_models", { method: "GET" }, function (reply) {
-    if (reply.status === 200) {
-      try {
-        var data = JSON.parse(reply.responseText);
-        if (data && Array.isArray(data.models) && data.models.length > 0) {
-          _writeState(data.models, Date.now() + CACHE_TTL_MS);
-          callback(data.models);
-          return;
+  r.subrequest(
+    "/_backend_models",
+    { method: "GET", args: "provider=" + provider },
+    function (reply) {
+      if (reply.status === 200) {
+        try {
+          var data = JSON.parse(reply.responseText);
+          if (data && Array.isArray(data.models) && data.models.length > 0) {
+            _writeState(provider, data.models, Date.now() + CACHE_TTL_MS);
+            callback(data.models);
+            return;
+          }
+          r.error(
+            "Backend models response missing or empty 'models' array for provider=" + provider
+          );
+        } catch (e) {
+          r.error("Backend models JSON parse failed: " + e.message);
         }
-        r.error("Backend models response missing or empty 'models' array");
-      } catch (e) {
-        r.error("Backend models JSON parse failed: " + e.message);
+      } else {
+        r.error("Backend models fetch returned status " + reply.status + " for provider=" + provider);
       }
-    } else {
-      r.error("Backend models fetch returned status " + reply.status);
-    }
 
-    // Re-read in case another worker just succeeded while this one was
-    // waiting on a failing subrequest.
-    state = _readState();
-    if (state && state.allowlist && Date.now() < state.expiresAt + STALE_GRACE_MS) {
-      var graceLeft = state.expiresAt + STALE_GRACE_MS - Date.now();
-      if (graceLeft < STALE_GRACE_MS) {
-        r.error(
-          "Serving stale allowlist after fetch failure (" +
-            (graceLeft / 1000).toFixed(0) +
-            "s grace remaining)"
-        );
+      state = _readState(provider);
+      if (state && state.allowlist && Date.now() < state.expiresAt + STALE_GRACE_MS) {
+        var graceLeft = state.expiresAt + STALE_GRACE_MS - Date.now();
+        if (graceLeft < STALE_GRACE_MS) {
+          r.error(
+            "Serving stale " + provider + " allowlist after fetch failure (" +
+              (graceLeft / 1000).toFixed(0) +
+              "s grace remaining)"
+          );
+        }
+        callback(state.allowlist);
+        return;
       }
-      callback(state.allowlist);
-      return;
-    }
 
-    callback(null);
-  });
+      callback(null);
+    }
+  );
 }
 
 function validate(r) {
@@ -145,24 +150,7 @@ function validate(r) {
     return;
   }
 
-  // OpenRouter has 300+ models with no curated allowlist; per-key USD cap
-  // bounds damage. Skip model validation for that path.
-  if (provider === "openrouter") {
-    var orUri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
-    r.subrequest(
-      orUri,
-      { method: "POST", body: body, args: r.variables.args || "" },
-      function (reply) {
-        for (var h in reply.headersOut) {
-          r.headersOut[h] = reply.headersOut[h];
-        }
-        r.return(reply.status, reply.responseText);
-      }
-    );
-    return;
-  }
-
-  getAllowlist(r, function (allowed) {
+  getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
       r.headersOut["Content-Type"] = "application/json";
       r.return(503, JSON.stringify({ error: "Inference allowlist unavailable" }));
@@ -170,12 +158,12 @@ function validate(r) {
     }
 
     if (allowed.indexOf(parsed.model) === -1) {
-      r.error("Model not allowed: " + parsed.model);
+      r.error("Model not allowed for " + provider + ": " + parsed.model);
       r.headersOut["Content-Type"] = "application/json";
       r.return(
         403,
         JSON.stringify({
-          error: "Model '" + parsed.model + "' is not allowed",
+          error: "Model '" + parsed.model + "' is not allowed for provider " + provider,
           allowed_models: allowed,
         })
       );
