@@ -704,7 +704,11 @@ class Validator:
             return
 
         # Validate the token can actually make inference calls
-        token_valid, token_reason = self._validate_chutes_token(chutes_access_token)
+        token_valid, token_reason = self._validate_inference_token(
+            chutes_access_token,
+            "https://llm.chutes.ai/v1",
+            self._validation_model_for("chutes"),
+        )
         if not token_valid:
             self._complete_with_failure(
                 eval_run_id, TerminalStatus.FAILED, token_reason
@@ -1022,28 +1026,37 @@ class Validator:
                 logging.error(f"Non-transient error completing run {eval_run_id}: {e}")
 
     @staticmethod
-    def _validate_chutes_token(access_token: str) -> tuple[bool, str]:
-        """Validate a Chutes access token by making a minimal inference call.
+    def _validation_model_for(provider: str) -> str:
+        """Pick a small model present on each provider for the smoke-test."""
+        if provider == "chutes":
+            return "Qwen/Qwen3-32B-TEE"
+        if provider == "openrouter":
+            return "openai/gpt-oss-20b"
+        raise ValueError(f"unknown inference provider: {provider}")
 
-        A single 1-token completion catches both invalid tokens (401) and
-        zero-balance accounts (402). The models listing endpoint can't
-        distinguish pro-plan users (balance=0 but have quotas) from
-        genuinely broke accounts.
+    @staticmethod
+    def _validate_inference_token(
+        access_token: str, base_url: str, model: str
+    ) -> tuple[bool, str]:
+        """Smoke-test a minted inference token by making a 1-token completion.
 
-        Returns (is_valid, failure_reason). On transient errors (5xx,
-        timeout, 429), returns (True, "") to avoid failing runs unnecessarily.
+        Catches both invalid tokens (401) and zero-balance accounts (402)
+        against any OpenAI-compatible chat/completions endpoint. On
+        transient errors (5xx, timeout, 429), returns (True, "") to avoid
+        failing runs unnecessarily.
         """
         import requests
 
+        url = f"{base_url.rstrip('/')}/chat/completions"
         try:
             resp = requests.post(
-                "https://llm.chutes.ai/v1/chat/completions",
+                url,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "Qwen/Qwen3-32B-TEE",
+                    "model": model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 1,
                 },
@@ -1052,7 +1065,7 @@ class Validator:
             if resp.status_code == 200:
                 return True, ""
             if resp.status_code == 401:
-                return False, "Chutes token invalid or expired (HTTP 401)"
+                return False, "Inference token invalid or expired (HTTP 401)"
             if resp.status_code == 402:
                 detail = resp.json().get("detail", {})
                 msg = (
@@ -1060,16 +1073,17 @@ class Validator:
                     if isinstance(detail, dict)
                     else str(detail)
                 )
-                return False, f"Miner's Chutes account has no credits ({msg})"
+                return False, f"Inference account has no credits ({msg})"
             if resp.status_code == 429:
-                # Rate limited — token is valid, just throttled
                 return True, ""
             logging.warning(
-                "Chutes token validation inconclusive: status=%s", resp.status_code
+                "Inference token validation inconclusive: status=%s url=%s",
+                resp.status_code,
+                url,
             )
             return True, ""
         except Exception as exc:
-            logging.warning("Chutes token validation error: %s", exc)
+            logging.warning("Inference token validation error against %s: %s", url, exc)
             return True, ""
 
     def _complete_with_failure(
