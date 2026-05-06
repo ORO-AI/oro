@@ -677,34 +677,60 @@ class Validator:
         eval_run_id = work.eval_run_id  # UUID from SDK
         eval_run_id_str = str(eval_run_id)  # String for file paths/logging
 
-        # Extract miner's Chutes access token (minted by Backend from refresh token).
-        # Miners are required to authenticate with Chutes — if no token is
-        # available the evaluation cannot proceed.
-        chutes_access_token: Optional[str] = None
-        if not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
-            chutes_access_token = work.chutes_access_token
-            logging.info(f"Using miner's Chutes token for {eval_run_id_str}")
+        # Prefer the structured inference_token grant; fall back to legacy
+        # chutes_access_token for older Backend deployments.
+        inference_provider: Optional[str] = None
+        inference_access_token: Optional[str] = None
+        inference_base_url: Optional[str] = None
+        if not isinstance(work.inference_token, Unset) and work.inference_token:
+            inference_provider = work.inference_token.provider
+            inference_access_token = work.inference_token.access_token
+            inference_base_url = work.inference_token.base_url
+            logging.info(
+                "Using miner's %s token for %s (base_url=%s)",
+                inference_provider,
+                eval_run_id_str,
+                inference_base_url,
+            )
+        elif not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
+            inference_provider = "chutes"
+            inference_access_token = work.chutes_access_token
+            inference_base_url = "https://llm.chutes.ai/v1"
+            logging.info(
+                "Using legacy chutes_access_token for %s",
+                eval_run_id_str,
+            )
         else:
             logging.warning(
-                f"No miner Chutes token for {eval_run_id_str}, cannot run inference"
+                "No miner inference token for %s, cannot run inference",
+                eval_run_id_str,
             )
+
+        # Keep chutes_access_token alias for compatibility with downstream
+        # call sites that still reference it (sandbox env injection,
+        # progress_reporter constructor).
+        chutes_access_token = inference_access_token
 
         # Track temp files for cleanup
         problem_file = None
         agent_path = None
         workspace_dir = Path(self.config.workspace_dir)
 
-        # Step 0: Verify miner Chutes token is present and valid
-        if not chutes_access_token:
+        # Step 0: Verify miner inference token is present and valid
+        if not inference_access_token or not inference_base_url or not inference_provider:
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
-                "Miner has no Chutes token — cannot fund inference",
+                "Miner has no inference token — cannot fund inference",
             )
             return
 
         # Validate the token can actually make inference calls
-        token_valid, token_reason = self._validate_chutes_token(chutes_access_token)
+        token_valid, token_reason = self._validate_inference_token(
+            inference_access_token,
+            inference_base_url,
+            self._validation_model_for(inference_provider),
+        )
         if not token_valid:
             self._complete_with_failure(
                 eval_run_id, TerminalStatus.FAILED, token_reason
@@ -754,6 +780,8 @@ class Validator:
                 problems=problems,
                 workspace_dir=workspace_dir,
                 chutes_access_token=chutes_access_token,
+                inference_provider=inference_provider,
+                inference_base_url=inference_base_url,
             )
             progress_reporter.start_monitoring()
 
@@ -763,6 +791,8 @@ class Validator:
                     eval_run_id_str,
                     problem_file,
                     chutes_access_token=chutes_access_token,
+                    inference_provider=inference_provider,
+                    inference_base_url=inference_base_url,
                 )
             finally:
                 progress_reporter.signal_sandbox_done()
@@ -1022,28 +1052,37 @@ class Validator:
                 logging.error(f"Non-transient error completing run {eval_run_id}: {e}")
 
     @staticmethod
-    def _validate_chutes_token(access_token: str) -> tuple[bool, str]:
-        """Validate a Chutes access token by making a minimal inference call.
+    def _validation_model_for(provider: str) -> str:
+        """Pick a small model present on each provider for the smoke-test."""
+        if provider == "chutes":
+            return "Qwen/Qwen3-32B-TEE"
+        if provider == "openrouter":
+            return "openai/gpt-oss-20b"
+        raise ValueError(f"unknown inference provider: {provider}")
 
-        A single 1-token completion catches both invalid tokens (401) and
-        zero-balance accounts (402). The models listing endpoint can't
-        distinguish pro-plan users (balance=0 but have quotas) from
-        genuinely broke accounts.
+    @staticmethod
+    def _validate_inference_token(
+        access_token: str, base_url: str, model: str
+    ) -> tuple[bool, str]:
+        """Smoke-test a minted inference token by making a 1-token completion.
 
-        Returns (is_valid, failure_reason). On transient errors (5xx,
-        timeout, 429), returns (True, "") to avoid failing runs unnecessarily.
+        Catches both invalid tokens (401) and zero-balance accounts (402)
+        against any OpenAI-compatible chat/completions endpoint. On
+        transient errors (5xx, timeout, 429), returns (True, "") to avoid
+        failing runs unnecessarily.
         """
         import requests
 
+        url = f"{base_url.rstrip('/')}/chat/completions"
         try:
             resp = requests.post(
-                "https://llm.chutes.ai/v1/chat/completions",
+                url,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": "Qwen/Qwen3-32B-TEE",
+                    "model": model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 1,
                 },
@@ -1052,7 +1091,7 @@ class Validator:
             if resp.status_code == 200:
                 return True, ""
             if resp.status_code == 401:
-                return False, "Chutes token invalid or expired (HTTP 401)"
+                return False, "Inference token invalid or expired (HTTP 401)"
             if resp.status_code == 402:
                 detail = resp.json().get("detail", {})
                 msg = (
@@ -1060,16 +1099,17 @@ class Validator:
                     if isinstance(detail, dict)
                     else str(detail)
                 )
-                return False, f"Miner's Chutes account has no credits ({msg})"
+                return False, f"Inference account has no credits ({msg})"
             if resp.status_code == 429:
-                # Rate limited — token is valid, just throttled
                 return True, ""
             logging.warning(
-                "Chutes token validation inconclusive: status=%s", resp.status_code
+                "Inference token validation inconclusive: status=%s url=%s",
+                resp.status_code,
+                url,
             )
             return True, ""
         except Exception as exc:
-            logging.warning("Chutes token validation error: %s", exc)
+            logging.warning("Inference token validation error against %s: %s", url, exc)
             return True, ""
 
     def _complete_with_failure(

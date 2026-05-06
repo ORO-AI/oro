@@ -138,6 +138,33 @@ http {
             proxy_read_timeout 300s;
         }
 
+        # Internal location for proxying validated requests to OpenRouter API.
+        location /_openrouter_proxy/ {
+            internal;
+
+            resolver 127.0.0.11 valid=30s;
+            set $openrouter_upstream https://${OPENROUTER_HOST};
+
+            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
+            rewrite ^/_openrouter_proxy/(.*) /api/v1/$1 break;
+            proxy_pass $openrouter_upstream;
+            proxy_ssl_server_name on;
+
+            # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN /
+            # INFERENCE_ACCESS_TOKEN, populated per claim_work).
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header Host ${OPENROUTER_HOST};
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+            # Prevent gzip double-encoding: tell upstream not to compress
+            proxy_set_header Accept-Encoding identity;
+
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
         # Health check endpoint
         location /health {
             access_log off;
