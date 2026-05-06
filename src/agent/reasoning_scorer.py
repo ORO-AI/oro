@@ -75,7 +75,9 @@ def _select_models_by_utilization() -> list[str]:
     global _model_order_cache
     now = time.monotonic()
     if _model_order_cache and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS:
-        return _model_order_cache[1]
+        # Return a copy so a caller mutating its result can't poison
+        # subsequent reads inside the TTL window.
+        return list(_model_order_cache[1])
 
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
@@ -118,7 +120,7 @@ def _select_models_by_utilization() -> list[str]:
         result = list(JUDGE_MODELS)
 
     _model_order_cache = (now, result)
-    return result
+    return list(result)
 
 JUDGE_SYSTEM_PROMPT = """\
 You evaluate a shopping agent's trajectory and decide whether the agent is using genuine LLM reasoning or pattern matching / regex.

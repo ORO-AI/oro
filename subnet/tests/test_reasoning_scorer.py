@@ -472,6 +472,19 @@ class TestSelectModelsByUtilizationCache:
         assert first[0] == JUDGE_MODELS[0]
         assert second[0] == JUDGE_MODELS[-1]
 
+    def test_caller_mutation_does_not_corrupt_cache(self):
+        entries = [
+            {"name": m, "utilization_current": 0.1 * i}
+            for i, m in enumerate(JUDGE_MODELS)
+        ]
+        with patch(
+            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
+        ):
+            first = _select_models_by_utilization()
+            first.pop(0)
+            second = _select_models_by_utilization()
+        assert len(second) == len(JUDGE_MODELS)
+
     def test_failure_result_is_cached(self):
         # An API failure produces the static fallback list; that result is
         # cached too, so a flapping API doesn't get hammered every call. A
