@@ -677,37 +677,59 @@ class Validator:
         eval_run_id = work.eval_run_id  # UUID from SDK
         eval_run_id_str = str(eval_run_id)  # String for file paths/logging
 
-        # Extract miner's Chutes access token (minted by Backend from refresh token).
-        # Miners are required to authenticate with Chutes — if no token is
-        # available the evaluation cannot proceed.
-        chutes_access_token: Optional[str] = None
-        if not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
-            chutes_access_token = work.chutes_access_token
-            logging.info(f"Using miner's Chutes token for {eval_run_id_str}")
+        # Prefer the structured inference_token grant; fall back to legacy
+        # chutes_access_token for older Backend deployments.
+        inference_provider: Optional[str] = None
+        inference_access_token: Optional[str] = None
+        inference_base_url: Optional[str] = None
+        if not isinstance(work.inference_token, Unset) and work.inference_token:
+            inference_provider = work.inference_token.provider
+            inference_access_token = work.inference_token.access_token
+            inference_base_url = work.inference_token.base_url
+            logging.info(
+                "Using miner's %s token for %s (base_url=%s)",
+                inference_provider,
+                eval_run_id_str,
+                inference_base_url,
+            )
+        elif not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
+            inference_provider = "chutes"
+            inference_access_token = work.chutes_access_token
+            inference_base_url = "https://llm.chutes.ai/v1"
+            logging.info(
+                "Using legacy chutes_access_token for %s",
+                eval_run_id_str,
+            )
         else:
             logging.warning(
-                f"No miner Chutes token for {eval_run_id_str}, cannot run inference"
+                "No miner inference token for %s, cannot run inference",
+                eval_run_id_str,
             )
+
+        # Keep chutes_access_token alias for compatibility with downstream
+        # call sites that still reference it (sandbox env injection,
+        # progress_reporter constructor).
+        chutes_access_token = inference_access_token
 
         # Track temp files for cleanup
         problem_file = None
         agent_path = None
         workspace_dir = Path(self.config.workspace_dir)
 
-        # Step 0: Verify miner Chutes token is present and valid
-        if not chutes_access_token:
+        # Step 0: Verify miner inference token is present and valid
+        if not inference_access_token or not inference_base_url or not inference_provider:
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
-                "Miner has no Chutes token — cannot fund inference",
+                "Miner has no inference token — cannot fund inference",
             )
             return
 
         # Validate the token can actually make inference calls
         token_valid, token_reason = self._validate_inference_token(
-            chutes_access_token,
-            "https://llm.chutes.ai/v1",
-            self._validation_model_for("chutes"),
+            inference_access_token,
+            inference_base_url,
+            self._validation_model_for(inference_provider),
         )
         if not token_valid:
             self._complete_with_failure(
@@ -758,6 +780,8 @@ class Validator:
                 problems=problems,
                 workspace_dir=workspace_dir,
                 chutes_access_token=chutes_access_token,
+                inference_provider=inference_provider,
+                inference_base_url=inference_base_url,
             )
             progress_reporter.start_monitoring()
 
@@ -767,6 +791,8 @@ class Validator:
                     eval_run_id_str,
                     problem_file,
                     chutes_access_token=chutes_access_token,
+                    inference_provider=inference_provider,
+                    inference_base_url=inference_base_url,
                 )
             finally:
                 progress_reporter.signal_sandbox_done()
