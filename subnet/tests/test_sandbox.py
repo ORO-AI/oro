@@ -205,9 +205,9 @@ class TestBuildSandboxCommand:
             output_path="/app/logs/output.jsonl",
             chutes_access_token="miner-token-abc",
         )
-        # Token should be injected as CHUTES_ACCESS_TOKEN env var
-        idx = cmd.index("CHUTES_ACCESS_TOKEN=miner-token-abc")
-        assert cmd[idx - 1] == "-e"
+        # Token should be injected as both CHUTES_ACCESS_TOKEN and INFERENCE_ACCESS_TOKEN env vars
+        assert "CHUTES_ACCESS_TOKEN=miner-token-abc" in cmd
+        assert "INFERENCE_ACCESS_TOKEN=miner-token-abc" in cmd
 
     def test_chutes_access_token_omitted_when_none(self):
         cmd = build_sandbox_command(
@@ -227,6 +227,59 @@ class TestBuildSandboxCommand:
             chutes_access_token="",
         )
         assert not any("CHUTES_ACCESS_TOKEN" in arg for arg in cmd)
+
+    def test_inference_provider_injected(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+            inference_provider="chutes",
+        )
+        assert "INFERENCE_PROVIDER=chutes" in cmd
+
+    def test_inference_provider_omitted_when_none(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert not any("INFERENCE_PROVIDER" in arg for arg in cmd)
+
+    def test_inference_base_url_injected(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+            inference_base_url="https://api.example.com",
+        )
+        assert "INFERENCE_BASE_URL=https://api.example.com" in cmd
+
+    def test_inference_base_url_omitted_when_none(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert not any("INFERENCE_BASE_URL" in arg for arg in cmd)
+
+    def test_all_inference_params_together(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+            chutes_access_token="test-token-123",
+            inference_provider="custom",
+            inference_base_url="https://custom.example.com",
+        )
+        assert "CHUTES_ACCESS_TOKEN=test-token-123" in cmd
+        assert "INFERENCE_ACCESS_TOKEN=test-token-123" in cmd
+        assert "INFERENCE_PROVIDER=custom" in cmd
+        assert "INFERENCE_BASE_URL=https://custom.example.com" in cmd
 
     def test_security_hardening_flags_present(self):
         """Verify Docker security hardening flags are included."""

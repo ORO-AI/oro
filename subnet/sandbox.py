@@ -101,6 +101,8 @@ def build_sandbox_command(
     max_workers: Optional[int] = None,
     timeout: Optional[float] = None,
     chutes_access_token: Optional[str] = None,
+    inference_provider: Optional[str] = None,
+    inference_base_url: Optional[str] = None,
     agent_container_path: Optional[str] = None,
 ) -> list[str]:
     """Build a ``docker run`` command for the sandbox container.
@@ -121,8 +123,13 @@ def build_sandbox_command(
         extra_volumes: Optional list of ``(host_path, container_path)`` tuples
             mounted read-only.
         max_workers: If set, passed as ``--max-workers`` to ``run_sandbox``.
-        chutes_access_token: If set, injected as ``CHUTES_ACCESS_TOKEN`` env var
-            so the agent's inference requests use the miner's Chutes token.
+        chutes_access_token: If set, injected as both ``CHUTES_ACCESS_TOKEN``
+            and ``INFERENCE_ACCESS_TOKEN`` env vars (the legacy var is kept for
+            agent code that hasn't migrated).
+        inference_provider: If set, injected as ``INFERENCE_PROVIDER`` env var.
+            Identifies which inference backend the access token belongs to.
+        inference_base_url: If set, injected as ``INFERENCE_BASE_URL`` env var.
+            Default agent template uses this to route inference calls.
         agent_container_path: If set, use this as the ``--agent-file`` path
             inside the container instead of mounting *agent_host_path* to
             ``/app/user_agent.py``.  Useful when the agent file is already
@@ -174,6 +181,11 @@ def build_sandbox_command(
 
     if chutes_access_token:
         cmd.extend(["-e", f"CHUTES_ACCESS_TOKEN={chutes_access_token}"])
+        cmd.extend(["-e", f"INFERENCE_ACCESS_TOKEN={chutes_access_token}"])
+    if inference_provider:
+        cmd.extend(["-e", f"INFERENCE_PROVIDER={inference_provider}"])
+    if inference_base_url:
+        cmd.extend(["-e", f"INFERENCE_BASE_URL={inference_base_url}"])
 
     if extra_volumes:
         for host, container in extra_volumes:
