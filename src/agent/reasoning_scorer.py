@@ -51,6 +51,19 @@ JUDGE_MODELS = [
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
 
+# Briefly cache the resolved model order so concurrent reasoning-judge calls
+# don't each hit the utilization API. 30s is short enough that we react to
+# real load changes within roughly a single problem's eval window, but long
+# enough to absorb the per-validator burst (~15 problems landing in parallel).
+_MODEL_ORDER_CACHE_TTL_SECONDS = 30
+_model_order_cache: tuple[float, list[str]] | None = None
+
+
+def _reset_model_order_cache() -> None:
+    """Clear the cached model order. Test-only — production code never calls this."""
+    global _model_order_cache
+    _model_order_cache = None
+
 
 def _select_models_by_utilization() -> list[str]:
     """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
@@ -65,7 +78,27 @@ def _select_models_by_utilization() -> list[str]:
     Returns models sorted by utilization_current (ascending = least loaded
     first), excluding any with active_instance_count == 0. Falls back to
     the static JUDGE_MODELS list on any API failure, or if filtering would
-    leave no models.
+    leave no models. Result is cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``
+    so concurrent callers don't each refetch.
+    """
+    global _model_order_cache
+    now = time.monotonic()
+    if (
+        _model_order_cache is not None
+        and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS
+    ):
+        return list(_model_order_cache[1])
+
+    result = _fetch_model_order()
+    _model_order_cache = (now, result)
+    return list(result)
+
+
+def _fetch_model_order() -> list[str]:
+    """Issue the Chutes API call and produce the sorted model order.
+
+    Split out from ``_select_models_by_utilization`` so the caching layer
+    is the only place that owns cache state.
     """
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
