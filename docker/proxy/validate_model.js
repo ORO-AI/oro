@@ -1,5 +1,6 @@
 // Inference proxy: validates outgoing requests against the ORO inference
-// allowlist before forwarding to Chutes.
+// allowlist before forwarding to Chutes, or bypasses the allowlist and
+// forwards directly to OpenRouter when the bearer token starts with "sk-or-".
 //
 // The allowlist is fetched from the ORO Backend (`GET /v1/public/inference/models`)
 // via the internal `/_backend_models` location and cached in an nginx
@@ -13,6 +14,21 @@
 // After the cache expires we attempt a refresh; if Backend returns a non-200
 // (rate-limited, unreachable, malformed), we keep serving the previous
 // allowlist for STALE_GRACE_MS instead of failing closed.
+//
+// Provider dispatch:
+//   - Bearer token starts with "sk-or-" → OpenRouter (no allowlist check)
+//   - Any other token shape (e.g. cak_*) → Chutes (allowlist enforced)
+
+function detectProvider(r) {
+  var auth = r.headersIn["Authorization"] || "";
+  // Bearer tokens issued by OpenRouter start with "sk-or-".
+  if (auth.indexOf("Bearer sk-or-") === 0) {
+    return "openrouter";
+  }
+  // Default to Chutes for any other token shape (including the existing
+  // cak_* prefix). Keeps behavior unchanged for existing eval flows.
+  return "chutes";
+}
 
 var CACHE_TTL_MS = 15 * 60 * 1000;
 // Window beyond CACHE_TTL_MS where we still serve the cached list if a
@@ -86,8 +102,11 @@ function getAllowlist(r, callback) {
 }
 
 function validate(r) {
+  var provider = detectProvider(r);
+  var upstreamLocation = provider === "openrouter" ? "/_openrouter_proxy/" : "/_chutes_proxy/";
+
   if (r.method !== "POST") {
-    var passUri = "/_chutes_proxy/" + r.uri.replace(/^\/inference\//, "");
+    var passUri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(passUri, { method: r.method, args: r.variables.args || "" }, function (reply) {
       for (var h in reply.headersOut) {
         r.headersOut[h] = reply.headersOut[h];
@@ -126,6 +145,23 @@ function validate(r) {
     return;
   }
 
+  // OpenRouter has 300+ models with no curated allowlist; per-key USD cap
+  // bounds damage. Skip model validation for that path.
+  if (provider === "openrouter") {
+    var orUri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
+    r.subrequest(
+      orUri,
+      { method: "POST", body: body, args: r.variables.args || "" },
+      function (reply) {
+        for (var h in reply.headersOut) {
+          r.headersOut[h] = reply.headersOut[h];
+        }
+        r.return(reply.status, reply.responseText);
+      }
+    );
+    return;
+  }
+
   getAllowlist(r, function (allowed) {
     if (!allowed) {
       r.headersOut["Content-Type"] = "application/json";
@@ -146,7 +182,7 @@ function validate(r) {
       return;
     }
 
-    var uri = "/_chutes_proxy/" + r.uri.replace(/^\/inference\//, "");
+    var uri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(
       uri,
       { method: "POST", body: body, args: r.variables.args || "" },
