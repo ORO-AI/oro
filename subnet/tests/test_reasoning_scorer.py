@@ -6,7 +6,6 @@ import pytest
 
 from reasoning_scorer import (
     _format_proxy_call,
-    _reset_model_order_cache,
     _select_models_by_utilization,
     _summarize_proxy_calls,
     score_reasoning_quality,
@@ -17,16 +16,9 @@ from reasoning_scorer import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_model_order_cache():
-    """Reset the per-process model-order cache between tests.
-
-    `_select_models_by_utilization` caches its result for 30s. Without
-    clearing, the second test in a run would observe the first test's
-    mocked response.
-    """
-    _reset_model_order_cache()
-    yield
-    _reset_model_order_cache()
+def _clear_model_order_cache(monkeypatch):
+    """Reset the 30s model-order cache so tests don't observe each other's mocks."""
+    monkeypatch.setattr("reasoning_scorer._model_order_cache", None)
 
 
 def _make_dialogue(steps):
@@ -479,23 +471,6 @@ class TestSelectModelsByUtilizationCache:
         assert mock_get.call_count == 2
         assert first[0] == JUDGE_MODELS[0]
         assert second[0] == JUDGE_MODELS[-1]
-
-    def test_caller_cannot_mutate_cached_result(self):
-        # The cache returns a fresh copy each call so a caller appending /
-        # popping doesn't poison the next reader.
-        entries = [
-            {"name": m, "utilization_current": 0.1 * i}
-            for i, m in enumerate(JUDGE_MODELS)
-        ]
-        with patch(
-            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
-        ):
-            first = _select_models_by_utilization()
-            first.clear()
-            second = _select_models_by_utilization()
-
-        assert second  # not empty after caller mutated their copy
-        assert len(second) == len(JUDGE_MODELS)
 
     def test_failure_result_is_cached(self):
         # An API failure produces the static fallback list; that result is

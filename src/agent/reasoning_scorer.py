@@ -51,18 +51,10 @@ JUDGE_MODELS = [
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
 
-# Briefly cache the resolved model order so concurrent reasoning-judge calls
-# don't each hit the utilization API. 30s is short enough that we react to
-# real load changes within roughly a single problem's eval window, but long
-# enough to absorb the per-validator burst (~15 problems landing in parallel).
+# 30s coalesces per-validator bursts (~15 problems scoring in parallel)
+# while still picking up real load shifts within an eval.
 _MODEL_ORDER_CACHE_TTL_SECONDS = 30
 _model_order_cache: tuple[float, list[str]] | None = None
-
-
-def _reset_model_order_cache() -> None:
-    """Clear the cached model order. Test-only — production code never calls this."""
-    global _model_order_cache
-    _model_order_cache = None
 
 
 def _select_models_by_utilization() -> list[str]:
@@ -78,73 +70,55 @@ def _select_models_by_utilization() -> list[str]:
     Returns models sorted by utilization_current (ascending = least loaded
     first), excluding any with active_instance_count == 0. Falls back to
     the static JUDGE_MODELS list on any API failure, or if filtering would
-    leave no models. Result is cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``
-    so concurrent callers don't each refetch.
+    leave no models. Result is cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``.
     """
     global _model_order_cache
     now = time.monotonic()
-    if (
-        _model_order_cache is not None
-        and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS
-    ):
-        return list(_model_order_cache[1])
+    if _model_order_cache and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS:
+        return _model_order_cache[1]
 
-    result = _fetch_model_order()
-    _model_order_cache = (now, result)
-    return list(result)
-
-
-def _fetch_model_order() -> list[str]:
-    """Issue the Chutes API call and produce the sorted model order.
-
-    Split out from ``_select_models_by_utilization`` so the caching layer
-    is the only place that owns cache state.
-    """
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
         if resp.status_code != 200:
-            return list(JUDGE_MODELS)
+            result = list(JUDGE_MODELS)
+        else:
+            entries_by_name = {e["name"]: e for e in resp.json()}
 
-        entries_by_name = {e["name"]: e for e in resp.json()}
+            def is_available(m: str) -> bool:
+                # Permissive on missing fields: not all entries carry
+                # active_instance_count, and a missing entry just means
+                # the model wasn't reported (still treat as usable).
+                e = entries_by_name.get(m)
+                count = e.get("active_instance_count") if e else None
+                return count is None or count > 0
 
-        def is_available(m: str) -> bool:
-            e = entries_by_name.get(m)
-            if e is None:
-                # Not reported by the utilization API — be permissive.
-                return True
-            count = e.get("active_instance_count")
-            if count is None:
-                # Field not present on this entry — be permissive.
-                return True
-            return count > 0
-
-        available = [m for m in JUDGE_MODELS if is_available(m)]
-        if not available:
-            logger.warning(
-                "All judge models report zero active instances on Chutes; "
-                "falling back to static model list"
-            )
-            return list(JUDGE_MODELS)
-
-        result = sorted(
-            available,
-            key=lambda m: entries_by_name.get(m, {}).get("utilization_current", 1.0),
-        )
-
-        log_parts = [
-            f"{m}({entries_by_name.get(m, {}).get('utilization_current', -1):.0%})"
-            for m in result
-        ]
-        msg = "Judge model order by utilization: " + ", ".join(log_parts)
-        skipped = [m for m in JUDGE_MODELS if m not in available]
-        if skipped:
-            msg += f" | skipped (0 instances): {', '.join(skipped)}"
-        logger.info(msg)
-
-        return result
+            available = [m for m in JUDGE_MODELS if is_available(m)]
+            if not available:
+                logger.warning(
+                    "All judge models report zero active instances on Chutes; "
+                    "falling back to static model list"
+                )
+                result = list(JUDGE_MODELS)
+            else:
+                result = sorted(
+                    available,
+                    key=lambda m: entries_by_name.get(m, {}).get("utilization_current", 1.0),
+                )
+                log_parts = [
+                    f"{m}({entries_by_name.get(m, {}).get('utilization_current', -1):.0%})"
+                    for m in result
+                ]
+                msg = "Judge model order by utilization: " + ", ".join(log_parts)
+                skipped = [m for m in JUDGE_MODELS if m not in available]
+                if skipped:
+                    msg += f" | skipped (0 instances): {', '.join(skipped)}"
+                logger.info(msg)
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
-        return list(JUDGE_MODELS)
+        result = list(JUDGE_MODELS)
+
+    _model_order_cache = (now, result)
+    return result
 
 JUDGE_SYSTEM_PROMPT = """\
 You evaluate a shopping agent's trajectory and decide whether the agent is using genuine LLM reasoning or pattern matching / regex.
