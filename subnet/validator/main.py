@@ -252,6 +252,8 @@ class Validator:
         eval_run_id: str,
         problem_file: Optional[Path] = None,
         chutes_access_token: Optional[str] = None,
+        inference_provider: Optional[str] = None,
+        inference_base_url: Optional[str] = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         """Run sandbox with downloaded agent, return output file path and metadata.
 
@@ -288,6 +290,8 @@ class Validator:
             problem_file_arg="/app/logs/problems.jsonl",
             output_path="/app/logs/output.jsonl",
             chutes_access_token=chutes_access_token,
+            inference_provider=inference_provider,
+            inference_base_url=inference_base_url,
             agent_container_path="/app/logs/agent.py",
             max_workers=self.config.sandbox_max_workers,
             timeout=self.config.sandbox_problem_timeout,
@@ -295,7 +299,9 @@ class Validator:
 
         logging.info(f"Running sandbox for eval_run {eval_run_id}")
         log_cmd = [
-            arg.split("=")[0] + "=***" if "CHUTES_ACCESS_TOKEN=" in arg else arg
+            arg.split("=")[0] + "=***"
+            if any(s in arg for s in ("CHUTES_ACCESS_TOKEN=", "INFERENCE_ACCESS_TOKEN="))
+            else arg
             for arg in cmd
         ]
         logging.info(f"Sandbox command: {' '.join(log_cmd)}")
