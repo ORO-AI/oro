@@ -2,6 +2,8 @@
 
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from reasoning_scorer import (
     _format_proxy_call,
     _select_models_by_utilization,
@@ -11,6 +13,12 @@ from reasoning_scorer import (
     parse_judge_response,
     JUDGE_MODELS,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_model_order_cache(monkeypatch):
+    """Reset the 30s model-order cache so tests don't observe each other's mocks."""
+    monkeypatch.setattr("reasoning_scorer._model_order_cache", None)
 
 
 def _make_dialogue(steps):
@@ -418,6 +426,77 @@ class TestSelectModelsByUtilization:
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
             result = _select_models_by_utilization()
         assert set(result) == set(JUDGE_MODELS)
+
+
+class TestSelectModelsByUtilizationCache:
+    """Caching layer over the Chutes utilization fetch (ORO-819)."""
+
+    def _mock_response(self, entries):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = entries
+        return resp
+
+    def test_warm_cache_skips_api(self):
+        entries = [
+            {"name": m, "utilization_current": 0.1 * i}
+            for i, m in enumerate(JUDGE_MODELS)
+        ]
+        with patch(
+            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
+        ) as mock_get:
+            first = _select_models_by_utilization()
+            second = _select_models_by_utilization()
+            third = _select_models_by_utilization()
+
+        assert mock_get.call_count == 1
+        assert first == second == third
+
+    def test_stale_cache_refetches(self):
+        entries_v1 = [{"name": JUDGE_MODELS[0], "utilization_current": 0.1}]
+        entries_v2 = [{"name": JUDGE_MODELS[-1], "utilization_current": 0.1}]
+        with patch(
+            "reasoning_scorer.requests.get",
+            side_effect=[
+                self._mock_response(entries_v1),
+                self._mock_response(entries_v2),
+            ],
+        ) as mock_get:
+            with patch("reasoning_scorer.time.monotonic", return_value=0.0):
+                first = _select_models_by_utilization()
+            # 31s later — past the 30s TTL.
+            with patch("reasoning_scorer.time.monotonic", return_value=31.0):
+                second = _select_models_by_utilization()
+
+        assert mock_get.call_count == 2
+        assert first[0] == JUDGE_MODELS[0]
+        assert second[0] == JUDGE_MODELS[-1]
+
+    def test_caller_mutation_does_not_corrupt_cache(self):
+        entries = [
+            {"name": m, "utilization_current": 0.1 * i}
+            for i, m in enumerate(JUDGE_MODELS)
+        ]
+        with patch(
+            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
+        ):
+            first = _select_models_by_utilization()
+            first.pop(0)
+            second = _select_models_by_utilization()
+        assert len(second) == len(JUDGE_MODELS)
+
+    def test_failure_result_is_cached(self):
+        # An API failure produces the static fallback list; that result is
+        # cached too, so a flapping API doesn't get hammered every call. A
+        # later refetch (after TTL) is what recovers.
+        with patch(
+            "reasoning_scorer.requests.get", side_effect=Exception("boom")
+        ) as mock_get:
+            first = _select_models_by_utilization()
+            second = _select_models_by_utilization()
+
+        assert mock_get.call_count == 1
+        assert first == second == list(JUDGE_MODELS)
 
 
 class TestFormatProxyCall:

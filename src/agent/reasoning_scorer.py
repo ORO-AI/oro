@@ -51,6 +51,11 @@ JUDGE_MODELS = [
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
 
+# 30s coalesces per-validator bursts (~15 problems scoring in parallel)
+# while still picking up real load shifts within an eval.
+_MODEL_ORDER_CACHE_TTL_SECONDS = 30
+_model_order_cache: tuple[float, list[str]] | None = None
+
 
 def _select_models_by_utilization() -> list[str]:
     """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
@@ -65,53 +70,57 @@ def _select_models_by_utilization() -> list[str]:
     Returns models sorted by utilization_current (ascending = least loaded
     first), excluding any with active_instance_count == 0. Falls back to
     the static JUDGE_MODELS list on any API failure, or if filtering would
-    leave no models.
+    leave no models. Result is cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``.
     """
+    global _model_order_cache
+    now = time.monotonic()
+    if _model_order_cache and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS:
+        # Return a copy so a caller mutating its result can't poison
+        # subsequent reads inside the TTL window.
+        return list(_model_order_cache[1])
+
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
         if resp.status_code != 200:
-            return list(JUDGE_MODELS)
+            result = list(JUDGE_MODELS)
+        else:
+            entries_by_name = {e["name"]: e for e in resp.json()}
 
-        entries_by_name = {e["name"]: e for e in resp.json()}
+            def is_available(m: str) -> bool:
+                # Permissive on missing fields: not all entries carry
+                # active_instance_count, and a missing entry just means
+                # the model wasn't reported (still treat as usable).
+                e = entries_by_name.get(m)
+                count = e.get("active_instance_count") if e else None
+                return count is None or count > 0
 
-        def is_available(m: str) -> bool:
-            e = entries_by_name.get(m)
-            if e is None:
-                # Not reported by the utilization API — be permissive.
-                return True
-            count = e.get("active_instance_count")
-            if count is None:
-                # Field not present on this entry — be permissive.
-                return True
-            return count > 0
-
-        available = [m for m in JUDGE_MODELS if is_available(m)]
-        if not available:
-            logger.warning(
-                "All judge models report zero active instances on Chutes; "
-                "falling back to static model list"
-            )
-            return list(JUDGE_MODELS)
-
-        result = sorted(
-            available,
-            key=lambda m: entries_by_name.get(m, {}).get("utilization_current", 1.0),
-        )
-
-        log_parts = [
-            f"{m}({entries_by_name.get(m, {}).get('utilization_current', -1):.0%})"
-            for m in result
-        ]
-        msg = "Judge model order by utilization: " + ", ".join(log_parts)
-        skipped = [m for m in JUDGE_MODELS if m not in available]
-        if skipped:
-            msg += f" | skipped (0 instances): {', '.join(skipped)}"
-        logger.info(msg)
-
-        return result
+            available = [m for m in JUDGE_MODELS if is_available(m)]
+            if not available:
+                logger.warning(
+                    "All judge models report zero active instances on Chutes; "
+                    "falling back to static model list"
+                )
+                result = list(JUDGE_MODELS)
+            else:
+                result = sorted(
+                    available,
+                    key=lambda m: entries_by_name.get(m, {}).get("utilization_current", 1.0),
+                )
+                log_parts = [
+                    f"{m}({entries_by_name.get(m, {}).get('utilization_current', -1):.0%})"
+                    for m in result
+                ]
+                msg = "Judge model order by utilization: " + ", ".join(log_parts)
+                skipped = [m for m in JUDGE_MODELS if m not in available]
+                if skipped:
+                    msg += f" | skipped (0 instances): {', '.join(skipped)}"
+                logger.info(msg)
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
-        return list(JUDGE_MODELS)
+        result = list(JUDGE_MODELS)
+
+    _model_order_cache = (now, result)
+    return list(result)
 
 JUDGE_SYSTEM_PROMPT = """\
 You evaluate a shopping agent's trajectory and decide whether the agent is using genuine LLM reasoning or pattern matching / regex.
