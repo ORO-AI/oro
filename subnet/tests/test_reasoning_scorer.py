@@ -5,20 +5,15 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from reasoning_scorer import (
+    _fetch_ranked_models,
     _format_proxy_call,
-    _select_models_for_provider,
     _summarize_proxy_calls,
     score_reasoning_quality,
     format_trajectory_for_judge,
     parse_judge_response,
     JUDGE_MODELS,
+    JUDGE_MODELS_BY_PROVIDER,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clear_model_order_cache(monkeypatch):
-    """Reset the 30s model-order cache so tests don't observe each other's mocks."""
-    monkeypatch.setattr("reasoning_scorer._model_order_cache", None)
 
 
 def _make_dialogue(steps):
@@ -347,156 +342,76 @@ class TestScoreReasoningQuality:
         assert len(JUDGE_MODELS) >= 1
 
 
-class TestSelectModelsByUtilization:
-    """Tests for _select_models_by_utilization routing logic."""
+class TestFetchRankedModels:
+    """Tests for the Backend ranked-endpoint consumer."""
 
-    def _mock_response(self, entries):
+    def _mock_response(self, body, status_code=200):
         resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = entries
+        resp.status_code = status_code
+        resp.json.return_value = body
         return resp
 
-    def test_sorts_by_utilization_ascending(self):
-        # Make each JUDGE_MODELS entry have a distinct utilization, reversed
-        # from the static order, and verify the returned list is sorted
-        # least-loaded first.
-        entries = [
-            {"name": m, "utilization_current": 0.9 - i * 0.1}
-            for i, m in enumerate(JUDGE_MODELS)
-        ]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_for_provider("chutes")
-        assert result == list(reversed(JUDGE_MODELS))
+    def test_returns_backend_order_for_chutes(self):
+        # Backend reordered the static list: last entry first.
+        backend_order = list(reversed(JUDGE_MODELS))
+        body = {"models": [{"id": m} for m in backend_order], "ranked_by": "x"}
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
+            result = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert result == backend_order
 
-    def test_missing_model_treated_as_fully_loaded(self):
-        # Models not present in the utilization response default to 1.0, so
-        # they sort to the end.
-        entries = [{"name": JUDGE_MODELS[-1], "utilization_current": 0.1}]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_for_provider("chutes")
-        assert result[0] == JUDGE_MODELS[-1]
+    def test_returns_backend_order_for_openrouter(self):
+        or_models = JUDGE_MODELS_BY_PROVIDER["openrouter"]
+        body = {"models": [{"id": m} for m in or_models], "ranked_by": "x"}
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
+            result = _fetch_ranked_models("openrouter", "https://api.example.com")
+        assert result == or_models
 
-    def test_api_failure_returns_static_list(self):
-        with patch("reasoning_scorer.requests.get", side_effect=Exception("boom")):
-            result = _select_models_for_provider("chutes")
+    def test_no_backend_url_returns_static_fallback(self):
+        result = _fetch_ranked_models("chutes", None)
         assert result == JUDGE_MODELS
 
-    def test_non_200_returns_static_list(self):
-        resp = MagicMock()
-        resp.status_code = 500
-        with patch("reasoning_scorer.requests.get", return_value=resp):
-            result = _select_models_for_provider("chutes")
-        assert result == JUDGE_MODELS
-
-    def test_zero_active_instances_excluded(self):
-        # A model at 0% utilization would otherwise sort first — but if it's
-        # reporting active_instance_count == 0 (Chutes descaled it) every call
-        # fails. It must be filtered out of the returned order.
-        descaled, *healthy = JUDGE_MODELS
-        entries = [
-            {"name": descaled, "utilization_current": 0.0, "active_instance_count": 0},
-        ] + [
-            {"name": m, "utilization_current": 0.5, "active_instance_count": 4}
-            for m in healthy
-        ]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_for_provider("chutes")
-        assert descaled not in result
-        assert set(result) == set(healthy)
-
-    def test_all_zero_active_instances_falls_back_to_static(self):
-        # If every judge model is descaled, prefer the static list over
-        # returning an empty order (calls will still fail, but the validator
-        # behavior stays predictable).
-        entries = [
-            {"name": m, "utilization_current": 0.0, "active_instance_count": 0}
-            for m in JUDGE_MODELS
-        ]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_for_provider("chutes")
-        assert result == list(JUDGE_MODELS)
-
-    def test_missing_active_instance_count_field_treated_as_available(self):
-        # Older/partial Chutes responses that omit active_instance_count must
-        # not cause models to be silently dropped.
-        entries = [
-            {"name": m, "utilization_current": 0.1 * i}
-            for i, m in enumerate(JUDGE_MODELS)
-        ]
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_for_provider("chutes")
-        assert set(result) == set(JUDGE_MODELS)
-
-
-class TestSelectModelsByUtilizationCache:
-    """Caching layer over the Chutes utilization fetch (ORO-819)."""
-
-    def _mock_response(self, entries):
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = entries
-        return resp
-
-    def test_warm_cache_skips_api(self):
-        entries = [
-            {"name": m, "utilization_current": 0.1 * i}
-            for i, m in enumerate(JUDGE_MODELS)
-        ]
-        with patch(
-            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
-        ) as mock_get:
-            first = _select_models_for_provider("chutes")
-            second = _select_models_for_provider("chutes")
-            third = _select_models_for_provider("chutes")
-
-        assert mock_get.call_count == 1
-        assert first == second == third
-
-    def test_stale_cache_refetches(self):
-        entries_v1 = [{"name": JUDGE_MODELS[0], "utilization_current": 0.1}]
-        entries_v2 = [{"name": JUDGE_MODELS[-1], "utilization_current": 0.1}]
+    def test_non_200_returns_static_fallback(self):
         with patch(
             "reasoning_scorer.requests.get",
-            side_effect=[
-                self._mock_response(entries_v1),
-                self._mock_response(entries_v2),
-            ],
-        ) as mock_get:
-            with patch("reasoning_scorer.time.monotonic", return_value=0.0):
-                first = _select_models_for_provider("chutes")
-            # 31s later — past the 30s TTL.
-            with patch("reasoning_scorer.time.monotonic", return_value=31.0):
-                second = _select_models_for_provider("chutes")
-
-        assert mock_get.call_count == 2
-        assert first[0] == JUDGE_MODELS[0]
-        assert second[0] == JUDGE_MODELS[-1]
-
-    def test_caller_mutation_does_not_corrupt_cache(self):
-        entries = [
-            {"name": m, "utilization_current": 0.1 * i}
-            for i, m in enumerate(JUDGE_MODELS)
-        ]
-        with patch(
-            "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
+            return_value=self._mock_response({}, status_code=500),
         ):
-            first = _select_models_for_provider("chutes")
-            first.pop(0)
-            second = _select_models_for_provider("chutes")
-        assert len(second) == len(JUDGE_MODELS)
+            result = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert result == JUDGE_MODELS
 
-    def test_failure_result_is_cached(self):
-        # An API failure produces the static fallback list; that result is
-        # cached too, so a flapping API doesn't get hammered every call. A
-        # later refetch (after TTL) is what recovers.
+    def test_network_error_returns_static_fallback(self):
+        with patch("reasoning_scorer.requests.get", side_effect=Exception("boom")):
+            result = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert result == JUDGE_MODELS
+
+    def test_empty_models_array_returns_static_fallback(self):
+        body = {"models": [], "ranked_by": None}
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
+            result = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert result == JUDGE_MODELS
+
+    def test_unknown_models_in_response_filtered_out(self):
+        # Backend may return models we don't statically support (e.g. catalog
+        # drift). Drop them so the judge never tries an unrecognized model.
+        body = {
+            "models": [
+                {"id": "some/unknown-model"},
+                {"id": JUDGE_MODELS[0]},
+            ],
+            "ranked_by": "x",
+        }
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
+            result = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert result == [JUDGE_MODELS[0]]
+
+    def test_passes_provider_and_ranked_query_args(self):
+        body = {"models": [{"id": JUDGE_MODELS[0]}]}
         with patch(
-            "reasoning_scorer.requests.get", side_effect=Exception("boom")
+            "reasoning_scorer.requests.get", return_value=self._mock_response(body)
         ) as mock_get:
-            first = _select_models_for_provider("chutes")
-            second = _select_models_for_provider("chutes")
-
-        assert mock_get.call_count == 1
-        assert first == second == list(JUDGE_MODELS)
+            _fetch_ranked_models("chutes", "https://api.example.com")
+        call_kwargs = mock_get.call_args.kwargs
+        assert call_kwargs["params"] == {"provider": "chutes", "ranked": "true"}
+        assert mock_get.call_args.args[0].endswith("/v1/public/inference/models")
 
 
 class TestFormatProxyCall:

@@ -537,6 +537,7 @@ class ProgressReporter:
                 dialogue,
                 api_key=self._chutes_access_token,
                 provider=self._inference_provider,
+                backend_url=self.backend_client.base_url,
             )
 
             with self._lock:
