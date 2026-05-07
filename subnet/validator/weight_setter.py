@@ -151,8 +151,28 @@ class WeightSetterThread:
                 return _qualifiers_to_finishers(qualifiers)
         return None
 
+    def _fetch_top_hotkey(self) -> Optional[str]:
+        """Return the canonical "current top miner" hotkey for emissions.
+
+        Reads `GET /v1/public/top` (the score-to-beat designation). Returns
+        None when there's no admin-designated top (fresh subnet) or the
+        request fails — `build_metagraph_weight_vector` falls back to rank-1
+        of last-race finishers in that case.
+        """
+        try:
+            top = self.backend_client.get_top_miner()
+        except BackendError as e:
+            logging.warning(
+                f"Top-miner fetch failed, falling back to last-race rank-1: {e}"
+            )
+            return None
+        hk = top.top_miner_hotkey
+        if hk is None or hk is UNSET:
+            return None
+        return str(hk)
+
     def _build_weights_from_race(
-        self, finishers: list[RankedFinisher]
+        self, finishers: list[RankedFinisher], top_hotkey: Optional[str]
     ) -> tuple[list[int], list[int]]:
         """Compute the full `(uids, u16 weights)` vector for the metagraph.
 
@@ -173,11 +193,17 @@ class WeightSetterThread:
                 f"(deregistered between race close and weight set), "
                 f"weight skipped: {missing[:5]}{'…' if len(missing) > 5 else ''}"
             )
+        if top_hotkey is not None and top_hotkey not in present:
+            logging.warning(
+                f"Designated top miner {top_hotkey} not in current metagraph; "
+                f"falling back to rank-1 of last-race finishers for top slot"
+            )
         return build_metagraph_weight_vector(
             finishers,
             metagraph_hotkeys=metagraph_hotkeys,
             t_top=self.t_top,
             t_burn=self.t_burn,
+            top_hotkey=top_hotkey,
         )
 
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
@@ -212,10 +238,12 @@ class WeightSetterThread:
             )
             return
 
-        uids, weights = self._build_weights_from_race(finishers)
+        top_hotkey = self._fetch_top_hotkey()
+        uids, weights = self._build_weights_from_race(finishers, top_hotkey)
         non_zero = sum(1 for w in weights if w > 0)
         logging.info(
             f"Race-based weight vector: N={len(finishers)} finishers, "
+            f"top={top_hotkey or '(rank-1 fallback)'}, "
             f"{non_zero} non-zero metagraph slots"
         )
 

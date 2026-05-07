@@ -320,3 +320,159 @@ def test_build_metagraph_vector_empty_metagraph_returns_empty():
     )
     assert uids == []
     assert weights == []
+
+
+# --- top_hotkey override (current top via score-to-beat) ---
+
+
+def test_top_hotkey_none_matches_legacy_rank1_behavior():
+    """`top_hotkey=None` must produce byte-identical weights to passing
+    explicit rank-1 hotkey — the override is opt-in, not a behavior change."""
+    finishers = _make_finishers(20, seed=42)
+    ranked = rank_finishers(finishers)
+    rank1 = ranked[0].miner_hotkey
+
+    weights_none = compute_hotkey_weights(finishers, 0.25, 0.75, top_hotkey=None)
+    weights_explicit = compute_hotkey_weights(finishers, 0.25, 0.75, top_hotkey=rank1)
+    assert weights_none == weights_explicit
+
+
+def test_top_hotkey_override_promotes_non_winner_to_top_slot():
+    """When `top_hotkey` differs from rank-1, the override hotkey takes
+    the top u16 slot and the previous rank-1 falls into the tail."""
+    finishers = _make_finishers(20, seed=7)
+    ranked = rank_finishers(finishers)
+    rank1 = ranked[0].miner_hotkey
+    rank2 = ranked[1].miner_hotkey
+
+    weights = compute_hotkey_weights(finishers, 0.25, 0.75, top_hotkey=rank2)
+
+    # Rank2 (the new "current top") receives the top u16 slot.
+    top_u16 = max(weights.values())
+    assert weights[rank2] == top_u16
+    # Old rank-1 is still in the tail (top half of finishers, dereg-protected).
+    assert rank1 in weights
+    assert weights[rank1] != top_u16
+    # Old rank-1 takes the largest tail weight (M = K-1) since they are now
+    # rank-1 of the tail's existing rank order.
+    k = len(finishers) // 2
+    m = k - 1  # rank2 was in the protected set, so tail size = K - 1
+    assert weights[rank1] == m
+
+
+def test_top_hotkey_not_in_finishers_keeps_old_winner_in_tail():
+    """When `top_hotkey` is a brand-new hotkey not present in last-race
+    finishers, the override hotkey gets the top slot and the full top-K
+    of finishers (including old rank-1) populates the tail."""
+    finishers = _make_finishers(20, seed=11)
+    ranked = rank_finishers(finishers)
+    rank1 = ranked[0].miner_hotkey
+    new_top = "hk_brand_new_agent"
+
+    weights = compute_hotkey_weights(finishers, 0.25, 0.75, top_hotkey=new_top)
+
+    top_u16 = max(weights.values())
+    assert weights[new_top] == top_u16
+    # Old rank-1 takes the largest tail weight (M = K, full top-K tail).
+    k = len(finishers) // 2
+    assert weights[rank1] == k
+
+
+def test_top_hotkey_override_top_share_remains_t_top():
+    """The top miner's share of the chain-normalised vector stays at
+    exactly `t_top` regardless of whether the override pulls from inside
+    or outside the protected tail."""
+    finishers = _make_finishers(20, seed=99)
+    ranked = rank_finishers(finishers)
+
+    for top_hk in [ranked[0].miner_hotkey, ranked[5].miner_hotkey, "hk_outsider"]:
+        weights = compute_hotkey_weights(finishers, 0.25, 0.75, top_hotkey=top_hk)
+        # Burn slot is implicit (uid 0); compute it from compute_pinned_weights
+        # using the actual tail sum.
+        m = sum(1 for v in weights.values() if v != max(weights.values()))
+        tail_sum = m * (m + 1) // 2
+        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum)
+        total = top_u16 + burn_u16 + tail_sum
+        assert _share(top_u16, total) == pytest.approx(0.25, abs=2e-4)
+
+
+def test_build_metagraph_vector_top_hotkey_promoted_to_top_slot():
+    """End-to-end: `top_hotkey` lands at its metagraph index with the top
+    u16, and the burn slot at uid 0 still receives the burn share."""
+    finishers = _make_finishers(20, seed=3)
+    ranked = rank_finishers(finishers)
+    rank2_hk = ranked[1].miner_hotkey
+    metagraph_hotkeys = ["burn_uid"] + [f.miner_hotkey for f in finishers]
+
+    uids, weights = build_metagraph_weight_vector(
+        finishers,
+        metagraph_hotkeys=metagraph_hotkeys,
+        t_top=0.25,
+        t_burn=0.75,
+        top_hotkey=rank2_hk,
+    )
+    rank2_idx = metagraph_hotkeys.index(rank2_hk)
+    rank1_idx = metagraph_hotkeys.index(ranked[0].miner_hotkey)
+    # uid 0 is the burn slot (pinned at U16_MAX under t_top<t_burn) — exclude
+    # it when checking "top" among non-burn slots.
+    non_burn = [w if i != 0 else 0 for i, w in enumerate(weights)]
+
+    assert weights[rank2_idx] == max(non_burn)  # rank2 promoted to top
+    assert weights[rank1_idx] > 0  # old rank-1 still in tail
+    assert weights[rank1_idx] < weights[rank2_idx]
+    assert weights[0] > 0  # burn slot non-zero
+
+
+def test_build_metagraph_vector_top_hotkey_not_in_metagraph_falls_back():
+    """If `top_hotkey` deregistered between Backend designation and weight
+    set, fall back to rank-1 of last-race finishers (legacy behavior)."""
+    finishers = _make_finishers(20, seed=8)
+    ranked = rank_finishers(finishers)
+    rank1_hk = ranked[0].miner_hotkey
+    metagraph_hotkeys = ["burn_uid"] + [f.miner_hotkey for f in finishers]
+
+    uids, weights_with_missing = build_metagraph_weight_vector(
+        finishers,
+        metagraph_hotkeys=metagraph_hotkeys,
+        t_top=0.25,
+        t_burn=0.75,
+        top_hotkey="hk_deregistered",
+    )
+    uids_legacy, weights_legacy = build_metagraph_weight_vector(
+        finishers, metagraph_hotkeys=metagraph_hotkeys, t_top=0.25, t_burn=0.75
+    )
+
+    # Fallback path produces byte-identical output to the legacy
+    # (no-override) call — preserves Yuma determinism across validators.
+    assert weights_with_missing == weights_legacy
+    rank1_idx = metagraph_hotkeys.index(rank1_hk)
+    # rank-1 finisher takes the top slot (highest weight among non-burn uids).
+    non_burn = [w if i != 0 else 0 for i, w in enumerate(weights_with_missing)]
+    assert weights_with_missing[rank1_idx] == max(non_burn)
+
+
+def test_two_validators_with_top_override_emit_byte_identical_weights():
+    """Determinism property still holds when `top_hotkey` is supplied:
+    same `(top_hotkey, finishers, t_top, t_burn)` → byte-identical vectors."""
+    finishers = _make_finishers(50, seed=2026)
+    metagraph_hotkeys = ["burn_uid"] + [f.miner_hotkey for f in finishers]
+    top_hk = finishers[7].miner_hotkey  # arbitrary middle-rank hotkey
+
+    a_uids, a_weights = build_metagraph_weight_vector(
+        finishers,
+        metagraph_hotkeys=metagraph_hotkeys,
+        t_top=0.25,
+        t_burn=0.75,
+        top_hotkey=top_hk,
+    )
+    shuffled = list(finishers)
+    random.Random(123).shuffle(shuffled)
+    b_uids, b_weights = build_metagraph_weight_vector(
+        shuffled,
+        metagraph_hotkeys=metagraph_hotkeys,
+        t_top=0.25,
+        t_burn=0.75,
+        top_hotkey=top_hk,
+    )
+    assert a_uids == b_uids
+    assert a_weights == b_weights
