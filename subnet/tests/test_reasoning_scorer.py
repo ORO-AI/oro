@@ -6,7 +6,7 @@ import pytest
 
 from reasoning_scorer import (
     _format_proxy_call,
-    _select_models_by_utilization,
+    _select_models_for_provider,
     _summarize_proxy_calls,
     score_reasoning_quality,
     format_trajectory_for_judge,
@@ -365,7 +365,7 @@ class TestSelectModelsByUtilization:
             for i, m in enumerate(JUDGE_MODELS)
         ]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert result == list(reversed(JUDGE_MODELS))
 
     def test_missing_model_treated_as_fully_loaded(self):
@@ -373,19 +373,19 @@ class TestSelectModelsByUtilization:
         # they sort to the end.
         entries = [{"name": JUDGE_MODELS[-1], "utilization_current": 0.1}]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert result[0] == JUDGE_MODELS[-1]
 
     def test_api_failure_returns_static_list(self):
         with patch("reasoning_scorer.requests.get", side_effect=Exception("boom")):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert result == JUDGE_MODELS
 
     def test_non_200_returns_static_list(self):
         resp = MagicMock()
         resp.status_code = 500
         with patch("reasoning_scorer.requests.get", return_value=resp):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert result == JUDGE_MODELS
 
     def test_zero_active_instances_excluded(self):
@@ -400,7 +400,7 @@ class TestSelectModelsByUtilization:
             for m in healthy
         ]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert descaled not in result
         assert set(result) == set(healthy)
 
@@ -413,7 +413,7 @@ class TestSelectModelsByUtilization:
             for m in JUDGE_MODELS
         ]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert result == list(JUDGE_MODELS)
 
     def test_missing_active_instance_count_field_treated_as_available(self):
@@ -424,7 +424,7 @@ class TestSelectModelsByUtilization:
             for i, m in enumerate(JUDGE_MODELS)
         ]
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(entries)):
-            result = _select_models_by_utilization()
+            result = _select_models_for_provider("chutes")
         assert set(result) == set(JUDGE_MODELS)
 
 
@@ -445,9 +445,9 @@ class TestSelectModelsByUtilizationCache:
         with patch(
             "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
         ) as mock_get:
-            first = _select_models_by_utilization()
-            second = _select_models_by_utilization()
-            third = _select_models_by_utilization()
+            first = _select_models_for_provider("chutes")
+            second = _select_models_for_provider("chutes")
+            third = _select_models_for_provider("chutes")
 
         assert mock_get.call_count == 1
         assert first == second == third
@@ -463,10 +463,10 @@ class TestSelectModelsByUtilizationCache:
             ],
         ) as mock_get:
             with patch("reasoning_scorer.time.monotonic", return_value=0.0):
-                first = _select_models_by_utilization()
+                first = _select_models_for_provider("chutes")
             # 31s later — past the 30s TTL.
             with patch("reasoning_scorer.time.monotonic", return_value=31.0):
-                second = _select_models_by_utilization()
+                second = _select_models_for_provider("chutes")
 
         assert mock_get.call_count == 2
         assert first[0] == JUDGE_MODELS[0]
@@ -480,9 +480,9 @@ class TestSelectModelsByUtilizationCache:
         with patch(
             "reasoning_scorer.requests.get", return_value=self._mock_response(entries)
         ):
-            first = _select_models_by_utilization()
+            first = _select_models_for_provider("chutes")
             first.pop(0)
-            second = _select_models_by_utilization()
+            second = _select_models_for_provider("chutes")
         assert len(second) == len(JUDGE_MODELS)
 
     def test_failure_result_is_cached(self):
@@ -492,8 +492,8 @@ class TestSelectModelsByUtilizationCache:
         with patch(
             "reasoning_scorer.requests.get", side_effect=Exception("boom")
         ) as mock_get:
-            first = _select_models_by_utilization()
-            second = _select_models_by_utilization()
+            first = _select_models_for_provider("chutes")
+            second = _select_models_for_provider("chutes")
 
         assert mock_get.call_count == 1
         assert first == second == list(JUDGE_MODELS)
