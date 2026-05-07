@@ -45,8 +45,38 @@ def _write_jsonl(problems: list[dict], output_path: Path) -> None:
             f.write(json.dumps(p) + "\n")
 
 
+_CHUTES_INFERENCE_BASE_URL = "https://llm.chutes.ai/v1"
+_OPENROUTER_INFERENCE_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _resolve_inference_credentials() -> tuple[str | None, str | None, str | None]:
+    """Resolve (api_key, provider, base_url) for the local test rig.
+
+    Honors an explicit INFERENCE_PROVIDER override; otherwise infers from
+    which key env var is set. Returns (None, None, None) if neither is set.
+    """
+    or_key = os.environ.get("OPENROUTER_API_KEY")
+    chutes_key = os.environ.get("CHUTES_API_KEY")
+
+    explicit = os.environ.get("INFERENCE_PROVIDER")
+    if explicit == "openrouter" and or_key:
+        return or_key, "openrouter", _OPENROUTER_INFERENCE_BASE_URL
+    if explicit == "chutes" and chutes_key:
+        return chutes_key, "chutes", _CHUTES_INFERENCE_BASE_URL
+
+    if or_key:
+        return or_key, "openrouter", _OPENROUTER_INFERENCE_BASE_URL
+    if chutes_key:
+        return chutes_key, "chutes", _CHUTES_INFERENCE_BASE_URL
+    return None, None, None
+
+
 def _score_output(
-    output_file: Path, problems: list[dict], chutes_key: str | None = None, skip_reasoning: bool = False
+    output_file: Path,
+    problems: list[dict],
+    api_key: str | None = None,
+    provider: str | None = None,
+    skip_reasoning: bool = False,
 ) -> float:
     """Score agent output using ProblemScorer and reasoning judge.
 
@@ -143,8 +173,8 @@ def _score_output(
 
     success_rate = agg["success_rate"]
 
-    # Reasoning quality scoring (uses same Chutes token as sandbox)
-    if skip_reasoning or not chutes_key:
+    # Reasoning quality scoring (uses same inference token as sandbox)
+    if skip_reasoning or not api_key:
         return success_rate
 
     print()
@@ -155,7 +185,9 @@ def _score_output(
     for i, dialogue in enumerate(dialogues):
         query = scores[i]["query"]
         short_query = query[:55] + "..." if len(query) > 55 else query
-        result = score_reasoning_quality(dialogue, api_key=chutes_key)
+        result = score_reasoning_quality(
+            dialogue, api_key=api_key, provider=provider or "chutes"
+        )
         reasoning_scores.append(result["score"])
         total_failed += result["inference_failed"]
         total_calls += result["inference_total"]
@@ -254,7 +286,8 @@ def run_test(
     print("Starting sandbox...")
 
     # Build docker run command
-    chutes_key = os.environ.get("CHUTES_API_KEY")
+    api_key, provider, base_url = _resolve_inference_credentials()
+    print(f"Provider: {provider or '(none)'}")
     cmd = build_sandbox_command(
         agent_host_path=host_agent,
         logs_host_path=host_logs,
@@ -262,7 +295,9 @@ def run_test(
         output_path=f"/app/logs/sandbox_output_{eval_id}.jsonl",
         extra_volumes=[(host_problem, "/tmp/test_problems.jsonl")],
         max_workers=max_workers,
-        chutes_access_token=chutes_key,
+        chutes_access_token=api_key,
+        inference_provider=provider,
+        inference_base_url=base_url,
     )
 
     try:
@@ -286,7 +321,13 @@ def run_test(
     # Score using ProblemScorer (HTTP calls to search-server, no pyserini)
     print()
     print("Scoring results...")
-    return _score_output(output_file, problems, chutes_key=chutes_key, skip_reasoning=skip_reasoning)
+    return _score_output(
+        output_file,
+        problems,
+        api_key=api_key,
+        provider=provider,
+        skip_reasoning=skip_reasoning,
+    )
 
 
 def main():
@@ -319,19 +360,21 @@ def main():
     parser.add_argument(
         "--skip-reasoning",
         action="store_true",
-        help="Skip reasoning quality scoring to save Chutes API calls",
+        help="Skip reasoning quality scoring to save inference API calls",
     )
 
     args = parser.parse_args()
 
-    # Fail fast on a missing/empty Chutes key — without one the agent's
-    # inference calls hit the proxy, get 429'd, and silently retry for
-    # ~3 minutes before the run aborts.
-    if not os.environ.get("CHUTES_API_KEY"):
+    # Fail fast on a missing inference key — without one the agent's
+    # inference calls fail and the run aborts with empty output.
+    api_key, provider, _ = _resolve_inference_credentials()
+    if not api_key:
         print(
-            "Error: CHUTES_API_KEY is not set.\n"
-            "  Set it in your shell or copy .env.example to .env and fill it in.\n"
-            "  Get a key at https://chutes.ai/",
+            "Error: no inference API key set.\n"
+            "  Set one of CHUTES_API_KEY or OPENROUTER_API_KEY in your shell\n"
+            "  or copy .env.example to .env and fill it in.\n"
+            "  Get a Chutes key at https://chutes.ai/ or an OpenRouter key at\n"
+            "  https://openrouter.ai/.",
             file=sys.stderr,
         )
         sys.exit(2)

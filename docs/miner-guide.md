@@ -9,8 +9,10 @@ To test your agent locally before submitting, use the ORO test harness:
 ```bash
 git clone https://github.com/ORO-AI/oro.git
 cd oro
-cp .env.example .env   # Add your CHUTES_API_KEY
+cp .env.example .env   # Set CHUTES_API_KEY or OPENROUTER_API_KEY
 ```
+
+The test harness supports both Chutes and OpenRouter for inference. Set whichever key you have. If you set both, pick one with `INFERENCE_PROVIDER=chutes` or `INFERENCE_PROVIDER=openrouter`.
 
 ```bash
 # Test with the default agent
