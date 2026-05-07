@@ -22,7 +22,11 @@ from bittensor.utils.btlogging import logging
 
 from src.agent.problem_scorer import ProblemScorer, clear_product_cache
 from src.agent.sandbox_status import SandboxProblemStatus
-from src.agent.scoring import is_problem_successful, compute_aggregate, reasoning_coefficient
+from src.agent.scoring import (
+    is_problem_successful,
+    compute_aggregate,
+    reasoning_coefficient,
+)
 from src.agent.types import (
     AggregateScore,
     ProblemDict,
@@ -130,7 +134,9 @@ class ProgressReporter:
                     category = "product"
 
                 if query and reward:
-                    attach_title_embeddings(reward, problem.get("reward_title_embeddings"))
+                    attach_title_embeddings(
+                        reward, problem.get("reward_title_embeddings")
+                    )
                     category_rewards.setdefault(category, {})[query] = reward
 
                 if category == "voucher":
@@ -301,7 +307,9 @@ class ProgressReporter:
                 )
 
             # Check idle timeout: no new output and no in-flight scoring
-            pending_futures = sum(1 for f in self._scoring_futures.values() if not f.done())
+            pending_futures = sum(
+                1 for f in self._scoring_futures.values() if not f.done()
+            )
             if (
                 self._hard_deadline is not None
                 and last_activity_at is not None
@@ -344,7 +352,9 @@ class ProgressReporter:
 
             # Log progress periodically after sandbox exits
             if self._hard_deadline is not None and newly_dispatched == 0:
-                elapsed = int(time.time() - (self._hard_deadline - self.scoring_timeout))
+                elapsed = int(
+                    time.time() - (self._hard_deadline - self.scoring_timeout)
+                )
                 logging.info(
                     f"Scored {result_count}/{self._total_problems} problems "
                     f"({pending_futures} in-flight), "
@@ -459,7 +469,9 @@ class ProgressReporter:
             with self._lock:
                 meta = self._envelope_meta.get(str(problem_id))
             execution_time = (
-                meta.execution_time if meta is not None else extra_info.get("execution_time")
+                meta.execution_time
+                if meta is not None
+                else extra_info.get("execution_time")
             )
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
@@ -523,7 +535,9 @@ class ProgressReporter:
         }
 
         with self._lock:
-            should_judge = bool(self._chutes_access_token and not self._judge_circuit_open)
+            should_judge = bool(
+                self._chutes_access_token and not self._judge_circuit_open
+            )
 
         if not should_judge:
             return empty
@@ -535,8 +549,30 @@ class ProgressReporter:
                 dialogue, api_key=self._chutes_access_token
             )
 
+            # Empty-sentinel detection: score_reasoning_quality returns
+            # score=0.0 / model="" / inference_total=0 when handed an empty
+            # dialogue (or one that the judge formatter strips to empty).
+            # Treat that as an infra-class skip — record reasoning_score=None
+            # so the problem is excluded from reasoning-coefficient
+            # aggregation rather than zero-rating the miner. Real judged
+            # zeros (model set, inference_total >= 1) are preserved.
+            if (
+                judge_result["score"] == 0.0
+                and judge_result["model"] == ""
+                and judge_result["inference_total"] == 0
+            ):
+                logging.warning(
+                    f"Reasoning judge skipped (empty dialogue) for problem "
+                    f"{problem_id}; recording reasoning_score=None."
+                )
+                return empty
+
             with self._lock:
-                if judge_result["inference_total"] > 0 and judge_result["inference_failed"] == judge_result["inference_total"]:
+                if (
+                    judge_result["inference_total"] > 0
+                    and judge_result["inference_failed"]
+                    == judge_result["inference_total"]
+                ):
                     self._consecutive_judge_failures += 1
                     if self._consecutive_judge_failures >= 3:
                         self._judge_circuit_open = True
@@ -609,7 +645,9 @@ class ProgressReporter:
                 score=r.score,
                 reasoning_score=r.reasoning_score,
                 score_components_summary=scs,
-                inference_failure_count=r.inference_failures if r.inference_total > 0 else None,
+                inference_failure_count=r.inference_failures
+                if r.inference_total > 0
+                else None,
                 inference_total=r.inference_total if r.inference_total > 0 else None,
                 execution_time=r.execution_time,
             )
@@ -641,7 +679,9 @@ class ProgressReporter:
             for pid in unscored:
                 self._results[pid] = ProblemResult(
                     problem_id=pid,
-                    category=self._id_to_problem[pid].get("category", "product").lower(),
+                    category=self._id_to_problem[pid]
+                    .get("category", "product")
+                    .lower(),
                     status=ProblemStatus.TIMED_OUT,
                     score=0.0,
                 )

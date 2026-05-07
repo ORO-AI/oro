@@ -145,8 +145,13 @@ class TestEnvelopeParsing:
         out = tmp_path / "output.jsonl"
         with open(out, "a") as f:
             f.write("not json\n")
-        _write_envelope(out, problem_id=_P1, status="FAILED", dialogue=None,
-                        error={"type": "RuntimeError", "message": "x"})
+        _write_envelope(
+            out,
+            problem_id=_P1,
+            status="FAILED",
+            dialogue=None,
+            error={"type": "RuntimeError", "message": "x"},
+        )
         reporter._read_and_dispatch()
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
@@ -171,3 +176,66 @@ class TestSweepNarrowing:
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
+
+
+class TestReasoningJudgeEmptySentinel:
+    """Empty-dialogue sentinel from the reasoning judge must null out the
+    score so the problem is excluded from reasoning-coefficient aggregation
+    rather than counted as a real zero against the miner."""
+
+    def _make_reporter_with_judge(self, reporter, judge_return):
+        reporter._chutes_access_token = "test-token"
+        reporter._judge_circuit_open = False
+        from unittest.mock import patch
+
+        return patch(
+            "src.agent.reasoning_scorer.score_reasoning_quality",
+            return_value=judge_return,
+        )
+
+    def test_empty_sentinel_returns_null_score(self, reporter):
+        # score_reasoning_quality returns this when called with an empty
+        # dialogue (or one the formatter strips to empty).
+        empty_sentinel = {
+            "score": 0.0,
+            "explanation": "",
+            "model": "",
+            "inference_failed": 0,
+            "inference_total": 0,
+        }
+        with self._make_reporter_with_judge(reporter, empty_sentinel):
+            result = reporter._run_reasoning_judge(dialogue=[], problem_id="p1")
+        assert result["reasoning_score"] is None
+        assert result["reasoning_model"] == ""
+
+    def test_real_judged_zero_is_preserved(self, reporter):
+        # A real judge call that returned 0.0 — model set, inference_total>=1.
+        # Must NOT be nulled; this is a legitimate score the miner earned.
+        real_zero = {
+            "score": 0.0,
+            "explanation": "Trajectory does not justify the answer.",
+            "model": "zai-org/GLM-5.1-TEE",
+            "inference_failed": 0,
+            "inference_total": 1,
+        }
+        with self._make_reporter_with_judge(reporter, real_zero):
+            result = reporter._run_reasoning_judge(
+                dialogue=[{"role": "u", "content": "x"}], problem_id="p1"
+            )
+        assert result["reasoning_score"] == 0.0
+        assert result["reasoning_model"] == "zai-org/GLM-5.1-TEE"
+
+    def test_normal_judge_result_preserved(self, reporter):
+        ok = {
+            "score": 0.85,
+            "explanation": "Good reasoning.",
+            "model": "zai-org/GLM-5-TEE",
+            "inference_failed": 0,
+            "inference_total": 1,
+        }
+        with self._make_reporter_with_judge(reporter, ok):
+            result = reporter._run_reasoning_judge(
+                dialogue=[{"role": "u", "content": "x"}], problem_id="p1"
+            )
+        assert result["reasoning_score"] == 0.85
+        assert result["reasoning_model"] == "zai-org/GLM-5-TEE"
