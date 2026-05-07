@@ -782,6 +782,7 @@ class Validator:
                 problems=problems,
                 workspace_dir=workspace_dir,
                 chutes_access_token=chutes_access_token,
+                inference_provider=inference_provider,
             )
             progress_reporter.start_monitoring()
 

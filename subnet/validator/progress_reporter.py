@@ -64,6 +64,7 @@ class ProgressReporter:
         poll_interval: float = 1.0,
         scoring_timeout: float = 900.0,
         chutes_access_token: Optional[str] = None,
+        inference_provider: Optional[str] = None,
         max_scoring_workers: int = DEFAULT_SCORING_WORKERS,
     ):
         self.backend_client = backend_client
@@ -74,6 +75,7 @@ class ProgressReporter:
         self.poll_interval = poll_interval
         self.scoring_timeout = scoring_timeout
         self._chutes_access_token = chutes_access_token
+        self._inference_provider = inference_provider or "chutes"
 
         self._stop_event = threading.Event()
         self._hard_deadline: Optional[float] = None
@@ -532,7 +534,9 @@ class ProgressReporter:
             from src.agent.reasoning_scorer import score_reasoning_quality
 
             judge_result = score_reasoning_quality(
-                dialogue, api_key=self._chutes_access_token
+                dialogue,
+                api_key=self._chutes_access_token,
+                provider=self._inference_provider,
             )
 
             with self._lock:

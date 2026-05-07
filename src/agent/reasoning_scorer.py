@@ -34,19 +34,28 @@ logger = logging.getLogger(__name__)
 
 PROXY_URL = "http://proxy:80"
 
-# Chutes TEE judges (must use -TEE suffix for proxy allowlist).
-# Ordered by load via the Chutes utilization API on every selection.
+# Per-provider judge model lists. Same models, different naming conventions:
+# Chutes uses TEE-suffixed names (required by proxy allowlist on the Chutes
+# upstream); OpenRouter uses lowercase author/model names.
 #
-# These four models score reasoning trajectories near-identically under
-# the decision-tree prompt below — same trajectory is rated within a
-# single bin across all four. Other Chutes models tested either gave
-# uncorrelated scores, sat outside the consensus distribution, or had
-# insufficient capacity to support a steady judge rotation.
-JUDGE_MODELS = [
-    "zai-org/GLM-5.1-TEE",
-    "google/gemma-4-31B-turbo-TEE",
-    "zai-org/GLM-5-TEE",
-]
+# These models score reasoning trajectories near-identically under the
+# decision-tree prompt below — same trajectory is rated within a single bin
+# across all of them.
+JUDGE_MODELS_BY_PROVIDER: dict[str, list[str]] = {
+    "chutes": [
+        "zai-org/GLM-5.1-TEE",
+        "google/gemma-4-31B-turbo-TEE",
+        "zai-org/GLM-5-TEE",
+    ],
+    "openrouter": [
+        "z-ai/glm-5.1",
+        "google/gemma-4-31b-it",
+        "z-ai/glm-5",
+    ],
+}
+
+# Kept for back-compat with any external caller that referenced the old name.
+JUDGE_MODELS = JUDGE_MODELS_BY_PROVIDER["chutes"]
 
 CHUTES_UTILIZATION_URL = "https://api.chutes.ai/chutes/utilization"
 CHUTES_UTILIZATION_TIMEOUT = 5
@@ -57,21 +66,21 @@ _MODEL_ORDER_CACHE_TTL_SECONDS = 30
 _model_order_cache: tuple[float, list[str]] | None = None
 
 
-def _select_models_by_utilization() -> list[str]:
-    """Query Chutes utilization API and return JUDGE_MODELS sorted by load.
+def _select_models_for_provider(provider: str) -> list[str]:
+    """Return the judge model list for the given provider.
 
-    Models reported with zero active instances are excluded. Chutes can
-    descale a model to 0 when idle; the utilization API then reports
-    utilization_current=0.0 (no traffic → no load), which would otherwise
-    make the ascending sort prefer it. Every call routed to a 0-instance
-    model fails, and those failures count toward the judge-infra-failure
-    threshold in the validator.
-
-    Returns models sorted by utilization_current (ascending = least loaded
-    first), excluding any with active_instance_count == 0. Falls back to
-    the static JUDGE_MODELS list on any API failure, or if filtering would
-    leave no models. Result is cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``.
+    For chutes, query the utilization API to skip 0-instance models and sort
+    by load (cached for ``_MODEL_ORDER_CACHE_TTL_SECONDS``). OpenRouter has
+    no equivalent utilization signal, so we return the static list.
     """
+    models = JUDGE_MODELS_BY_PROVIDER.get(provider)
+    if not models:
+        logger.warning(f"No judge models configured for provider={provider}; using chutes")
+        models = JUDGE_MODELS_BY_PROVIDER["chutes"]
+
+    if provider != "chutes":
+        return list(models)
+
     global _model_order_cache
     now = time.monotonic()
     if _model_order_cache and now - _model_order_cache[0] < _MODEL_ORDER_CACHE_TTL_SECONDS:
@@ -82,7 +91,7 @@ def _select_models_by_utilization() -> list[str]:
     try:
         resp = requests.get(CHUTES_UTILIZATION_URL, timeout=CHUTES_UTILIZATION_TIMEOUT)
         if resp.status_code != 200:
-            result = list(JUDGE_MODELS)
+            result = list(models)
         else:
             entries_by_name = {e["name"]: e for e in resp.json()}
 
@@ -94,13 +103,13 @@ def _select_models_by_utilization() -> list[str]:
                 count = e.get("active_instance_count") if e else None
                 return count is None or count > 0
 
-            available = [m for m in JUDGE_MODELS if is_available(m)]
+            available = [m for m in models if is_available(m)]
             if not available:
                 logger.warning(
                     "All judge models report zero active instances on Chutes; "
                     "falling back to static model list"
                 )
-                result = list(JUDGE_MODELS)
+                result = list(models)
             else:
                 result = sorted(
                     available,
@@ -111,13 +120,13 @@ def _select_models_by_utilization() -> list[str]:
                     for m in result
                 ]
                 msg = "Judge model order by utilization: " + ", ".join(log_parts)
-                skipped = [m for m in JUDGE_MODELS if m not in available]
+                skipped = [m for m in models if m not in available]
                 if skipped:
                     msg += f" | skipped (0 instances): {', '.join(skipped)}"
                 logger.info(msg)
     except Exception as e:
         logger.warning(f"Failed to fetch Chutes utilization, using static model list: {e}")
-        result = list(JUDGE_MODELS)
+        result = list(models)
 
     _model_order_cache = (now, result)
     return list(result)
@@ -601,6 +610,7 @@ def score_reasoning_quality(
     api_key: str,
     proxy_url: str = PROXY_URL,
     max_retries: int = 8,
+    provider: str = "chutes",
 ) -> JudgeResult:
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
@@ -625,7 +635,7 @@ def score_reasoning_quality(
     url = f"{proxy_url.rstrip('/')}/inference/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    models = _select_models_by_utilization()
+    models = _select_models_for_provider(provider)
     # Models that returned an unparseable 200 in this eval. Skipped on
     # subsequent rotation steps so a single broken model (e.g. Chutes
     # serving empty `content` for one TEE variant while reporting healthy
