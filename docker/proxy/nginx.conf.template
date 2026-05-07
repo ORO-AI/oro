@@ -89,7 +89,11 @@ http {
             internal;
 
             resolver 1.1.1.1 ipv6=off valid=300s;
-            set $backend_models_url ${BACKEND_URL}/v1/public/inference/models;
+            # Forward the ?provider= arg from the njs subrequest. proxy_pass
+            # with a variable URL drops the original query string, so without
+            # this the Backend always returns the Chutes (default) allowlist
+            # and the OR cache silently stores Chutes-named models.
+            set $backend_models_url ${BACKEND_URL}/v1/public/inference/models?provider=$arg_provider;
             proxy_method GET;
             proxy_pass $backend_models_url;
             proxy_ssl_server_name on;
