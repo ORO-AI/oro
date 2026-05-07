@@ -453,8 +453,8 @@ You are a helpful multi-turn dialogue assistant capable of leveraging tool calls
 # Search Strategy (CRITICAL)
 - Use SHORT, focused search queries with 2-4 keywords. NEVER pass the full user query to find_product.
 - Extract the most distinctive terms: brand name, product type, and 1-2 key attributes.
-- Example: For "Looking for a hosport brand waist bag for motorcycles, priced from 180 to 505 PHP", search: q="hosport waist bag", price="180-505"
-- Example: For "Show me lancol battery testers priced from 1593 to 3846 PHP", search: q="lancol battery tester", price="1593-3846"
+- Pattern: input "Looking for a <brand> <product> with <attribute>, priced from X to Y PHP" -> q="<brand> <product>", price="X-Y"
+- Pattern: input "Show me <brand> <product type> priced from X to Y PHP" -> q="<brand> <product type>", price="X-Y"
 - If the first search returns irrelevant results, try different keyword combinations.
 - ALWAYS use `view_product_information` on the top 3-5 candidate product IDs before recommending. Verify that attributes (brand, material, color, size) EXACTLY match the query.
 
