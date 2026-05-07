@@ -142,7 +142,10 @@ http {
         location /_openrouter_proxy/ {
             internal;
 
-            resolver 127.0.0.11 valid=30s;
+            # ipv6=off: openrouter.ai resolves to Cloudflare AAAA records the
+            # Docker bridge can't reach; without this nginx tries IPv6 first
+            # and every request fails with "Network unreachable".
+            resolver 127.0.0.11 ipv6=off valid=30s;
             set $openrouter_upstream https://${OPENROUTER_HOST};
 
             # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
