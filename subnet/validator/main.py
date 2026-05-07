@@ -693,23 +693,19 @@ class Validator:
             inference_access_token = work.inference_token.access_token
             inference_base_url = work.inference_token.base_url
             logging.info(
-                "Using miner's %s token for %s (base_url=%s)",
-                inference_provider,
-                eval_run_id_str,
-                inference_base_url,
+                f"Using miner's {inference_provider} token for {eval_run_id_str} "
+                f"(base_url={inference_base_url})"
             )
         elif not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
             inference_provider = "chutes"
             inference_access_token = work.chutes_access_token
             inference_base_url = "https://llm.chutes.ai/v1"
             logging.info(
-                "Using legacy chutes_access_token for %s",
-                eval_run_id_str,
+                f"Using legacy chutes_access_token for {eval_run_id_str}"
             )
         else:
             logging.warning(
-                "No miner inference token for %s, cannot run inference",
-                eval_run_id_str,
+                f"No miner inference token for {eval_run_id_str}, cannot run inference"
             )
 
         # Keep chutes_access_token alias for compatibility with downstream
@@ -786,8 +782,6 @@ class Validator:
                 problems=problems,
                 workspace_dir=workspace_dir,
                 chutes_access_token=chutes_access_token,
-                inference_provider=inference_provider,
-                inference_base_url=inference_base_url,
             )
             progress_reporter.start_monitoring()
 
