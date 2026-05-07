@@ -28,6 +28,23 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 25
 
+# Per-provider default model. Naming conventions differ across providers
+# (Chutes uses TEE-suffixed author/Model; OpenRouter uses lowercase
+# author/model), so the agent picks the right name based on the
+# INFERENCE_PROVIDER env var injected by the validator sandbox.
+_DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
+    "chutes": "deepseek-ai/DeepSeek-V3.2-TEE",
+    "openrouter": "deepseek/deepseek-v3.2",
+}
+
+
+def _default_model_for_provider() -> str:
+    provider = getenv("INFERENCE_PROVIDER", "chutes")
+    return _DEFAULT_MODEL_BY_PROVIDER.get(
+        provider, _DEFAULT_MODEL_BY_PROVIDER["chutes"]
+    )
+
+
 _proxy = ProxyClient(timeout=120, max_retries=2)
 
 @Tool
@@ -618,7 +635,7 @@ def agent_main(problem_data: Dict) -> List[Dict]:
     """
     steps = []
     query = problem_data.get("query", "")
-    model = getenv("SANDBOX_MODEL", "deepseek-ai/DeepSeek-V3.2-TEE")
+    model = getenv("SANDBOX_MODEL") or _default_model_for_provider()
 
     logger.info(f"[ReAct] Processing query: {query}")
 
