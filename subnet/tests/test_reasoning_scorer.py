@@ -16,6 +16,12 @@ from reasoning_scorer import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_ranked_cache(monkeypatch):
+    """Reset the per-provider ranked-models cache so tests don't observe each other."""
+    monkeypatch.setattr("reasoning_scorer._ranked_cache", {})
+
+
 def _make_dialogue(steps):
     """Build a dialogue from a list of (think_text, tool_calls) tuples."""
     dialogue = []
@@ -351,20 +357,14 @@ class TestFetchRankedModels:
         resp.json.return_value = body
         return resp
 
-    def test_returns_backend_order_for_chutes(self):
-        # Backend reordered the static list: last entry first.
-        backend_order = list(reversed(JUDGE_MODELS))
-        body = {"models": [{"id": m} for m in backend_order], "ranked_by": "x"}
+    @pytest.mark.parametrize("provider", ["chutes", "openrouter"])
+    def test_returns_backend_order(self, provider):
+        provider_models = JUDGE_MODELS_BY_PROVIDER[provider]
+        backend_order = list(reversed(provider_models))
+        body = {"models": [{"id": m} for m in backend_order]}
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
-            result = _fetch_ranked_models("chutes", "https://api.example.com")
+            result = _fetch_ranked_models(provider, "https://api.example.com")
         assert result == backend_order
-
-    def test_returns_backend_order_for_openrouter(self):
-        or_models = JUDGE_MODELS_BY_PROVIDER["openrouter"]
-        body = {"models": [{"id": m} for m in or_models], "ranked_by": "x"}
-        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
-            result = _fetch_ranked_models("openrouter", "https://api.example.com")
-        assert result == or_models
 
     def test_no_backend_url_returns_static_fallback(self):
         result = _fetch_ranked_models("chutes", None)
@@ -384,7 +384,7 @@ class TestFetchRankedModels:
         assert result == JUDGE_MODELS
 
     def test_empty_models_array_returns_static_fallback(self):
-        body = {"models": [], "ranked_by": None}
+        body = {"models": []}
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
             result = _fetch_ranked_models("chutes", "https://api.example.com")
         assert result == JUDGE_MODELS
@@ -392,13 +392,7 @@ class TestFetchRankedModels:
     def test_unknown_models_in_response_filtered_out(self):
         # Backend may return models we don't statically support (e.g. catalog
         # drift). Drop them so the judge never tries an unrecognized model.
-        body = {
-            "models": [
-                {"id": "some/unknown-model"},
-                {"id": JUDGE_MODELS[0]},
-            ],
-            "ranked_by": "x",
-        }
+        body = {"models": [{"id": "some/unknown-model"}, {"id": JUDGE_MODELS[0]}]}
         with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
             result = _fetch_ranked_models("chutes", "https://api.example.com")
         assert result == [JUDGE_MODELS[0]]
@@ -410,8 +404,50 @@ class TestFetchRankedModels:
         ) as mock_get:
             _fetch_ranked_models("chutes", "https://api.example.com")
         call_kwargs = mock_get.call_args.kwargs
-        assert call_kwargs["params"] == {"provider": "chutes", "ranked": "true"}
+        assert call_kwargs["params"] == {"provider": "chutes", "ranked": True}
         assert mock_get.call_args.args[0].endswith("/v1/public/inference/models")
+
+    def test_warm_cache_skips_backend(self):
+        body = {"models": [{"id": JUDGE_MODELS[0]}]}
+        with patch(
+            "reasoning_scorer.requests.get", return_value=self._mock_response(body)
+        ) as mock_get:
+            _fetch_ranked_models("chutes", "https://api.example.com")
+            _fetch_ranked_models("chutes", "https://api.example.com")
+            _fetch_ranked_models("chutes", "https://api.example.com")
+        assert mock_get.call_count == 1
+
+    def test_stale_cache_refetches(self):
+        body_v1 = {"models": [{"id": JUDGE_MODELS[0]}]}
+        body_v2 = {"models": [{"id": JUDGE_MODELS[-1]}]}
+        with patch(
+            "reasoning_scorer.requests.get",
+            side_effect=[self._mock_response(body_v1), self._mock_response(body_v2)],
+        ):
+            with patch("reasoning_scorer.time.monotonic", return_value=0.0):
+                first = _fetch_ranked_models("chutes", "https://api.example.com")
+            with patch("reasoning_scorer.time.monotonic", return_value=31.0):
+                second = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert first == [JUDGE_MODELS[0]]
+        assert second == [JUDGE_MODELS[-1]]
+
+    def test_failure_is_cached(self):
+        # A flapping Backend would otherwise be hammered every call. Cache
+        # the fallback result too; the TTL is what recovers.
+        with patch(
+            "reasoning_scorer.requests.get", side_effect=Exception("boom")
+        ) as mock_get:
+            _fetch_ranked_models("chutes", "https://api.example.com")
+            _fetch_ranked_models("chutes", "https://api.example.com")
+        assert mock_get.call_count == 1
+
+    def test_caller_mutation_does_not_corrupt_cache(self):
+        body = {"models": [{"id": m} for m in JUDGE_MODELS]}
+        with patch("reasoning_scorer.requests.get", return_value=self._mock_response(body)):
+            first = _fetch_ranked_models("chutes", "https://api.example.com")
+            first.pop(0)
+            second = _fetch_ranked_models("chutes", "https://api.example.com")
+        assert len(second) == len(JUDGE_MODELS)
 
 
 class TestFormatProxyCall:

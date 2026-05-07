@@ -57,10 +57,15 @@ JUDGE_MODELS_BY_PROVIDER: dict[str, list[str]] = {
 # Kept for back-compat with any external caller that referenced the old name.
 JUDGE_MODELS = JUDGE_MODELS_BY_PROVIDER["chutes"]
 
-# Timeout for the Backend ranked-endpoint fetch. Short — Backend serves
-# this from an in-memory snapshot, so a slow response means infra is
-# degraded and we'd rather fall back to the static list than block scoring.
 _RANKED_FETCH_TIMEOUT = 5
+
+# 30s coalesces per-validator bursts (~15 problems scoring in parallel) into
+# a single Backend call, and bounds Backend-facing QPS regardless of how
+# many validators run on one IP (the public allowlist endpoint is rate-limited
+# at 100 rpm/IP). Cache TTL ≤ Backend's own 60s upstream-poll cadence, so the
+# staleness ceiling is the same as if we hit Backend on every call.
+_RANKED_CACHE_TTL_SECONDS = 30
+_ranked_cache: dict[str, tuple[float, list[str]]] = {}
 
 
 def _static_fallback(provider: str) -> list[str]:
@@ -71,13 +76,15 @@ def _static_fallback(provider: str) -> list[str]:
 def _fetch_ranked_models(provider: str, backend_url: str | None) -> list[str]:
     """Fetch the per-provider ranked judge model list from the Backend.
 
-    The Backend's inference-provider monitor polls each upstream every 60s
-    and serves a ranked snapshot at ``/v1/public/inference/models?ranked=true``.
-    This replaces the previous per-validator polling of Chutes' utilization
-    API directly. Falls back to the static ``JUDGE_MODELS_BY_PROVIDER`` list
-    on any failure (no backend_url, network error, malformed response, empty
-    snapshot) so the judge keeps working even when the Backend is unreachable.
+    Cached locally for ``_RANKED_CACHE_TTL_SECONDS`` to coalesce parallel
+    scoring bursts. Falls back to the static ``JUDGE_MODELS_BY_PROVIDER``
+    list on any failure so the judge keeps working when Backend is down.
     """
+    cached = _ranked_cache.get(provider)
+    now = time.monotonic()
+    if cached and now - cached[0] < _RANKED_CACHE_TTL_SECONDS:
+        return list(cached[1])
+
     fallback = _static_fallback(provider)
     if not backend_url:
         return fallback
@@ -85,25 +92,30 @@ def _fetch_ranked_models(provider: str, backend_url: str | None) -> list[str]:
     try:
         resp = requests.get(
             url,
-            params={"provider": provider, "ranked": "true"},
+            params={"provider": provider, "ranked": True},
             timeout=_RANKED_FETCH_TIMEOUT,
         )
         if resp.status_code != 200:
             logger.warning(
                 "Ranked models fetch returned %s; using static list", resp.status_code
             )
-            return fallback
+            _ranked_cache[provider] = (now, fallback)
+            return list(fallback)
         body = resp.json()
-        ids = [m["id"] for m in body.get("models", []) if m.get("id") in fallback]
+        allowed = set(fallback)
+        ids = [m["id"] for m in body.get("models", []) if m.get("id") in allowed]
         if not ids:
-            return fallback
+            _ranked_cache[provider] = (now, fallback)
+            return list(fallback)
         ranked_by = body.get("ranked_by")
         if ranked_by:
             logger.info("Judge model order from Backend (%s): %s", ranked_by, ids)
-        return ids
+        _ranked_cache[provider] = (now, ids)
+        return list(ids)
     except Exception as exc:
         logger.warning("Failed to fetch ranked models, using static list: %s", exc)
-        return fallback
+        _ranked_cache[provider] = (now, fallback)
+        return list(fallback)
 
 JUDGE_SYSTEM_PROMPT = """\
 You evaluate a shopping agent's trajectory and decide whether the agent is using genuine LLM reasoning or pattern matching / regex.
