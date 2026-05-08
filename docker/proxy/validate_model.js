@@ -19,6 +19,16 @@
 // Provider dispatch:
 //   - Bearer token starts with "sk-or-" → OpenRouter (allowlist enforced)
 //   - Any other token shape (e.g. cak_*) → Chutes (allowlist enforced)
+//
+// Cross-provider model-name rewriting: agents can use any model identifier
+// listed in model_pairs.json regardless of which provider funds the run. If
+// the request `model` matches the inactive provider's side of a pair we
+// rewrite the body's `model` field to the active provider's side before
+// allowlist validation, so the same agent code works on either provider.
+// Models with no pair entry pass through unchanged and hit the existing
+// allowlist check as before.
+
+import fs from "fs";
 
 function detectProvider(r) {
   var auth = r.headersIn["Authorization"] || "";
@@ -26,6 +36,39 @@ function detectProvider(r) {
     return "openrouter";
   }
   return "chutes";
+}
+
+// Lookup tables for both directions, populated once at module init. Each
+// nginx worker loads the file independently; reload (`nginx -s reload`)
+// picks up edits.
+var MODEL_PAIRS_PATH = "/etc/nginx/model_pairs.json";
+var _pairsByChutes = {};
+var _pairsByOpenrouter = {};
+try {
+  var _pairsDoc = JSON.parse(fs.readFileSync(MODEL_PAIRS_PATH, "utf8"));
+  for (var i = 0; i < _pairsDoc.pairs.length; i++) {
+    var p = _pairsDoc.pairs[i];
+    _pairsByChutes[p.chutes] = p.openrouter;
+    _pairsByOpenrouter[p.openrouter] = p.chutes;
+  }
+} catch (e) {
+  // Don't crash the worker — same-provider names still work via the
+  // existing allowlist check. Surface the error so it's noticeable.
+  ngx.log(ngx.ERR, "model_pairs load failed: " + e.message);
+}
+
+// Returns the request model rewritten for `activeProvider`, or null if no
+// rewrite is needed (already on the active side, or unknown — let allowlist
+// validation handle it).
+function rewriteModelFor(activeProvider, requested) {
+  if (activeProvider === "chutes") {
+    if (_pairsByChutes[requested] !== undefined) return null;
+    if (_pairsByOpenrouter[requested] !== undefined) return _pairsByOpenrouter[requested];
+  } else if (activeProvider === "openrouter") {
+    if (_pairsByOpenrouter[requested] !== undefined) return null;
+    if (_pairsByChutes[requested] !== undefined) return _pairsByChutes[requested];
+  }
+  return null;
 }
 
 var CACHE_TTL_MS = 15 * 60 * 1000;
@@ -150,6 +193,13 @@ function validate(r) {
     return;
   }
 
+  var rewritten = rewriteModelFor(provider, parsed.model);
+  var forwardBody = body;
+  if (rewritten !== null) {
+    parsed.model = rewritten;
+    forwardBody = JSON.stringify(parsed);
+  }
+
   getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
       r.headersOut["Content-Type"] = "application/json";
@@ -173,7 +223,7 @@ function validate(r) {
     var uri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(
       uri,
-      { method: "POST", body: body, args: r.variables.args || "" },
+      { method: "POST", body: forwardBody, args: r.variables.args || "" },
       function (reply) {
         for (var h in reply.headersOut) {
           r.headersOut[h] = reply.headersOut[h];
