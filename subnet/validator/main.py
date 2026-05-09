@@ -101,25 +101,25 @@ class Validator:
         parser.add_argument(
             "--sandbox-timeout",
             type=int,
-            default=int(os.environ.get("SANDBOX_TIMEOUT", "1800")),
+            default=int(os.environ.get("SANDBOX_TIMEOUT") or "1800"),
             help="Timeout in seconds for the entire sandbox subprocess (env: SANDBOX_TIMEOUT, default: 1800 = 30 min).",
         )
         parser.add_argument(
             "--sandbox-max-workers",
             type=int,
-            default=int(os.environ.get("SANDBOX_MAX_WORKERS", "15")),
+            default=int(os.environ.get("SANDBOX_MAX_WORKERS") or "15"),
             help="Number of parallel problem workers in sandbox (env: SANDBOX_MAX_WORKERS).",
         )
         parser.add_argument(
             "--sandbox-problem-timeout",
             type=float,
-            default=float(os.environ.get("SANDBOX_PROBLEM_TIMEOUT", "300")),
+            default=float(os.environ.get("SANDBOX_PROBLEM_TIMEOUT") or "300"),
             help="Timeout in seconds per problem in sandbox (env: SANDBOX_PROBLEM_TIMEOUT, default: 300 = 5 min).",
         )
         parser.add_argument(
             "--reasoning-max-workers",
             type=int,
-            default=int(os.environ.get("REASONING_MAX_WORKERS", "4")),
+            default=int(os.environ.get("REASONING_MAX_WORKERS") or "4"),
             help="Number of parallel reasoning judge workers (env: REASONING_MAX_WORKERS).",
         )
         # Backend API configuration
