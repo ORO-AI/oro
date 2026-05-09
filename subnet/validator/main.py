@@ -116,6 +116,12 @@ class Validator:
             default=float(os.environ.get("SANDBOX_PROBLEM_TIMEOUT", "300")),
             help="Timeout in seconds per problem in sandbox (env: SANDBOX_PROBLEM_TIMEOUT, default: 300 = 5 min).",
         )
+        parser.add_argument(
+            "--reasoning-max-workers",
+            type=int,
+            default=int(os.environ.get("REASONING_MAX_WORKERS", "4")),
+            help="Number of parallel reasoning judge workers (env: REASONING_MAX_WORKERS).",
+        )
         # Backend API configuration
         parser.add_argument(
             "--backend-url",
@@ -783,6 +789,7 @@ class Validator:
                 workspace_dir=workspace_dir,
                 chutes_access_token=chutes_access_token,
                 inference_provider=inference_provider,
+                max_scoring_workers=self.config.reasoning_max_workers,
             )
             progress_reporter.start_monitoring()
 

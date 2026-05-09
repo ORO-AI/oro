@@ -108,6 +108,7 @@ services:
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:${IMAGE_TAG:-stable}}
       - SANDBOX_NETWORK=sandbox-network
       - SANDBOX_MAX_WORKERS=${SANDBOX_MAX_WORKERS:-}
+      - REASONING_MAX_WORKERS=${REASONING_MAX_WORKERS:-}
       - SEARCH_SERVER_URL=http://search-server:5632
       - WALLET_NAME=${WALLET_NAME:-default}
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
