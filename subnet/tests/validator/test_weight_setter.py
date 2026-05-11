@@ -1,11 +1,13 @@
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+from oro_sdk.types import UNSET
 
 from validator.weight_distribution import compute_pinned_weights
-from validator.weight_setter import WeightSetterThread
+from validator.weight_setter import WeightSetterThread, _qualifiers_to_finishers
 
 
 def _empty_history():
@@ -39,7 +41,9 @@ def _history_with_races(races: list):
 def _race_detail(qualifiers: list[dict]):
     """Build a mock RaceDetailResponse with the supplied qualifier dicts.
 
-    Each dict needs `miner_hotkey`, `agent_version_id`, `race_score`.
+    Each dict needs `miner_hotkey`, `agent_version_id`, `race_score` and may
+    optionally provide `is_discarded` (defaults to False — set True to
+    exercise the ORO-1111 filter path).
     """
     detail = MagicMock()
     detail.qualifiers = []
@@ -48,6 +52,7 @@ def _race_detail(qualifiers: list[dict]):
         m.miner_hotkey = q["miner_hotkey"]
         m.agent_version_id = q["agent_version_id"]
         m.race_score = q["race_score"]
+        m.is_discarded = q.get("is_discarded", False)
         detail.qualifiers.append(m)
     return detail
 
@@ -282,3 +287,39 @@ class TestWeightSetterThread:
         total = sum(weights)
         top_share = weights[1] / total
         assert abs(top_share - 0.25) < 1e-3
+
+
+class TestQualifiersToFinishersIsDiscarded:
+    """ORO-1111: drop is_discarded=True qualifiers from the finisher set."""
+
+    @staticmethod
+    def _q(hotkey: str, score: float, *, is_discarded=False, with_field: bool = True):
+        attrs = {
+            "miner_hotkey": hotkey,
+            "agent_version_id": uuid4(),
+            "race_score": score,
+        }
+        if with_field:
+            attrs["is_discarded"] = is_discarded
+        return SimpleNamespace(**attrs)
+
+    def test_drops_discarded_keeps_non_discarded(self):
+        qualifiers = [
+            self._q("5HKkept", 0.9, is_discarded=False),
+            self._q("5HKdiscarded", 0.85, is_discarded=True),
+            self._q("5HKalsoKept", 0.8, is_discarded=False),
+        ]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        hotkeys = {f.miner_hotkey for f in finishers}
+        assert hotkeys == {"5HKkept", "5HKalsoKept"}
+
+    def test_missing_is_discarded_field_defaults_to_false(self):
+        """Forward-compat with pre-ORO-1111 SDK builds: missing field = keep."""
+        qualifiers = [self._q("5HKlegacy", 0.7, with_field=False)]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        assert [f.miner_hotkey for f in finishers] == ["5HKlegacy"]
+
+    def test_unset_is_discarded_treated_as_false(self):
+        qualifiers = [self._q("5HKunset", 0.6, is_discarded=UNSET)]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        assert [f.miner_hotkey for f in finishers] == ["5HKunset"]

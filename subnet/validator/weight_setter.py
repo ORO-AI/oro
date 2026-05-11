@@ -39,6 +39,12 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
 
     Also drops entries without a `miner_hotkey` defensively so a
     partial-data Backend response can't poison the ranking.
+
+    Discarded agents (admin- or auto-discarded, surfaced via
+    `is_discarded` on the SDK record) are dropped so they stop earning
+    emissions via the rank-1 fallback or the protected tail set.
+    Missing or `UNSET` `is_discarded` defaults to False for forward
+    compatibility with older Backend builds that pre-date the field.
     """
     finishers: list[RankedFinisher] = []
     for q in qualifiers:
@@ -47,6 +53,15 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
             continue
         hotkey = q.miner_hotkey
         if not hotkey or hotkey is UNSET:
+            continue
+        is_discarded = getattr(q, "is_discarded", False)
+        if is_discarded is UNSET:
+            is_discarded = False
+        if is_discarded:
+            logging.info(
+                "Dropping discarded agent from race finishers: "
+                f"hotkey={hotkey} agent_version_id={q.agent_version_id}"
+            )
             continue
         finishers.append(
             RankedFinisher(
