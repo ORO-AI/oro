@@ -149,8 +149,13 @@ def compute_hotkey_weights(
     deregistration-protection tail.
 
     The top slot (`top_u16`) goes to `top_hotkey` if provided (the canonical
-    "current top for emissions" from `/v1/public/top`), otherwise falls back
-    to the rank-1 finisher of the most recent completed race.
+    "current top for emissions" from `/v1/public/top`). When `top_hotkey`
+    is None — no admin-designated top exists (fresh subnet, suite switch,
+    or the designated top was discarded) — the top share is **not**
+    assigned to anyone here; the caller (`build_metagraph_weight_vector`)
+    routes it to the burn slot. We deliberately do not synthesize a top
+    from rank-1 of finishers: the 25% slot belongs to the admin-designated
+    top only.
 
     The tail is the top 50% of last-race finishers minus the top hotkey if
     they overlap. Tail entries receive a linear taper M, M-1, ..., 1 in rank
@@ -160,30 +165,20 @@ def compute_hotkey_weights(
     Bottom 50% (and ties at the rank-K boundary, by tiebreak) get no entry.
     """
     ranked = rank_finishers(qualifiers)
-    n = len(ranked)
-    k = n // 2  # floor — protected-set size
+    k = len(ranked) // 2  # floor — protected-set size
 
-    if top_hotkey is None:
-        if k == 0:
-            return {}
-        effective_top = ranked[0].miner_hotkey
-    else:
-        effective_top = top_hotkey
-
-    # Tail = top-K finishers excluding the effective top hotkey. When
-    # effective_top is the rank-1 finisher this matches the historical
-    # ranks 2..K tail; when effective_top is rank j (j > 1) of the
-    # protected set, rank 1 takes the largest tail weight; when
-    # effective_top is outside the protected set entirely (or there
-    # are no finishers), the tail is the full top-K.
-    protected = ranked[:k] if k > 0 else []
-    tail_finishers = [f for f in protected if f.miner_hotkey != effective_top]
-
+    # Tail = top-K finishers excluding `top_hotkey` if they overlap.
+    # When `top_hotkey` is None the filter never matches, so the tail is
+    # the full top-K. When `top_hotkey` is rank-1 of finishers, the tail
+    # is ranks 2..K (the historical shape).
+    tail_finishers = [f for f in ranked[:k] if f.miner_hotkey != top_hotkey]
     m = len(tail_finishers)
     tail_sum = m * (m + 1) // 2  # M + (M-1) + ... + 1
 
     top_u16, _ = compute_pinned_weights(t_top, t_burn, tail_sum)
-    weights: dict[str, int] = {effective_top: top_u16}
+    weights: dict[str, int] = {}
+    if top_hotkey is not None:
+        weights[top_hotkey] = top_u16
     for idx, finisher in enumerate(tail_finishers):
         weights[finisher.miner_hotkey] = m - idx
 
@@ -201,10 +196,12 @@ def build_metagraph_weight_vector(
 
     `top_hotkey` is the canonical "current top for emissions" (from
     `/v1/public/top`). When set and present in the metagraph, that hotkey
-    receives the top emission slot regardless of whether they finished
-    last race. Falls back to rank-1 of last-race finishers when
-    `top_hotkey` is None or has deregistered between Backend's
-    designation and the weight set.
+    receives the top emission slot. When `top_hotkey` is None — no admin-
+    designated top (fresh subnet, suite switch, or the designated top was
+    discarded) — OR the designated top has deregistered between Backend
+    designation and the weight set, the top share rolls into the burn
+    slot. We do not synthesize a top from rank-1 of finishers: the 25%
+    slot belongs to the admin-designated top only.
 
     Steps:
 
@@ -213,9 +210,9 @@ def build_metagraph_weight_vector(
     3. Map every hotkey-weight onto its metagraph index. A hotkey present
        in the race but absent from the metagraph (deregistered between
        race close and weight set) is silently dropped — its weight does
-       not redistribute, so the burn share grows slightly. This matches
-       the existing "top miner missing → burn everything" fallback.
-    4. Add `burn_u16` at uid 0 (the literal burn slot).
+       not redistribute, so the burn share grows slightly.
+    4. Add `burn_u16` at uid 0; if there is no eligible top, also fold
+       `top_u16` into uid 0 so the burn slot absorbs the full 25%.
 
     Returns:
         Two parallel lists of length `len(metagraph_hotkeys)`. `uids[i]`
@@ -227,61 +224,40 @@ def build_metagraph_weight_vector(
     if n_meta == 0:
         return [], []
 
-    finishers = list(qualifiers)
     hotkey_to_idx = {hk: i for i, hk in enumerate(metagraph_hotkeys)}
 
-    # If the designated top hotkey isn't in the current metagraph (deregistered
-    # between Backend designation and weight set), fall back to rank-1 of
-    # last-race finishers. Keeps the protection mechanism alive instead of
-    # burning everything.
-    effective_top_hotkey = top_hotkey
-    if effective_top_hotkey is not None and effective_top_hotkey not in hotkey_to_idx:
-        effective_top_hotkey = None
+    # The 25% top slot is allocated to the admin-designated top — and
+    # *only* if that hotkey is in the current metagraph. Otherwise (no
+    # admin designation, or designated top deregistered after Backend
+    # picked them) the slot burns: `weights[0]` gets only `burn_u16`,
+    # and the unallocated top share normalises into burn on-chain.
+    has_eligible_top = top_hotkey is not None and top_hotkey in hotkey_to_idx
+    effective_top = top_hotkey if has_eligible_top else None
 
     hotkey_weights = compute_hotkey_weights(
-        finishers, t_top, t_burn, top_hotkey=effective_top_hotkey
+        list(qualifiers), t_top, t_burn, top_hotkey=effective_top
     )
-    if not hotkey_weights:
-        # No top hotkey AND no finishers — burn everything.
-        weights = [0] * n_meta
-        weights[0] = U16_MAX
-        return list(range(n_meta)), weights
 
+    # Place the tail. The top entry (if any) is pinned below from the
+    # recomputed `top_u16`; here we only iterate the dereg-protection
+    # tail and track the actual tail sum after any dereg drops.
     weights = [0] * n_meta
-    # The effective top hotkey is whoever `compute_hotkey_weights` placed in
-    # the top slot — explicit override if set + valid, else rank-1 finisher.
-    if effective_top_hotkey is not None:
-        top_hk = effective_top_hotkey
-    else:
-        ranked = rank_finishers(finishers)
-        top_hk = ranked[0].miner_hotkey
-    top_idx: int | None = None
     tail_sum_actual = 0
     for hk, w in hotkey_weights.items():
+        if hk == effective_top:
+            continue
         idx = hotkey_to_idx.get(hk)
         if idx is None:
-            continue
-        if hk == top_hk:
-            top_idx = idx
-        else:
-            weights[idx] = w
-            tail_sum_actual += w
+            continue  # finisher deregistered; share folds into burn on-chain
+        weights[idx] = w
+        tail_sum_actual += w
 
-    # Recompute pinned weights from the *actual* tail sum (after dropping
-    # deregistered finishers) so the top miner lands at exactly t_top of
-    # the submitted vector. Without this, missing tail u16 entries inflate
-    # both top and burn shares proportionally.
+    # Pin top + burn from the *actual* tail sum so the top miner lands at
+    # exactly `t_top` of the submitted vector. Additive assignment handles
+    # the rare testnet case where uid 0 is itself the top hotkey.
     top_u16, burn_u16 = compute_pinned_weights(t_top, t_burn, tail_sum_actual)
-    if top_idx is not None:
-        # Burn uid 0 may collide with the rank-1 hotkey on very small
-        # testnet metagraphs; weights are additive on uid 0.
-        if top_idx == 0:
-            weights[0] = top_u16 + burn_u16
-        else:
-            weights[top_idx] = top_u16
-            weights[0] = burn_u16
-    else:
-        # Top miner deregistered — pin burn slot only.
-        weights[0] = burn_u16
+    weights[0] += burn_u16
+    if has_eligible_top:
+        weights[hotkey_to_idx[top_hotkey]] += top_u16
 
     return list(range(n_meta)), weights

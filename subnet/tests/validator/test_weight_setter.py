@@ -174,6 +174,8 @@ class TestWeightSetterThread:
         metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in finishers]
         metagraph.uids = list(range(len(metagraph.hotkeys)))
 
+        # Admin-designated top is rank-1 of this race (and is in the metagraph).
+        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
         race_id = uuid4()
         mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
         mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
@@ -217,6 +219,8 @@ class TestWeightSetterThread:
         metagraph.hotkeys = ["5BurnUid"] + [f["miner_hotkey"] for f in finishers]
         metagraph.uids = list(range(len(metagraph.hotkeys)))
 
+        # Admin-designated top is rank-1 of the completed race.
+        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
         in_progress_id = uuid4()
         completed_id = uuid4()
         mock_backend_client.get_race_history.return_value = _history_with_races(
@@ -263,6 +267,8 @@ class TestWeightSetterThread:
         metagraph.hotkeys = ["5BurnUid", "5HK0"]  # only burn + rank 1
         metagraph.uids = list(range(len(metagraph.hotkeys)))
 
+        # Admin-designated top is rank-1 (5HK0), which is in the metagraph.
+        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
         mock_backend_client.get_race_history.return_value = _race_complete_history(uuid4())
         mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
 

@@ -170,9 +170,11 @@ class WeightSetterThread:
         """Return the canonical "current top miner" hotkey for emissions.
 
         Reads `GET /v1/public/top` (the score-to-beat designation). Returns
-        None when there's no admin-designated top (fresh subnet) or the
-        request fails — `build_metagraph_weight_vector` falls back to rank-1
-        of last-race finishers in that case.
+        None when there's no admin-designated top (fresh subnet, suite
+        switch, or designated top was discarded) or the request fails. In
+        all such cases `build_metagraph_weight_vector` burns the 25% top
+        share rather than synthesizing a top from rank-1 of finishers —
+        the top slot belongs to the admin-designated top only.
         """
         try:
             top = self.backend_client.get_top_miner()
