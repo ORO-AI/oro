@@ -1,6 +1,7 @@
 """Sandbox executor for running agents against problems in parallel."""
 
 import importlib.util
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -187,6 +188,17 @@ def _read_request_log(path: str) -> List[Dict]:
     return entries
 
 
+def _problem_id_for(problem: Dict) -> str:
+    """Return an explicit problem id or a stable local-suite fallback id."""
+    problem_id = problem.get("problem_id") or problem.get("id")
+    if problem_id:
+        return str(problem_id)
+
+    payload = json.dumps(problem, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+    return f"local-{digest}"
+
+
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
@@ -234,7 +246,7 @@ def execute_single_problem(
         ExecutionResult with execution outcome.
     """
     query = problem.get("query", "")
-    problem_id = problem.get("problem_id") or problem.get("id")
+    problem_id = _problem_id_for(problem)
     start_time = time.time()
 
     # All processes append to a shared JSONL file alongside output.jsonl.
@@ -483,7 +495,7 @@ def execute_problems_parallel(
                 except FutureTimeoutError:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
-                    problem_id = problem.get("problem_id") or problem.get("id")
+                    problem_id = _problem_id_for(problem)
                     logger.error(
                         f"Future for problem '{query}' timed out during result retrieval"
                     )
@@ -500,7 +512,7 @@ def execute_problems_parallel(
                 except Exception as e:
                     problem = future_to_problem[future]
                     query = problem.get("query", "unknown")
-                    problem_id = problem.get("problem_id") or problem.get("id")
+                    problem_id = _problem_id_for(problem)
                     logger.error(
                         f"Unexpected error retrieving result for '{query}': {e}"
                     )

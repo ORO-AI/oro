@@ -87,6 +87,38 @@ class TestExecuteSingleProblemStatus:
         assert result.status == SandboxProblemStatus.FAILED
         assert result.success is False
 
+    def test_missing_problem_ids_use_stable_content_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        """Bundled local suites may omit problem_id/id; they still need
+        per-problem sidecar files so proxy logs do not bleed between problems."""
+        monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+
+        mock_proc = MagicMock()
+        mock_proc.is_alive.return_value = False
+        mock_proc.pid = 3
+        mock_proc.exitcode = 1
+        with patch.object(
+            sandbox_executor.multiprocessing, "Process", return_value=mock_proc
+        ):
+            first = sandbox_executor.execute_single_problem(
+                {"query": "cream bowl", "category": "voucher"},
+                timeout=0.01,
+            )
+            same_content = sandbox_executor.execute_single_problem(
+                {"category": "voucher", "query": "cream bowl"},
+                timeout=0.01,
+            )
+            second = sandbox_executor.execute_single_problem(
+                {"query": "healthy cheese", "category": "product"},
+                timeout=0.01,
+            )
+
+        assert first.problem_id
+        assert first.problem_id.startswith("local-")
+        assert first.problem_id == same_content.problem_id
+        assert first.problem_id != second.problem_id
+
 
 def _parse(line: str) -> dict:
     obj = json.loads(line)
