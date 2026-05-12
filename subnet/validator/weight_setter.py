@@ -260,7 +260,7 @@ class WeightSetterThread:
         non_zero = sum(1 for w in weights if w > 0)
         logging.info(
             f"Race-based weight vector: N={len(finishers)} finishers, "
-            f"top={top_hotkey or '(rank-1 fallback)'}, "
+            f"top={top_hotkey or '(none — top share burns)'}, "
             f"{non_zero} non-zero metagraph slots"
         )
 
