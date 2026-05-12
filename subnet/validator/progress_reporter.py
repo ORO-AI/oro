@@ -29,6 +29,7 @@ from src.agent.types import (
     ReasoningSummary,
 )
 
+from .backend_client import BackendClient
 from .envelope_dispatcher import EnvelopeDispatcher
 from .output_watcher import OutputWatcher
 from .progress_batcher import ProgressBatcher
@@ -45,7 +46,7 @@ class ProgressReporter:
 
     def __init__(
         self,
-        backend_client,
+        backend_client: BackendClient,
         eval_run_id: UUID,
         output_file: Path,
         problems: List[ProblemDict],
@@ -72,7 +73,6 @@ class ProgressReporter:
         # Single source of truth for all problem results
         self._results: Dict[str, ProblemResult] = {}
         self._total_problems = len(problems)
-        self._envelope_meta: Dict[str, EnvelopeMeta] = {}
 
         # Build problem_id -> problem lookup
         self._id_to_problem: Dict[str, ProblemDict] = {}
@@ -81,7 +81,11 @@ class ProgressReporter:
             if problem_id:
                 self._id_to_problem[problem_id] = problem
 
-        watcher = OutputWatcher(output_file)
+        # Shared between dispatcher (writer) and scoring pool (reader); the
+        # reporter itself never reads it after wire-up.
+        envelope_meta: Dict[str, EnvelopeMeta] = {}
+
+        self._watcher = OutputWatcher(output_file)
         self._reasoning_judge = ReasoningJudge(
             chutes_access_token=chutes_access_token,
             inference_provider=inference_provider or "chutes",
@@ -90,21 +94,19 @@ class ProgressReporter:
         self._scoring_pool = ScoringPool(
             problems=problems,
             results=self._results,
-            envelope_meta=self._envelope_meta,
+            envelope_meta=envelope_meta,
             id_to_problem=self._id_to_problem,
             lock=self._lock,
-            total_problems=self._total_problems,
             reasoning_judge=self._reasoning_judge,
             max_workers=max_scoring_workers,
         )
         self._envelope_dispatcher = EnvelopeDispatcher(
-            watcher=watcher,
+            watcher=self._watcher,
             results=self._results,
-            envelope_meta=self._envelope_meta,
+            envelope_meta=envelope_meta,
             id_to_problem=self._id_to_problem,
             lock=self._lock,
             scoring_pool=self._scoring_pool,
-            output_file=output_file,
         )
         self._batcher = ProgressBatcher(
             backend_client=backend_client,
@@ -114,26 +116,11 @@ class ProgressReporter:
             lock=self._lock,
         )
 
-    # Back-compat shims for tests and historical call sites that poke at
-    # these attributes directly on the reporter.
-    @property
-    def _scoring_futures(self):
-        return self._scoring_pool.futures
-
-    @property
-    def _scorers(self) -> Dict:
-        return self._scoring_pool.scorers
-
-    @_scorers.setter
-    def _scorers(self, value: Dict) -> None:
-        self._scoring_pool.scorers = value
-
     def start_monitoring(self) -> None:
         """Start the background monitoring loop."""
         self._stop_event.clear()
         self._hard_deadline = None
-        self._envelope_dispatcher.set_hard_deadline(None)
-        self._envelope_dispatcher.reset()
+        self._watcher.reset()
         self._results.clear()
         self._batcher.reset()
         self._scoring_pool.futures.clear()
@@ -241,7 +228,9 @@ class ProgressReporter:
         last_activity_at: Optional[float] = None
 
         while True:
-            newly_dispatched = self._envelope_dispatcher.read_and_dispatch()
+            newly_dispatched = self._envelope_dispatcher.read_and_dispatch(
+                hard_deadline=self._hard_deadline
+            )
             self._scoring_pool.collect_completed()
 
             if newly_dispatched > 0:
@@ -260,7 +249,6 @@ class ProgressReporter:
             # Start hard timeout when sandbox exits
             if self._stop_event.is_set() and self._hard_deadline is None:
                 self._hard_deadline = time.time() + self.scoring_timeout
-                self._envelope_dispatcher.set_hard_deadline(self._hard_deadline)
                 if last_activity_at is None:
                     last_activity_at = time.time()
                 logging.info(
@@ -302,7 +290,7 @@ class ProgressReporter:
             if (
                 self._hard_deadline is not None
                 and result_count == 0
-                and not self._envelope_dispatcher.output_file_exists()
+                and not self.output_file.exists()
             ):
                 self._envelope_dispatcher.mark_remaining_timed_out()
                 self._batcher.batch_report()

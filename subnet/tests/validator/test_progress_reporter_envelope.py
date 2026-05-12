@@ -56,7 +56,7 @@ def reporter(tmp_path) -> ProgressReporter:
     # Disable scoring side effects — tests assert on dispatch/no-dispatch,
     # not on what scoring computes. Replace scorers with a stub that always
     # produces a clean SUCCESS so dispatched futures complete promptly.
-    rep._scorers = {}
+    rep._scoring_pool.scorers = {}
     return rep
 
 
@@ -64,7 +64,7 @@ class TestEnvelopeParsing:
     def test_success_envelope_dispatches_to_scoring(self, reporter, tmp_path):
         _write_envelope(tmp_path / "output.jsonl", problem_id=_P1, status="SUCCESS")
         reporter._envelope_dispatcher.read_and_dispatch()
-        assert _P1 in reporter._scoring_futures
+        assert _P1 in reporter._scoring_pool.futures
 
     def test_failure_envelope_records_without_scoring(self, reporter, tmp_path):
         _write_envelope(
@@ -75,7 +75,7 @@ class TestEnvelopeParsing:
             error={"type": "RuntimeError", "message": "boom"},
         )
         reporter._envelope_dispatcher.read_and_dispatch()
-        assert _P1 not in reporter._scoring_futures
+        assert _P1 not in reporter._scoring_pool.futures
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
     def test_timeout_envelope_records_without_scoring(self, reporter, tmp_path):
@@ -87,7 +87,7 @@ class TestEnvelopeParsing:
             error={"type": "TimeoutError", "message": "..."},
         )
         reporter._envelope_dispatcher.read_and_dispatch()
-        assert _P1 not in reporter._scoring_futures
+        assert _P1 not in reporter._scoring_pool.futures
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
 
     def test_inference_counts_come_from_envelope(self, reporter, tmp_path):
@@ -102,7 +102,7 @@ class TestEnvelopeParsing:
         )
         reporter._envelope_dispatcher.read_and_dispatch()
         # Inference counts captured from envelope at dispatch time.
-        meta = reporter._envelope_meta[_P1]
+        meta = reporter._envelope_dispatcher.envelope_meta[_P1]
         assert (meta.inference_failure_count, meta.inference_total) == (2, 7)
         # And materialized into the terminal result.
         assert reporter._results[_P1].inference_failures == 2
@@ -145,8 +145,13 @@ class TestEnvelopeParsing:
         out = tmp_path / "output.jsonl"
         with open(out, "a") as f:
             f.write("not json\n")
-        _write_envelope(out, problem_id=_P1, status="FAILED", dialogue=None,
-                        error={"type": "RuntimeError", "message": "x"})
+        _write_envelope(
+            out,
+            problem_id=_P1,
+            status="FAILED",
+            dialogue=None,
+            error={"type": "RuntimeError", "message": "x"},
+        )
         reporter._envelope_dispatcher.read_and_dispatch()
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 

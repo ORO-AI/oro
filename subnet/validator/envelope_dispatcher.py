@@ -5,17 +5,12 @@ Translates raw envelope records from OutputWatcher into actions:
 - SUCCESS  → dispatch the dialogue to the scoring pool
 - FAILED / TIMED_OUT → write a terminal ProblemResult directly to results
 - End-of-run sweep → mark never-seen problems TIMED_OUT
-
-Holds no scoring state of its own; envelope metadata, results, and the
-id-to-problem map are owned by ProgressReporter and accessed under its
-shared lock.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from pathlib import Path
 from typing import Dict, Optional
 
 from bittensor.utils.btlogging import logging
@@ -41,34 +36,22 @@ class EnvelopeDispatcher:
         id_to_problem: Dict[str, ProblemDict],
         lock: threading.Lock,
         scoring_pool: ScoringPool,
-        output_file: Path,
     ):
         self._watcher = watcher
         self._results = results
-        self._envelope_meta = envelope_meta
+        self.envelope_meta = envelope_meta
         self._id_to_problem = id_to_problem
         self._lock = lock
         self._scoring_pool = scoring_pool
-        self._output_file = output_file
-        self._hard_deadline: Optional[float] = None
 
-    def set_hard_deadline(self, deadline: Optional[float]) -> None:
-        """Wall-clock deadline at which the read loop bails early."""
-        self._hard_deadline = deadline
-
-    def reset(self) -> None:
-        """Rewind the watcher cursor; called at start_monitoring()."""
-        self._watcher.reset()
-
-    def output_file_exists(self) -> bool:
-        return self._output_file.exists()
-
-    def read_and_dispatch(self) -> int:
+    def read_and_dispatch(self, hard_deadline: Optional[float] = None) -> int:
         """Read new records from the watcher and act on each.
 
         SUCCESS records are dispatched to the scoring pool; FAILED and
         TIMED_OUT records are stored directly without scoring. Returns
-        the number of newly dispatched (SUCCESS) problems.
+        the number of newly dispatched (SUCCESS) problems. If
+        ``hard_deadline`` is set, the read loop bails when wall-clock
+        time reaches it.
         """
         newly_dispatched = 0
         for record in self._watcher.read_new():
@@ -77,7 +60,7 @@ class EnvelopeDispatcher:
                     record.problem_id
                 ):
                     continue
-                self._envelope_meta[record.problem_id] = EnvelopeMeta(
+                self.envelope_meta[record.problem_id] = EnvelopeMeta(
                     inference_failure_count=record.inference_failure_count,
                     inference_total=record.inference_total,
                     execution_time=record.execution_time,
@@ -97,7 +80,7 @@ class EnvelopeDispatcher:
                     with self._lock:
                         self._results[record.problem_id] = terminal
 
-            if self._hard_deadline is not None and time.time() >= self._hard_deadline:
+            if hard_deadline is not None and time.time() >= hard_deadline:
                 break
 
         return newly_dispatched
@@ -117,7 +100,7 @@ class EnvelopeDispatcher:
         category = problem.get("category", "product").lower()
         problem_status = ProblemStatus(status.value)
         with self._lock:
-            meta = self._envelope_meta.get(problem_id)
+            meta = self.envelope_meta.get(problem_id)
         inf_fail = meta.inference_failure_count if meta else 0
         inf_total = meta.inference_total if meta else 0
         exec_time = meta.execution_time if meta else 0.0

@@ -18,8 +18,8 @@ from bittensor.utils.btlogging import logging
 # Low by design — a bad token usually fails on the first call.
 CIRCUIT_BREAKER_THRESHOLD = 3
 
-# Result shape returned when the judge is disabled, tripped, or errored.
-# Must match the kwargs ProblemResult expects from `_run_reasoning_judge`.
+# Returned when the judge is disabled, tripped, or errored. Keys are the
+# reasoning_* fields ProblemResult accepts as **kwargs.
 _EMPTY_RESULT: Dict[str, Any] = {
     "reasoning_score": None,
     "reasoning_explanation": "",

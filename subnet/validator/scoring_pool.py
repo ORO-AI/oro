@@ -39,7 +39,6 @@ class ScoringPool:
         envelope_meta: Dict[str, EnvelopeMeta],
         id_to_problem: Dict[str, ProblemDict],
         lock: threading.Lock,
-        total_problems: int,
         reasoning_judge: ReasoningJudge,
         max_workers: int = DEFAULT_SCORING_WORKERS,
     ):
@@ -47,43 +46,30 @@ class ScoringPool:
         self._envelope_meta = envelope_meta
         self._id_to_problem = id_to_problem
         self._lock = lock
-        self._total_problems = total_problems
+        self._total_problems = len(problems)
         self._reasoning_judge = reasoning_judge
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix="scorer"
         )
-        self._futures: Dict[str, Future] = {}
-        self._scorers: Dict[str, Any] = {}
+        self.futures: Dict[str, Future] = {}
+        self.scorers: Dict[str, Any] = {}
         self._initialize_scorers(problems)
 
-    @property
-    def futures(self) -> Dict[str, Future]:
-        """In-flight problem_id → Future. Single-writer (the main loop)."""
-        return self._futures
-
-    @property
-    def scorers(self) -> Dict[str, Any]:
-        return self._scorers
-
-    @scorers.setter
-    def scorers(self, value: Dict[str, Any]) -> None:
-        self._scorers = value
-
     def has_future(self, problem_id: str) -> bool:
-        return problem_id in self._futures
+        return problem_id in self.futures
 
     def pending_count(self) -> int:
-        return sum(1 for f in self._futures.values() if not f.done())
+        return sum(1 for f in self.futures.values() if not f.done())
 
     def submit(self, problem_id: str, dialogue: list) -> None:
         future = self._executor.submit(self._score_problem, dialogue, problem_id)
-        self._futures[problem_id] = future
+        self.futures[problem_id] = future
 
     def collect_completed(self) -> None:
         """Reap completed futures and log any worker exceptions."""
-        completed = [pid for pid, f in self._futures.items() if f.done()]
+        completed = [pid for pid, f in self.futures.items() if f.done()]
         for pid in completed:
-            future = self._futures.pop(pid)
+            future = self.futures.pop(pid)
             exc = future.exception()
             if exc:
                 logging.error(f"Scoring worker failed for {pid}: {exc}")
@@ -114,22 +100,22 @@ class ScoringPool:
                         category_vouchers.setdefault(category, {})[query] = voucher
             for category, rewards in category_rewards.items():
                 vouchers = category_vouchers.get(category, {})
-                self._scorers[category] = ProblemScorer(
+                self.scorers[category] = ProblemScorer(
                     task=category, rewards=rewards, vouchers=vouchers
                 )
                 logging.info(
                     f"Created ProblemScorer for '{category}' with {len(rewards)} problems"
                 )
             logging.info(
-                f"Initialized {len(self._scorers)} scorers: {list(self._scorers.keys())}"
+                f"Initialized {len(self.scorers)} scorers: {list(self.scorers.keys())}"
             )
         except (ImportError, OSError, ValueError, TypeError, KeyError) as e:
             logging.error(f"Failed to initialize ProblemScorers: {e}")
-            self._scorers = {}
+            self.scorers = {}
 
     def _score_problem(self, dialogue: list, problem_id: str) -> None:
         """Score a single problem end-to-end. Runs in a worker thread."""
-        if not self._scorers:
+        if not self.scorers:
             return
         if not isinstance(dialogue, list) or not dialogue:
             return
@@ -151,7 +137,7 @@ class ScoringPool:
             query = problem.get("query") or extra_info.get("query")
             category = problem.get("category", "product").lower()
 
-            scorer = self._scorers.get(category)
+            scorer = self.scorers.get(category)
             if not scorer:
                 logging.warning(f"No scorer for category '{category}'")
                 return
