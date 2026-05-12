@@ -306,7 +306,9 @@ class Validator:
         logging.info(f"Running sandbox for eval_run {eval_run_id}")
         log_cmd = [
             arg.split("=")[0] + "=***"
-            if any(s in arg for s in ("CHUTES_ACCESS_TOKEN=", "INFERENCE_ACCESS_TOKEN="))
+            if any(
+                s in arg for s in ("CHUTES_ACCESS_TOKEN=", "INFERENCE_ACCESS_TOKEN=")
+            )
             else arg
             for arg in cmd
         ]
@@ -689,8 +691,6 @@ class Validator:
         eval_run_id = work.eval_run_id  # UUID from SDK
         eval_run_id_str = str(eval_run_id)  # String for file paths/logging
 
-        # Prefer the structured inference_token grant; fall back to legacy
-        # chutes_access_token for older Backend deployments.
         inference_provider: Optional[str] = None
         inference_access_token: Optional[str] = None
         inference_base_url: Optional[str] = None
@@ -702,22 +702,10 @@ class Validator:
                 f"Using miner's {inference_provider} token for {eval_run_id_str} "
                 f"(base_url={inference_base_url})"
             )
-        elif not isinstance(work.chutes_access_token, Unset) and work.chutes_access_token:
-            inference_provider = "chutes"
-            inference_access_token = work.chutes_access_token
-            inference_base_url = "https://llm.chutes.ai/v1"
-            logging.info(
-                f"Using legacy chutes_access_token for {eval_run_id_str}"
-            )
         else:
             logging.warning(
                 f"No miner inference token for {eval_run_id_str}, cannot run inference"
             )
-
-        # Keep chutes_access_token alias for compatibility with downstream
-        # call sites that still reference it (sandbox env injection,
-        # progress_reporter constructor).
-        chutes_access_token = inference_access_token
 
         # Track temp files for cleanup
         problem_file = None
@@ -725,7 +713,11 @@ class Validator:
         workspace_dir = Path(self.config.workspace_dir)
 
         # Step 0: Verify miner inference token is present and valid
-        if not inference_access_token or not inference_base_url or not inference_provider:
+        if (
+            not inference_access_token
+            or not inference_base_url
+            or not inference_provider
+        ):
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
@@ -787,7 +779,7 @@ class Validator:
                 output_file=output_file,
                 problems=problems,
                 workspace_dir=workspace_dir,
-                chutes_access_token=chutes_access_token,
+                chutes_access_token=inference_access_token,
                 inference_provider=inference_provider,
                 max_scoring_workers=self.config.reasoning_max_workers,
             )
@@ -798,7 +790,7 @@ class Validator:
                     agent_path,
                     eval_run_id_str,
                     problem_file,
-                    chutes_access_token=chutes_access_token,
+                    chutes_access_token=inference_access_token,
                     inference_provider=inference_provider,
                     inference_base_url=inference_base_url,
                 )
