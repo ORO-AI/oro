@@ -53,7 +53,7 @@ class ProgressReporter:
         workspace_dir: Path,
         poll_interval: float = 1.0,
         scoring_timeout: float = 900.0,
-        chutes_access_token: Optional[str] = None,
+        inference_access_token: Optional[str] = None,
         inference_provider: Optional[str] = None,
         max_scoring_workers: int = DEFAULT_SCORING_WORKERS,
     ):
@@ -87,7 +87,7 @@ class ProgressReporter:
 
         self._watcher = OutputWatcher(output_file)
         self._reasoning_judge = ReasoningJudge(
-            chutes_access_token=chutes_access_token,
+            inference_access_token=inference_access_token,
             inference_provider=inference_provider or "chutes",
             backend_base_url=backend_client.base_url,
         )

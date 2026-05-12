@@ -197,19 +197,19 @@ class TestBuildSandboxCommand:
         shares_idx = cmd.index("--cpu-shares")
         assert cmd[shares_idx + 1] == "512"
 
-    def test_chutes_access_token_injected(self):
+    def test_inference_access_token_injected(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",
             logs_host_path="/host/logs",
             problem_file_arg="/tmp/problems.jsonl",
             output_path="/app/logs/output.jsonl",
-            chutes_access_token="miner-token-abc",
+            inference_access_token="miner-token-abc",
         )
         # Token should be injected as both CHUTES_ACCESS_TOKEN and INFERENCE_ACCESS_TOKEN env vars
         assert "CHUTES_ACCESS_TOKEN=miner-token-abc" in cmd
         assert "INFERENCE_ACCESS_TOKEN=miner-token-abc" in cmd
 
-    def test_chutes_access_token_omitted_when_none(self):
+    def test_inference_access_token_omitted_when_none(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",
             logs_host_path="/host/logs",
@@ -218,13 +218,13 @@ class TestBuildSandboxCommand:
         )
         assert not any("CHUTES_ACCESS_TOKEN" in arg for arg in cmd)
 
-    def test_chutes_access_token_omitted_when_empty(self):
+    def test_inference_access_token_omitted_when_empty(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",
             logs_host_path="/host/logs",
             problem_file_arg="/tmp/problems.jsonl",
             output_path="/app/logs/output.jsonl",
-            chutes_access_token="",
+            inference_access_token="",
         )
         assert not any("CHUTES_ACCESS_TOKEN" in arg for arg in cmd)
 
@@ -272,7 +272,7 @@ class TestBuildSandboxCommand:
             logs_host_path="/host/logs",
             problem_file_arg="/tmp/problems.jsonl",
             output_path="/app/logs/output.jsonl",
-            chutes_access_token="test-token-123",
+            inference_access_token="test-token-123",
             inference_provider="custom",
             inference_base_url="https://custom.example.com",
         )

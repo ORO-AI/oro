@@ -34,11 +34,11 @@ class ReasoningJudge:
 
     def __init__(
         self,
-        chutes_access_token: Optional[str],
+        inference_access_token: Optional[str],
         inference_provider: str,
         backend_base_url: str,
     ):
-        self._token = chutes_access_token
+        self._token = inference_access_token
         self._provider = inference_provider
         self._backend_base_url = backend_base_url
         self._lock = threading.Lock()

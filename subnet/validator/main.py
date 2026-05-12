@@ -257,7 +257,7 @@ class Validator:
         agent_path: Path,
         eval_run_id: str,
         problem_file: Optional[Path] = None,
-        chutes_access_token: Optional[str] = None,
+        inference_access_token: Optional[str] = None,
         inference_provider: Optional[str] = None,
         inference_base_url: Optional[str] = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
@@ -295,7 +295,7 @@ class Validator:
             logs_host_path=eval_dir_host,
             problem_file_arg="/app/logs/problems.jsonl",
             output_path="/app/logs/output.jsonl",
-            chutes_access_token=chutes_access_token,
+            inference_access_token=inference_access_token,
             inference_provider=inference_provider,
             inference_base_url=inference_base_url,
             agent_container_path="/app/logs/agent.py",
@@ -779,7 +779,7 @@ class Validator:
                 output_file=output_file,
                 problems=problems,
                 workspace_dir=workspace_dir,
-                chutes_access_token=inference_access_token,
+                inference_access_token=inference_access_token,
                 inference_provider=inference_provider,
                 max_scoring_workers=self.config.reasoning_max_workers,
             )
@@ -790,7 +790,7 @@ class Validator:
                     agent_path,
                     eval_run_id_str,
                     problem_file,
-                    chutes_access_token=inference_access_token,
+                    inference_access_token=inference_access_token,
                     inference_provider=inference_provider,
                     inference_base_url=inference_base_url,
                 )

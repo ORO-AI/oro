@@ -100,7 +100,7 @@ def build_sandbox_command(
     extra_volumes: Optional[List[Tuple[str, str]]] = None,
     max_workers: Optional[int] = None,
     timeout: Optional[float] = None,
-    chutes_access_token: Optional[str] = None,
+    inference_access_token: Optional[str] = None,
     inference_provider: Optional[str] = None,
     inference_base_url: Optional[str] = None,
     agent_container_path: Optional[str] = None,
@@ -123,7 +123,7 @@ def build_sandbox_command(
         extra_volumes: Optional list of ``(host_path, container_path)`` tuples
             mounted read-only.
         max_workers: If set, passed as ``--max-workers`` to ``run_sandbox``.
-        chutes_access_token: If set, injected as both ``CHUTES_ACCESS_TOKEN``
+        inference_access_token: If set, injected as both ``CHUTES_ACCESS_TOKEN``
             and ``INFERENCE_ACCESS_TOKEN`` env vars (the legacy var is kept for
             agent code that hasn't migrated).
         inference_provider: If set, injected as ``INFERENCE_PROVIDER`` env var.
@@ -179,9 +179,9 @@ def build_sandbox_command(
 
     cmd.extend(["-v", f"{logs_host_path}:/app/logs"])
 
-    if chutes_access_token:
-        cmd.extend(["-e", f"CHUTES_ACCESS_TOKEN={chutes_access_token}"])
-        cmd.extend(["-e", f"INFERENCE_ACCESS_TOKEN={chutes_access_token}"])
+    if inference_access_token:
+        cmd.extend(["-e", f"CHUTES_ACCESS_TOKEN={inference_access_token}"])
+        cmd.extend(["-e", f"INFERENCE_ACCESS_TOKEN={inference_access_token}"])
     if inference_provider:
         cmd.extend(["-e", f"INFERENCE_PROVIDER={inference_provider}"])
     if inference_base_url:

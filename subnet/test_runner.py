@@ -295,7 +295,7 @@ def run_test(
         output_path=f"/app/logs/sandbox_output_{eval_id}.jsonl",
         extra_volumes=[(host_problem, "/tmp/test_problems.jsonl")],
         max_workers=max_workers,
-        chutes_access_token=api_key,
+        inference_access_token=api_key,
         inference_provider=provider,
         inference_base_url=base_url,
     )
