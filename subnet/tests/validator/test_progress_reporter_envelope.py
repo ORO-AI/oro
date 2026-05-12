@@ -63,7 +63,7 @@ def reporter(tmp_path) -> ProgressReporter:
 class TestEnvelopeParsing:
     def test_success_envelope_dispatches_to_scoring(self, reporter, tmp_path):
         _write_envelope(tmp_path / "output.jsonl", problem_id=_P1, status="SUCCESS")
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert _P1 in reporter._scoring_futures
 
     def test_failure_envelope_records_without_scoring(self, reporter, tmp_path):
@@ -74,7 +74,7 @@ class TestEnvelopeParsing:
             dialogue=None,
             error={"type": "RuntimeError", "message": "boom"},
         )
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert _P1 not in reporter._scoring_futures
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
@@ -86,7 +86,7 @@ class TestEnvelopeParsing:
             dialogue=None,
             error={"type": "TimeoutError", "message": "..."},
         )
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert _P1 not in reporter._scoring_futures
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
 
@@ -100,7 +100,7 @@ class TestEnvelopeParsing:
             inference_total=7,
             error={"type": "RuntimeError", "message": "x"},
         )
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         # Inference counts captured from envelope at dispatch time.
         meta = reporter._envelope_meta[_P1]
         assert (meta.inference_failure_count, meta.inference_total) == (2, 7)
@@ -122,7 +122,7 @@ class TestEnvelopeParsing:
             error={"type": "RuntimeError", "message": "x"},
         )
         # Should not raise. If validator reads sidecar, JSONDecodeError surfaces.
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
     def test_validator_no_longer_has_read_inference_stats(self, reporter):
@@ -138,7 +138,7 @@ class TestEnvelopeParsing:
             execution_time=42.0,
             error={"type": "TimeoutError", "message": "..."},
         )
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert reporter._results[_P1].execution_time == 42.0
 
     def test_malformed_line_skipped(self, reporter, tmp_path):
@@ -147,7 +147,7 @@ class TestEnvelopeParsing:
             f.write("not json\n")
         _write_envelope(out, problem_id=_P1, status="FAILED", dialogue=None,
                         error={"type": "RuntimeError", "message": "x"})
-        reporter._read_and_dispatch()
+        reporter._envelope_dispatcher.read_and_dispatch()
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
 
@@ -161,13 +161,13 @@ class TestSweepNarrowing:
             dialogue=None,
             error={"type": "RuntimeError", "message": "x"},
         )
-        reporter._read_and_dispatch()
-        reporter._mark_remaining_timed_out()
+        reporter._envelope_dispatcher.read_and_dispatch()
+        reporter._envelope_dispatcher.mark_remaining_timed_out()
         assert reporter._results[_P1].status == ProblemStatus.FAILED
 
     def test_sweep_marks_only_never_seen_problems(self, reporter):
         # No envelope written. Sweep should mark all three TIMED_OUT.
-        reporter._mark_remaining_timed_out()
+        reporter._envelope_dispatcher.mark_remaining_timed_out()
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
