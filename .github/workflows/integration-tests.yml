@@ -12,6 +12,7 @@ on:
       - 'src/sandbox/**'
       - 'tests/integration/**'
       - 'docker-compose.yml'
+      - 'docker-compose.test.yml'
       - '.github/workflows/integration-tests.yml'
 
 jobs:
@@ -51,9 +52,10 @@ jobs:
           docker compose up -d proxy
           timeout 60 bash -c 'until docker compose ps proxy | grep -q "healthy"; do sleep 2; done' || true
 
-      - name: Start sandbox
+      - name: Start sandbox (persistent, test-mode)
         run: |
-          docker compose up -d sandbox
+          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d sandbox
+          docker ps --filter name=shoppingbench-sandbox --format '{{.Names}} {{.Status}}'
 
       - name: Install test dependencies
         run: |

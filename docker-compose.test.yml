@@ -1,0 +1,12 @@
+# Compose override applied only by the Integration Tests CI workflow.
+#
+# Turns the one-shot sandbox into a persistent container that the
+# sandbox-isolation tests can `docker exec` into. The real sandbox use
+# case (`docker compose --profile tools up`) is unchanged — this file
+# is only loaded when explicitly passed via `-f`.
+services:
+  sandbox:
+    container_name: shoppingbench-sandbox
+    profiles: []
+    command: ["sleep", "infinity"]
+    restart: "no"
