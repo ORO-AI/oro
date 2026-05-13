@@ -46,6 +46,42 @@ def split_output_by_problem(
 
         pid = str(envelope["problem_id"])
         dialogue = envelope.get("dialogue") or []
+        status = str(envelope.get("status") or "")
+        # ORO-1147: when the agent terminated abnormally (TIMED_OUT, FAILED,
+        # crash) and the sandbox couldn't capture a dialogue, the envelope
+        # has dialogue=None + error={type,message}. Writing `[]` here loses
+        # that context — downstream consumers (TrajectoryViewer, training
+        # corpus) can't tell "captured nothing" from "literally zero steps."
+        # Synthesize a single trajectory step preserving the error so the
+        # array shape stays valid and the failure context survives.
+        if not dialogue and status and status != "SUCCESS":
+            err_obj = envelope.get("error")
+            if isinstance(err_obj, dict):
+                err_type = str(err_obj.get("type") or "UnknownError")
+                err_msg = str(err_obj.get("message") or "")
+                err_payload = err_obj
+            else:
+                err_type = "UnknownError"
+                err_msg = "" if err_obj is None else str(err_obj)
+                err_payload = {"type": err_type, "message": err_msg}
+            summary = f"Abnormal termination — {status}: {err_type}"
+            if err_msg:
+                summary = f"{summary}: {err_msg}"
+            dialogue = [
+                {
+                    "role": "system",
+                    "content": summary,
+                    "extra_info": {
+                        "abnormal_termination": True,
+                        "problem_id": pid,
+                        "status": status,
+                        "error": err_payload,
+                        "execution_time": envelope.get("execution_time"),
+                        "inference_failure_count": envelope.get("inference_failure_count"),
+                        "inference_total": envelope.get("inference_total"),
+                    },
+                }
+            ]
         problem_lines[pid] = json.dumps(dialogue).encode("utf-8")
 
     if not problem_lines and problem_ids:

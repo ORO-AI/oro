@@ -61,9 +61,10 @@ def test_unparseable_lines_skipped(tmp_path: Path) -> None:
     assert set(result) == {good["problem_id"]}
 
 
-def test_empty_dialogue_yields_empty_list_payload(tmp_path: Path) -> None:
-    """Sandbox crash before any agent step still produces a per-problem entry
-    with payload `[]` (Frontend renders 'no trajectory' for that problem)."""
+def test_empty_dialogue_on_success_yields_empty_list_payload(tmp_path: Path) -> None:
+    """SUCCESS status with no dialogue is a real edge case (shouldn't happen
+    in practice) — preserve the empty-array shape so consumers don't trip on
+    a synthetic step they don't expect."""
     pid = str(uuid4())
     envelope = {**_envelope(pid), "dialogue": None}
     f = _write_jsonl(tmp_path, [json.dumps(envelope)])
@@ -71,6 +72,52 @@ def test_empty_dialogue_yields_empty_list_payload(tmp_path: Path) -> None:
     result = split_output_by_problem(f, [UUID(pid)])
 
     assert json.loads(result[pid]) == []
+
+
+def test_abnormal_termination_synthesizes_step_with_error_metadata(tmp_path: Path) -> None:
+    """ORO-1147: FAILED / TIMED_OUT envelopes have dialogue=None plus an error
+    object. Previously the splitter wrote `[]` and lost the failure context.
+    Now it synthesizes a single step carrying status + error so the artifact
+    array shape stays valid and downstream consumers can distinguish abnormal
+    termination from a zero-step trajectory."""
+    pid = str(uuid4())
+    envelope = {
+        **_envelope(pid),
+        "status": "TIMED_OUT",
+        "dialogue": None,
+        "error": {"type": "TimeoutError", "message": "Sandbox timeout after 300.0s"},
+        "execution_time": 300.0,
+    }
+    f = _write_jsonl(tmp_path, [json.dumps(envelope)])
+
+    payload = json.loads(split_output_by_problem(f, [UUID(pid)])[pid])
+
+    assert isinstance(payload, list) and len(payload) == 1
+    step = payload[0]
+    assert step["role"] == "system"
+    assert "TIMED_OUT" in step["content"]
+    assert "TimeoutError" in step["content"]
+    info = step["extra_info"]
+    assert info["abnormal_termination"] is True
+    assert info["status"] == "TIMED_OUT"
+    assert info["error"]["type"] == "TimeoutError"
+    assert info["problem_id"] == pid
+    assert info["execution_time"] == 300.0
+
+
+def test_abnormal_termination_with_missing_error_object(tmp_path: Path) -> None:
+    """FAILED envelopes occasionally arrive with error=None (process exited
+    with code N but produced no result). Still synthesize a step — don't
+    crash on the missing error dict."""
+    pid = str(uuid4())
+    envelope = {**_envelope(pid), "status": "FAILED", "dialogue": None, "error": None}
+    f = _write_jsonl(tmp_path, [json.dumps(envelope)])
+
+    payload = json.loads(split_output_by_problem(f, [UUID(pid)])[pid])
+
+    assert len(payload) == 1
+    assert payload[0]["extra_info"]["abnormal_termination"] is True
+    assert payload[0]["extra_info"]["error"]["type"] == "UnknownError"
 
 
 def test_empty_file_falls_back_to_first_problem_id(tmp_path: Path) -> None:
