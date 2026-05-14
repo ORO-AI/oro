@@ -27,8 +27,40 @@
 // allowlist validation, so the same agent code works on either provider.
 // Models with no pair entry pass through unchanged and hit the existing
 // allowlist check as before.
+//
+// Per-request outcome tagging: `$upstream_status` on the parent /inference/
+// access log line is always `-` because the location uses `js_content` rather
+// than `proxy_pass`. To let CloudWatch metric filters distinguish
+// upstream-relayed errors (Chutes/OpenRouter returned 5xx) from proxy-internal
+// failures (allowlist unavailable, model not allowed), we stash a short label
+// on the request object before every `r.return(...)` and expose it via
+// `js_set $proxy_outcome validate_model.outcome` so it lands in the access
+// log. See ORO-1159.
 
 import fs from "fs";
+
+// Tag this request with what happened so the access log can record it.
+// Called before every r.return(...) in validate(). Read back via outcome(r)
+// which is bound to $proxy_outcome by js_set in nginx.conf.template.
+function _tag(r, label) {
+  r._oroOutcome = label;
+}
+
+function outcome(r) {
+  return r._oroOutcome || "unknown";
+}
+
+// Build the upstream-* label from a subrequest reply status. Keeps the label
+// space small enough for CloudWatch term-match patterns: filters key off the
+// `upstream-2xx-` / `upstream-4xx-` / `upstream-5xx-` prefix.
+function _upstreamLabel(status) {
+  var bucket;
+  if (status >= 500 && status < 600) bucket = "5xx";
+  else if (status >= 400 && status < 500) bucket = "4xx";
+  else if (status >= 200 && status < 300) bucket = "ok";
+  else bucket = "other";
+  return "upstream-" + bucket + "-" + status;
+}
 
 function detectProvider(r) {
   var auth = r.headersIn["Authorization"] || "";
@@ -156,6 +188,7 @@ function validate(r) {
   if (r.method !== "POST") {
     var passUri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(passUri, { method: r.method, args: r.variables.args || "" }, function (reply) {
+      _tag(r, _upstreamLabel(reply.status));
       for (var h in reply.headersOut) {
         r.headersOut[h] = reply.headersOut[h];
       }
@@ -167,6 +200,7 @@ function validate(r) {
   var body = r.requestText;
 
   if (!body) {
+    _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
     r.return(400, JSON.stringify({ error: "Missing or unreadable request body" }));
     return;
@@ -176,18 +210,21 @@ function validate(r) {
   try {
     parsed = JSON.parse(body);
   } catch (e) {
+    _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
     r.return(400, JSON.stringify({ error: "Invalid JSON in request body" }));
     return;
   }
 
   if (!parsed.model) {
+    _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
     r.return(400, JSON.stringify({ error: "Missing 'model' field in request body" }));
     return;
   }
 
   if (parsed.stream === true) {
+    _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
     r.return(400, JSON.stringify({ error: "Streaming is not supported through the proxy" }));
     return;
@@ -202,12 +239,14 @@ function validate(r) {
 
   getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
+      _tag(r, "internal-allowlist-unavailable");
       r.headersOut["Content-Type"] = "application/json";
       r.return(503, JSON.stringify({ error: "Inference allowlist unavailable" }));
       return;
     }
 
     if (allowed.indexOf(parsed.model) === -1) {
+      _tag(r, "internal-model-not-allowed");
       r.error("Model not allowed for " + provider + ": " + parsed.model);
       r.headersOut["Content-Type"] = "application/json";
       r.return(
@@ -225,6 +264,7 @@ function validate(r) {
       uri,
       { method: "POST", body: forwardBody, args: r.variables.args || "" },
       function (reply) {
+        _tag(r, _upstreamLabel(reply.status));
         for (var h in reply.headersOut) {
           r.headersOut[h] = reply.headersOut[h];
         }
@@ -234,4 +274,4 @@ function validate(r) {
   });
 }
 
-export default { validate };
+export default { validate: validate, outcome: outcome };

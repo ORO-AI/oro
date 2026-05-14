@@ -6,6 +6,14 @@ http {
     # Load njs validation script
     js_import validate_model from /etc/nginx/validate_model.js;
 
+    # Per-request outcome label written by validate_model.js. `js_set` makes
+    # the variable lazy: nginx calls `validate_model.outcome(r)` only when the
+    # value is needed (at access-log time), which returns whatever label the
+    # njs handler stashed on the request before `r.return(...)`. Lets metric
+    # filters tell `upstream-5xx-503` (Chutes parrot, dashboard) apart from
+    # `internal-allowlist-unavailable` (proxy broken, page). See ORO-1159.
+    js_set $proxy_outcome validate_model.outcome;
+
     # Cross-worker shared cache for the inference allowlist. njs module-level
     # vars are per-worker, so 8 workers each cold-start with an empty cache
     # and 8 simultaneous fetches storm the Backend, where some get 429 and
@@ -23,16 +31,20 @@ http {
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
-    # Combined access log + upstream metadata. `$upstream_status` is `-` when
-    # the request never reached an upstream (e.g. njs short-circuit via
-    # `r.return(503, ...)`), and the actual upstream HTTP status when a
-    # `proxy_pass` ran. CloudWatch metric filters key off `ups=` to tell apart
-    # "upstream returned 5xx the proxy correctly forwarded" from "proxy itself
-    # could not serve the request". See ORO-1159.
+    # Combined access log + upstream metadata + per-request outcome label.
+    # `$upstream_status` propagates the upstream HTTP status when a parent
+    # location uses `proxy_pass` (e.g. /search/*) but stays `-` when the
+    # parent uses `js_content` and dispatches to upstream via an njs
+    # subrequest (e.g. /inference/). `$proxy_outcome` covers the gap for the
+    # inference path — see js_set above and validate_model.js. CloudWatch
+    # metric filters key off `outcome=upstream-5` vs `outcome=internal-` to
+    # tell upstream-relayed 5xx apart from proxy-internal failures. See
+    # ORO-1159.
     log_format inference_combined '$remote_addr - $remote_user [$time_local] '
                                   '"$request" $status $body_bytes_sent '
                                   '"$http_referer" "$http_user_agent" '
-                                  'ups=$upstream_status urt=$upstream_response_time';
+                                  'ups=$upstream_status urt=$upstream_response_time '
+                                  'outcome=$proxy_outcome';
 
     # Local-only stub_status endpoint for nginx-prometheus-exporter. On a
     # separate listener so it never conflicts with the public proxy paths
