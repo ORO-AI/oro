@@ -23,6 +23,17 @@ http {
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
+    # Combined access log + upstream metadata. `$upstream_status` is `-` when
+    # the request never reached an upstream (e.g. njs short-circuit via
+    # `r.return(503, ...)`), and the actual upstream HTTP status when a
+    # `proxy_pass` ran. CloudWatch metric filters key off `ups=` to tell apart
+    # "upstream returned 5xx the proxy correctly forwarded" from "proxy itself
+    # could not serve the request". See ORO-1159.
+    log_format inference_combined '$remote_addr - $remote_user [$time_local] '
+                                  '"$request" $status $body_bytes_sent '
+                                  '"$http_referer" "$http_user_agent" '
+                                  'ups=$upstream_status urt=$upstream_response_time';
+
     # Local-only stub_status endpoint for nginx-prometheus-exporter. On a
     # separate listener so it never conflicts with the public proxy paths
     # and can never be reached from the sandbox network.
@@ -40,6 +51,11 @@ http {
 
     server {
         listen 80;
+
+        # Emit the upstream-aware combined format so CloudWatch metric filters
+        # can split inference 503s by source (ORO-1159). /stub_status and
+        # /health below opt out via their own `access_log off`.
+        access_log /dev/stdout inference_combined;
 
         # Default deny — block any path not explicitly handled below
         location / {
