@@ -25,12 +25,7 @@ from .url_utils import rewrite_localhost_url
 
 
 class SandboxRunner:
-    """Download agents and run them in the docker sandbox.
-
-    `eval_dir_for` is a callable returning the per-evaluation directory for an
-    eval_run_id — injected so this class doesn't need to know the workspace
-    layout.
-    """
+    """Download agents and run them in the docker sandbox."""
 
     def __init__(self, config: Config, eval_dir_for: Callable[[str], Path]):
         self.config = config

@@ -105,19 +105,13 @@ class Validator:
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
 
-        # Expose a /metrics endpoint for the bundled Prometheus to scrape.
-        # Default registry already includes Python process collectors (CPU,
-        # memory, fd count, GC). Bound to 0.0.0.0 inside the container; the
-        # docker network keeps it off the public internet.
         from prometheus_client import start_http_server
 
         start_http_server(METRICS_PORT)
         logging.info(f"Prometheus /metrics server listening on :{METRICS_PORT}")
 
-        # Track current execution state for debugging
         self._current_eval_run_id = None
 
-        # Check for updates every 5 minutes even when idle
         UPDATE_CHECK_INTERVAL = 300
         self._last_update_check = 0
 
@@ -137,10 +131,9 @@ class Validator:
         try:
             while True:
                 try:
-                    # Check for image updates every 5 minutes
                     if time.time() - self._last_update_check >= UPDATE_CHECK_INTERVAL:
-                        auto_update.check_for_updates()
-                        self.service_versions = collect_service_versions()
+                        if auto_update.check_for_updates():
+                            self.service_versions = collect_service_versions()
                         self._last_update_check = time.time()
 
                     # Log current state

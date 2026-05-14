@@ -31,15 +31,34 @@ from .url_utils import rewrite_localhost_url
 
 
 class CompletionReporter:
-    """Reports terminal evaluation state (success or failure) to the Backend.
-
-    Holds references to the backend client and retry queue so failure paths
-    don't need to thread them through every call site.
-    """
+    """Reports terminal evaluation state (success or failure) to the Backend."""
 
     def __init__(self, backend_client: BackendClient, retry_queue: LocalRetryQueue):
         self.backend_client = backend_client
         self.retry_queue = retry_queue
+
+    def _handle_backend_error(
+        self,
+        e: BackendError,
+        eval_run_id: UUID,
+        retry_payload: CompletionRequest,
+        action: str,
+    ) -> None:
+        """Classify a BackendError: log + (for transient) enqueue retry."""
+        if e.is_run_already_complete:
+            logging.info(f"Run {eval_run_id} already complete, skipping")
+        elif e.is_not_run_owner:
+            logging.warning(f"Lost ownership of run {eval_run_id}, skipping")
+        elif e.is_eval_run_not_found:
+            logging.warning(f"Run {eval_run_id} not found, skipping")
+        elif e.is_transient:
+            logging.warning(f"Backend unavailable for {action}, queueing retry: {e}")
+            self.retry_queue.add(retry_payload)
+        else:
+            logging.error(
+                f"Non-transient error on {action} for {eval_run_id}: {e} "
+                f"(status_code={e.status_code}, error_code={e.error_code})"
+            )
 
     def upload_logs(
         self,
@@ -82,8 +101,7 @@ class CompletionReporter:
                     problem_id=pid,
                 )
 
-                if hasattr(presign, "upload_url"):
-                    presign.upload_url = rewrite_localhost_url(presign.upload_url)
+                presign.upload_url = rewrite_localhost_url(presign.upload_url)
 
                 self.backend_client.upload_to_s3(presign, compressed)
                 logging.info(f"Uploaded logs to {presign.results_s3_key}")
@@ -141,28 +159,19 @@ class CompletionReporter:
                 f"eligible={result.agent_version_became_eligible}"
             )
         except BackendError as e:
-            if e.is_run_already_complete:
-                logging.info(f"Run {eval_run_id} already complete, skipping")
-            elif e.is_not_run_owner:
-                logging.warning(f"Lost ownership of run {eval_run_id}, skipping")
-            elif e.is_eval_run_not_found:
-                logging.warning(f"Run {eval_run_id} not found, skipping")
-            elif e.is_transient:
-                logging.warning(
-                    f"Backend unavailable for complete, queueing retry: {e}"
-                )
-                self.retry_queue.add(
-                    CompletionRequest(
-                        eval_run_id=eval_run_id,
-                        status=status,
-                        validator_score=score,
-                        score_components=score_components,
-                        results_s3_key=results_s3_key,
-                        sandbox_metadata=sandbox_metadata,
-                    )
-                )
-            else:
-                logging.error(f"Non-transient error completing run {eval_run_id}: {e}")
+            self._handle_backend_error(
+                e,
+                eval_run_id,
+                CompletionRequest(
+                    eval_run_id=eval_run_id,
+                    status=status,
+                    validator_score=score,
+                    score_components=score_components,
+                    results_s3_key=results_s3_key,
+                    sandbox_metadata=sandbox_metadata,
+                ),
+                action="complete",
+            )
 
     def complete_with_failure(
         self,
@@ -186,29 +195,17 @@ class CompletionReporter:
                 f"status={result.status}, work_item_closed={result.work_item.is_closed}"
             )
         except BackendError as e:
-            if e.is_run_already_complete:
-                logging.info(f"Run {eval_run_id} already complete, skipping")
-            elif e.is_not_run_owner:
-                logging.warning(f"Lost ownership of run {eval_run_id}, skipping")
-            elif e.is_eval_run_not_found:
-                logging.warning(f"Run {eval_run_id} not found, skipping")
-            elif e.is_transient:
-                logging.warning(
-                    f"Backend unavailable for failure report, queueing retry: {e}"
-                )
-                self.retry_queue.add(
-                    CompletionRequest(
-                        eval_run_id=eval_run_id,
-                        status=status,
-                        failure_reason=reason,
-                        sandbox_metadata=sandbox_metadata,
-                    )
-                )
-            else:
-                logging.error(
-                    f"Non-transient error reporting failure for {eval_run_id}: {e} "
-                    f"(status_code={e.status_code}, error_code={e.error_code})"
-                )
+            self._handle_backend_error(
+                e,
+                eval_run_id,
+                CompletionRequest(
+                    eval_run_id=eval_run_id,
+                    status=status,
+                    failure_reason=reason,
+                    sandbox_metadata=sandbox_metadata,
+                ),
+                action="failure report",
+            )
         except Exception as e:
             logging.error(
                 f"Unexpected error reporting failure to Backend: {type(e).__name__}: {e}"

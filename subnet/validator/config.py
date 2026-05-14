@@ -1,8 +1,4 @@
-"""Validator config + logging setup.
-
-Extracted from `main.py` so the argparse surface lives in one place and tests
-can build a `Config` without touching the rest of the validator.
-"""
+"""Validator CLI argument parsing + bittensor logging configuration."""
 
 from __future__ import annotations
 

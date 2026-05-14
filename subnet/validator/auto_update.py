@@ -26,10 +26,14 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
 )
 
 
-def check_for_updates() -> None:
-    """Trigger Watchtower + pull sandbox image. Returns when proxy is healthy."""
+def check_for_updates() -> bool:
+    """Trigger Watchtower + pull sandbox image. Returns when proxy is healthy.
+
+    Returns True if the update cycle ran (caller should re-collect service
+    versions), False when auto-update is disabled.
+    """
     if not AUTO_UPDATE_ENABLED:
-        return
+        return False
 
     try:
         logging.info("Triggering Watchtower update check...")
@@ -68,3 +72,5 @@ def check_for_updates() -> None:
             logging.warning(f"Sandbox image pull failed: {result.stderr.strip()}")
     except (subprocess.SubprocessError, OSError, FileNotFoundError) as e:
         logging.warning(f"Sandbox image pull failed: {e}")
+
+    return True
