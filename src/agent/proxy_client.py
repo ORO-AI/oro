@@ -52,26 +52,18 @@ class RequestLog:
         if params:
             entry["params"] = {k: v for k, v in params.items() if v is not None}
         if json_data:
-            if "/inference/" in path:
-                # Omit large message arrays from inference requests
-                entry["json_data"] = {k: v for k, v in json_data.items() if k != "messages"}
-            else:
-                entry["json_data"] = json_data
+            entry["json_data"] = json_data
         if response_body is not None:
-            body_str = json.dumps(response_body, default=str)
-            if len(body_str) > 2000:
-                entry["response_truncated"] = True
-                entry["response_length"] = len(body_str)
-                if "/search/find_product" in path and isinstance(response_body, list):
-                    # Preserve product IDs so the reasoning judge can verify the
-                    # agent's selections came from actual search results.
-                    entry["result_product_ids"] = [
-                        str(item["product_id"])
-                        for item in response_body
-                        if isinstance(item, dict) and "product_id" in item
-                    ]
-            else:
-                entry["response"] = response_body
+            entry["response"] = response_body
+            if "/search/find_product" in path and isinstance(response_body, list):
+                # Redundant index of product IDs so consumers that bucket only
+                # by summary fields (e.g. the reasoning judge) don't have to
+                # re-parse the full response list.
+                entry["result_product_ids"] = [
+                    str(item["product_id"])
+                    for item in response_body
+                    if isinstance(item, dict) and "product_id" in item
+                ]
         self._write(entry)
 
     def record_attempt(
@@ -259,7 +251,9 @@ class ProxyClient:
                 status_code = response.status_code
                 if response.status_code == 200:
                     self.request_log.record_attempt(
-                        method, path, i,
+                        method,
+                        path,
+                        i,
                         (time.monotonic() - attempt_t0) * 1000,
                         status_code=status_code,
                     )
@@ -282,7 +276,9 @@ class ProxyClient:
                 response = None
 
             self.request_log.record_attempt(
-                method, path, i,
+                method,
+                path,
+                i,
                 (time.monotonic() - attempt_t0) * 1000,
                 status_code=status_code,
                 error_class=error_class,
@@ -290,8 +286,10 @@ class ProxyClient:
 
             if i < self.max_retries - 1:
                 is_rate_limited = response is not None and response.status_code == 429
-                base_delay = self.rate_limit_retry_delay if is_rate_limited else self.retry_delay
-                delay = min(base_delay * (2 ** i), 10)
+                base_delay = (
+                    self.rate_limit_retry_delay if is_rate_limited else self.retry_delay
+                )
+                delay = min(base_delay * (2**i), 10)
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")

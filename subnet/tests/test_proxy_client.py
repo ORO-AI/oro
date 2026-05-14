@@ -176,17 +176,18 @@ class TestRequestLog:
         finally:
             os.unlink(path)
 
-    def test_inference_body_omits_messages(self):
+    def test_inference_body_preserved(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
             log = RequestLog(log_file=path)
+            messages = [{"role": "user", "content": "very long prompt..."}]
             log.record(
                 method="POST",
                 path="/inference/chat/completions",
                 json_data={
                     "model": "gpt-4",
-                    "messages": [{"role": "user", "content": "very long prompt..."}],
+                    "messages": messages,
                     "temperature": 0.7,
                 },
                 status_code=200,
@@ -196,13 +197,13 @@ class TestRequestLog:
             with open(path) as f:
                 entry = json.loads(f.readline())
 
-            assert "messages" not in entry["json_data"]
+            assert entry["json_data"]["messages"] == messages
             assert entry["json_data"]["model"] == "gpt-4"
             assert entry["json_data"]["temperature"] == 0.7
         finally:
             os.unlink(path)
 
-    def test_large_response_truncated(self):
+    def test_large_response_preserved(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
@@ -219,13 +220,13 @@ class TestRequestLog:
             with open(path) as f:
                 entry = json.loads(f.readline())
 
-            assert entry["response_truncated"] is True
-            assert entry["response_length"] > 2000
-            assert "response" not in entry
+            assert entry["response"] == large_body
+            assert "response_truncated" not in entry
+            assert "response_length" not in entry
         finally:
             os.unlink(path)
 
-    def test_find_product_preserves_ids_when_truncated(self):
+    def test_find_product_extracts_result_ids_alongside_full_response(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
@@ -246,13 +247,13 @@ class TestRequestLog:
             with open(path) as f:
                 entry = json.loads(f.readline())
 
-            assert entry["response_truncated"] is True
+            assert entry["response"] == large_results
             assert entry["result_product_ids"] == [f"pid-{i}" for i in range(10)]
-            assert "response" not in entry
+            assert "response_truncated" not in entry
         finally:
             os.unlink(path)
 
-    def test_view_product_truncation_does_not_add_result_ids(self):
+    def test_view_product_full_response_no_result_ids(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
             path = f.name
         try:
@@ -273,8 +274,44 @@ class TestRequestLog:
             with open(path) as f:
                 entry = json.loads(f.readline())
 
-            assert entry["response_truncated"] is True
+            assert entry["response"] == large_results
             assert "result_product_ids" not in entry
+        finally:
+            os.unlink(path)
+
+    def test_inference_response_preserves_usage_for_judge(self):
+        """Regression: judge reads response.usage.completion_tokens; truncation
+        used to strip the entire response body, breaking token tracking."""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            log = RequestLog(log_file=path)
+            full_inference_response = {
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "y" * 5000},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 800,
+                    "completion_tokens": 1200,
+                    "total_tokens": 2000,
+                },
+            }
+            log.record(
+                method="POST",
+                path="/inference/chat/completions",
+                status_code=200,
+                response_body=full_inference_response,
+                duration_ms=2500.0,
+            )
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+
+            assert entry["response"]["usage"]["completion_tokens"] == 1200
+            assert entry["response"]["choices"][0]["finish_reason"] == "stop"
         finally:
             os.unlink(path)
 
