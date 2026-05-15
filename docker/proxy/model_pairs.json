@@ -8,10 +8,12 @@
     { "chutes": "tngtech/DeepSeek-TNG-R1T2-Chimera-TEE",    "openrouter": "tngtech/deepseek-r1t2-chimera" },
     { "chutes": "Qwen/Qwen3-32B-TEE",                        "openrouter": "qwen/qwen3-32b" },
     { "chutes": "Qwen/Qwen3.5-397B-A17B-TEE",               "openrouter": "qwen/qwen3.5-397b-a17b" },
+    { "chutes": "Qwen/Qwen3.6-27B-TEE",                      "openrouter": "qwen/qwen3.6-27b" },
     { "chutes": "google/gemma-4-31B-turbo-TEE",             "openrouter": "google/gemma-4-31b-it" },
     { "chutes": "zai-org/GLM-5-TEE",                         "openrouter": "z-ai/glm-5" },
     { "chutes": "zai-org/GLM-5.1-TEE",                       "openrouter": "z-ai/glm-5.1" },
     { "chutes": "moonshotai/Kimi-K2.5-TEE",                  "openrouter": "moonshotai/kimi-k2.5" },
+    { "chutes": "moonshotai/Kimi-K2.6-TEE",                  "openrouter": "moonshotai/kimi-k2.6" },
     { "chutes": "MiniMaxAI/MiniMax-M2.5-TEE",               "openrouter": "minimax/minimax-m2.5" },
     { "chutes": "XiaomiMiMo/MiMo-V2-Flash-TEE",             "openrouter": "xiaomi/mimo-v2-flash" }
   ]
