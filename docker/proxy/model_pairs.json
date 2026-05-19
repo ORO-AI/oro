@@ -15,6 +15,7 @@
     { "chutes": "moonshotai/Kimi-K2.5-TEE",                  "openrouter": "moonshotai/kimi-k2.5" },
     { "chutes": "moonshotai/Kimi-K2.6-TEE",                  "openrouter": "moonshotai/kimi-k2.6" },
     { "chutes": "MiniMaxAI/MiniMax-M2.5-TEE",               "openrouter": "minimax/minimax-m2.5" },
-    { "chutes": "XiaomiMiMo/MiMo-V2-Flash-TEE",             "openrouter": "xiaomi/mimo-v2-flash" }
+    { "chutes": "XiaomiMiMo/MiMo-V2-Flash-TEE",             "openrouter": "xiaomi/mimo-v2-flash" },
+    { "chutes": "openai/gpt-oss-120b-TEE",                   "openrouter": "openai/gpt-oss-120b" }
   ]
 }
