@@ -8,10 +8,10 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Install Python dependencies
-# The agent needs requests for HTTP calls
-# ujson is needed by ProblemScorer for per-problem scoring
-RUN pip install --no-cache-dir requests ujson
+# requests: agent HTTP calls
+# ujson: ProblemScorer per-problem scoring
+# fastapi/uvicorn/pydantic: sandbox_server.py HTTP mode
+RUN pip install --no-cache-dir requests ujson fastapi 'uvicorn[standard]' pydantic
 
 # Copy agent code and source structure
 COPY src /app/src

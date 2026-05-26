@@ -358,10 +358,15 @@ def _classify_error_type(
 
 
 def _format_single_result(result: ExecutionResult) -> str:
-    """Format an ExecutionResult as one JSONL envelope line.
+    return json.dumps(build_result_envelope(result))
 
-    Always returns a non-empty line — failures emit with dialogue=null so the
-    validator's ProgressReporter sees every problem outcome through one channel.
+
+def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
+    """Canonical on-the-wire shape for an ExecutionResult.
+
+    Stamps per-step extra_info, distributes proxy_calls across dialogue steps,
+    and normalizes errors to {type, message}. Used by both the JSONL writer
+    and the HTTP server so consumers see identical envelopes.
     """
     dialogue: Optional[List[Dict]] = None
     if result.success and isinstance(result.result, list):
@@ -412,7 +417,7 @@ def _format_single_result(result: ExecutionResult) -> str:
                 "message": result.error,
             }
 
-    envelope = {
+    return {
         "problem_id": result.problem_id,
         "status": result.status.value,
         "execution_time": result.execution_time,
@@ -421,7 +426,6 @@ def _format_single_result(result: ExecutionResult) -> str:
         "error": error_obj,
         "dialogue": dialogue,
     }
-    return json.dumps(envelope)
 
 
 def execute_problems_parallel(
@@ -488,8 +492,7 @@ def execute_problems_parallel(
                     )
 
                     if fout is not None:
-                        line = _format_single_result(result)
-                        fout.write(line + "\n")
+                        fout.write(json.dumps(build_result_envelope(result)) + "\n")
                         fout.flush()
 
                 except FutureTimeoutError:
