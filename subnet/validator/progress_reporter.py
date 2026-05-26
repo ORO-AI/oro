@@ -186,6 +186,7 @@ class ProgressReporter:
                 "reasoning_coefficient": reasoning_coefficient(0.0),
                 "judge_inference_failed": 0,
                 "judge_inference_total": 0,
+                "judge_inference_402": 0,
             }
 
         judged = [r for r in results if r.reasoning_score is not None]
@@ -194,6 +195,7 @@ class ProgressReporter:
         coeff = reasoning_coefficient(avg)
         total_inf_failed = sum(r.reasoning_inf_failed for r in results)
         total_inf_total = sum(r.reasoning_inf_total for r in results)
+        total_inf_402 = sum(r.reasoning_inf_402 for r in results)
 
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
@@ -205,6 +207,7 @@ class ProgressReporter:
             "reasoning_coefficient": coeff,
             "judge_inference_failed": total_inf_failed,
             "judge_inference_total": total_inf_total,
+            "judge_inference_402": total_inf_402,
         }
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:

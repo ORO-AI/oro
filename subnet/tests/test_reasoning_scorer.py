@@ -347,6 +347,24 @@ class TestScoreReasoningQuality:
     def test_judge_models_nonempty(self):
         assert len(JUDGE_MODELS) >= 1
 
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_short_circuits_on_402_without_retry(self, mock_post, _mock_sleep):
+        """HTTP 402 = miner out of credits. The same token is used for
+        every model in the rotation, so retrying is guaranteed to fail
+        too. The scorer must short-circuit on the first 402 and surface
+        inference_402 to the caller."""
+        mock_post.return_value = MagicMock(
+            status_code=402,
+            text='{"error":{"message":"This request requires more credits"}}',
+        )
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+        assert result["score"] == 0.0
+        assert result["inference_402"] == 1
+        assert result["inference_failed"] == 1
+        assert result["inference_total"] == 1
+        assert mock_post.call_count == 1
+
 
 class TestFetchRankedModels:
     """Tests for the Backend ranked-endpoint consumer."""

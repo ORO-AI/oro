@@ -51,4 +51,5 @@ class ProblemResult:
     reasoning_model: str = ""
     reasoning_inf_failed: int = 0
     reasoning_inf_total: int = 0
+    reasoning_inf_402: int = 0
     execution_time: float | None = None

@@ -611,7 +611,7 @@ def score_reasoning_quality(
         Dict with 'score' (float 0-1), 'explanation' (str),
         'model' (str), 'inference_failed' (int), 'inference_total' (int).
     """
-    empty = {"score": 0.0, "explanation": "", "model": "", "inference_failed": 0, "inference_total": 0}
+    empty = {"score": 0.0, "explanation": "", "model": "", "inference_failed": 0, "inference_total": 0, "inference_402": 0}
     if not dialogue:
         return empty
 
@@ -631,6 +631,7 @@ def score_reasoning_quality(
     model_idx = 0
     inference_failed = 0
     inference_total = 0
+    inference_402 = 0
     for attempt in range(max_retries):
         if len(bad_models) >= len(models):
             logger.error(
@@ -676,6 +677,7 @@ def score_reasoning_quality(
                         "model": model,
                         "inference_failed": inference_failed,
                         "inference_total": inference_total,
+                        "inference_402": inference_402,
                     }
                 # 200 OK with empty/unparseable body — model is broken upstream
                 # (Chutes serving an unhealthy TEE instance). Blacklist it for
@@ -692,14 +694,18 @@ def score_reasoning_quality(
                 continue
 
             inference_failed += 1
+            if resp.status_code == 402:
+                inference_402 += 1
 
-            # Auth failures are terminal — token is bad, retrying won't help
-            if resp.status_code in (401, 403):
+            # Auth failures are terminal — token is bad, retrying won't help.
+            # 402 = miner out of credits; same token is used across every
+            # rotation model, so retrying any other model hits the same wall.
+            if resp.status_code in (401, 402, 403):
                 logger.error(
-                    f"Judge auth failure ({resp.status_code}) with {model}, "
-                    f"aborting (bad or expired token)"
+                    f"Judge {resp.status_code} with {model}, aborting: "
+                    f"{resp.text[:200]}"
                 )
-                return {**empty, "inference_failed": inference_failed, "inference_total": inference_total}
+                return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}
 
             if resp.status_code in (429, 502, 503, 504):
                 logger.warning(
@@ -724,4 +730,4 @@ def score_reasoning_quality(
             model_idx += 1
 
     logger.error(f"All {max_retries} judge retries exhausted, returning 0.0")
-    return {**empty, "inference_failed": inference_failed, "inference_total": inference_total}
+    return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}

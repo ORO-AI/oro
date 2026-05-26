@@ -26,6 +26,7 @@ _EMPTY_RESULT: Dict[str, Any] = {
     "reasoning_model": "",
     "reasoning_inf_failed": 0,
     "reasoning_inf_total": 0,
+    "reasoning_inf_402": 0,
 }
 
 
@@ -64,8 +65,19 @@ class ReasoningJudge:
 
             inf_failed = judge_result["inference_failed"]
             inf_total = judge_result["inference_total"]
+            inf_402 = judge_result["inference_402"]
             with self._lock:
-                if inf_total > 0 and inf_failed == inf_total:
+                # Any 402 trips the breaker immediately — the miner's
+                # token can't afford a single judge call, and the same
+                # token is reused across every rotation model.
+                if inf_402 > 0:
+                    self._circuit_open = True
+                    self._consecutive_failures = CIRCUIT_BREAKER_THRESHOLD
+                    logging.error(
+                        f"Reasoning judge circuit breaker tripped on 402 "
+                        f"(miner out of credits) at problem {problem_id}"
+                    )
+                elif inf_total > 0 and inf_failed == inf_total:
                     self._consecutive_failures += 1
                     if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
                         self._circuit_open = True
@@ -87,6 +99,7 @@ class ReasoningJudge:
                 "reasoning_model": judge_result["model"],
                 "reasoning_inf_failed": inf_failed,
                 "reasoning_inf_total": inf_total,
+                "reasoning_inf_402": inf_402,
             }
         except Exception as e:
             logging.warning(f"Reasoning judge failed for {problem_id}: {e}")
