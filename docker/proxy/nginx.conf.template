@@ -116,14 +116,13 @@ http {
         location = /_backend_models {
             internal;
 
-            resolver 1.1.1.1 ipv6=off valid=300s;
-            # Forward the ?provider= arg from the njs subrequest. proxy_pass
-            # with a variable URL drops the original query string, so without
-            # this the Backend always returns the Chutes (default) allowlist
-            # and the OR cache silently stores Chutes-named models.
-            set $backend_models_url ${BACKEND_URL}/v1/public/inference/models?provider=$arg_provider;
+            # Literal URL (no nginx vars) — nginx resolves the hostname once at
+            # startup via libc, which consults /etc/hosts. Lets environments
+            # that need to pin Backend to a specific IP override DNS without
+            # forking the proxy image. Location-match URI replacement still
+            # forwards `?provider=…` from the subrequest automatically.
             proxy_method GET;
-            proxy_pass $backend_models_url;
+            proxy_pass ${BACKEND_URL}/v1/public/inference/models;
             proxy_ssl_server_name on;
             proxy_http_version 1.1;
             # Strip parent-request headers + body and overwrite the framing
