@@ -145,13 +145,12 @@ http {
         location /_chutes_proxy/ {
             internal;
 
-            # DNS resolution for external hostname (use Docker internal DNS)
-            resolver 127.0.0.11 valid=30s;
-            set $chutes_upstream https://${CHUTES_HOST};
-
-            # Strip /_chutes_proxy prefix and map to Chutes /v1/* API
+            # Literal URL — nginx resolves the hostname once at startup via
+            # libc, so the host's /etc/resolv.conf wins. No resolver directive
+            # needed; works under both docker-compose (Docker DNS) and ECS
+            # Fargate (VPC DNS) without per-environment config.
             rewrite ^/_chutes_proxy/(.*) /v1/$1 break;
-            proxy_pass $chutes_upstream;
+            proxy_pass https://${CHUTES_HOST};
             proxy_ssl_server_name on;
 
             # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN)
@@ -173,15 +172,10 @@ http {
         location /_openrouter_proxy/ {
             internal;
 
-            # ipv6=off: openrouter.ai resolves to Cloudflare AAAA records the
-            # Docker bridge can't reach; without this nginx tries IPv6 first
-            # and every request fails with "Network unreachable".
-            resolver 127.0.0.11 ipv6=off valid=30s;
-            set $openrouter_upstream https://${OPENROUTER_HOST};
-
-            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
+            # Literal URL — nginx resolves once at startup via libc (uses
+            # /etc/resolv.conf), bypassing the resolver directive.
             rewrite ^/_openrouter_proxy/(.*) /api/v1/$1 break;
-            proxy_pass $openrouter_upstream;
+            proxy_pass https://${OPENROUTER_HOST};
             proxy_ssl_server_name on;
 
             # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN /
