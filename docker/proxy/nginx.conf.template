@@ -145,12 +145,17 @@ http {
         location /_chutes_proxy/ {
             internal;
 
-            # Literal URL — nginx resolves the hostname once at startup via
-            # libc, so the host's /etc/resolv.conf wins. No resolver directive
-            # needed; works under both docker-compose (Docker DNS) and ECS
-            # Fargate (VPC DNS) without per-environment config.
+            # Per-request DNS via a configurable resolver. Default points at
+            # the Docker-compose embedded resolver; environments without it
+            # (e.g. ECS Fargate) override via PROXY_RESOLVER to their own
+            # DNS (VPC resolver, public DNS, etc.). Keeps the variable
+            # proxy_pass so re-resolution happens on TTL expiry.
+            resolver ${PROXY_RESOLVER};
+            set $chutes_upstream https://${CHUTES_HOST};
+
+            # Strip /_chutes_proxy prefix and map to Chutes /v1/* API
             rewrite ^/_chutes_proxy/(.*) /v1/$1 break;
-            proxy_pass https://${CHUTES_HOST};
+            proxy_pass $chutes_upstream;
             proxy_ssl_server_name on;
 
             # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN)
@@ -172,10 +177,17 @@ http {
         location /_openrouter_proxy/ {
             internal;
 
-            # Literal URL — nginx resolves once at startup via libc (uses
-            # /etc/resolv.conf), bypassing the resolver directive.
+            # Per-request DNS via the configurable resolver (see /_chutes_proxy/
+            # for the rationale). `ipv6=off` is required for openrouter.ai: it
+            # resolves to Cloudflare AAAA records that the Docker bridge can't
+            # reach, and without it every request fails with "Network
+            # unreachable".
+            resolver ${PROXY_RESOLVER} ipv6=off;
+            set $openrouter_upstream https://${OPENROUTER_HOST};
+
+            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
             rewrite ^/_openrouter_proxy/(.*) /api/v1/$1 break;
-            proxy_pass https://${OPENROUTER_HOST};
+            proxy_pass $openrouter_upstream;
             proxy_ssl_server_name on;
 
             # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN /
