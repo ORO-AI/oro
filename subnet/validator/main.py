@@ -36,6 +36,7 @@ from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
+from .drain import DRAIN_FILE, drain_mode_active
 from .models import CompletionRequest
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
@@ -508,6 +509,9 @@ class Validator:
             f"Weight setter started (interval: {self.config.weight_update_interval}s)"
         )
 
+        drain_cache: dict[str, float] = {}
+        drain_logged = False
+
         try:
             while True:
                 try:
@@ -521,6 +525,25 @@ class Validator:
                         logging.warning(
                             f"Still tracking eval run {self._current_eval_run_id} - this should not happen!"
                         )
+
+                    # Drain mode: if an operator has flagged this validator
+                    # for drain (sentinel file present), skip the claim and
+                    # sleep. Any eval already in flight finishes normally —
+                    # the loop only short-circuits NEW claims. See DRAIN_FILE
+                    # docstring for the orchestrator-side contract.
+                    if drain_mode_active(drain_cache):
+                        if not drain_logged:
+                            logging.info(
+                                f"Drain mode active (sentinel: {DRAIN_FILE}) — "
+                                "skipping claim_work, finishing in-flight evals only"
+                            )
+                            drain_logged = True
+                        CLAIM_WORK_TOTAL.labels(result="draining").inc()
+                        time.sleep(self.config.poll_interval)
+                        continue
+                    elif drain_logged:
+                        logging.info("Drain mode cleared — resuming normal claim_work")
+                        drain_logged = False
 
                     # Claim work from Backend
                     logging.info("Claiming work from Backend...")

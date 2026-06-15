@@ -25,7 +25,7 @@ CLAIM_WORK_SECONDS = Histogram(
 CLAIM_WORK_TOTAL = Counter(
     "validator_claim_work_total",
     "Outcome of claim_work polls",
-    labelnames=("result",),  # success | empty | error
+    labelnames=("result",),  # success | empty | error | draining
 )
 
 SANDBOX_ACTIVE = Gauge(
