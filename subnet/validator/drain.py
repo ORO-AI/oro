@@ -4,6 +4,11 @@ Touch ``DRAIN_FILE`` to make the validator stop claiming new work but keep
 finishing in-flight evals. Remove it to resume. Path is overridable via
 ``ORO_DRAIN_FILE``. The orchestrator (AWS ASG drain script, k8s preStop
 hook, manual touch) writes the file; the validator polls it.
+
+Detection latency upper bound: ``DRAIN_CACHE_TTL_SECONDS`` (cache age) +
+the main loop's ``poll_interval`` (next claim opportunity). In the worst
+case a long claim_work response can extend this further. Sub-second
+detection isn't a goal — race-scale-down drain tolerates ~10-15s.
 """
 
 from __future__ import annotations
