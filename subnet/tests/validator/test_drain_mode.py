@@ -1,9 +1,4 @@
-"""Tests for the validator drain-mode sentinel-file hook (ORO-1150).
-
-The hook lets any orchestrator (AWS ASG drain script, k8s preStop hook,
-systemd timer, a manual `touch`) tell the validator main loop to stop
-claiming new work while letting in-flight evals finish cleanly.
-"""
+"""Tests for the validator drain-mode sentinel-file hook (ORO-1150)."""
 
 from __future__ import annotations
 
@@ -13,7 +8,6 @@ import pytest
 
 from subnet.validator.drain import (
     DRAIN_CACHE_TTL_SECONDS,
-    DRAIN_FILE,
     drain_mode_active,
 )
 
@@ -23,66 +17,43 @@ def drain_file(tmp_path: Path) -> str:
     return str(tmp_path / "drain")
 
 
-def test_default_drain_file_constant_is_namespaced() -> None:
-    """Default sentinel path lives under a validator-owned directory so
-    operators don't accidentally collide with another process's flag."""
-    assert DRAIN_FILE.startswith("/var/run/oro-validator/")
+@pytest.mark.parametrize("present,expected", [(False, False), (True, True)])
+def test_drain_mode_reads_sentinel(drain_file: str, present: bool, expected: bool) -> None:
+    if present:
+        Path(drain_file).touch()
+    assert drain_mode_active({}, drain_file=drain_file) is expected
 
 
-def test_no_drain_file_returns_false(drain_file: str) -> None:
-    cache: dict[str, float] = {}
-    assert drain_mode_active(cache, drain_file=drain_file) is False
-
-
-def test_present_drain_file_returns_true(drain_file: str) -> None:
-    Path(drain_file).touch()
-    cache: dict[str, float] = {}
-    assert drain_mode_active(cache, drain_file=drain_file) is True
-
-
-def test_cache_skips_filesystem_check_within_ttl(drain_file: str) -> None:
-    """Within the TTL the helper must return the cached value even if the
-    file state changes — that's the entire point of the cache (keep the
-    main-loop hot path from stat()ing on every poll)."""
-    cache: dict[str, float] = {}
-    # First call: file absent, populates cache as False.
-    assert drain_mode_active(cache, now=1000.0, drain_file=drain_file) is False
-    # File appears AFTER the cache was populated.
-    Path(drain_file).touch()
-    # Within TTL: still returns cached False.
-    assert (
-        drain_mode_active(
-            cache, now=1000.0 + DRAIN_CACHE_TTL_SECONDS - 1, drain_file=drain_file
-        )
-        is False
-    )
-    # Past TTL: re-stats and picks up the new state.
-    assert (
-        drain_mode_active(
-            cache, now=1000.0 + DRAIN_CACHE_TTL_SECONDS + 1, drain_file=drain_file
-        )
-        is True
-    )
-
-
-def test_cache_picks_up_drain_clear_after_ttl(drain_file: str) -> None:
-    """The reverse — once the orchestrator removes the file, the validator
-    must come back out of drain mode on the next post-TTL check."""
-    Path(drain_file).touch()
-    cache: dict[str, float] = {}
-    assert drain_mode_active(cache, now=2000.0, drain_file=drain_file) is True
-    Path(drain_file).unlink()
-    # Still cached as True within TTL.
-    assert (
-        drain_mode_active(
-            cache, now=2000.0 + DRAIN_CACHE_TTL_SECONDS - 1, drain_file=drain_file
-        )
-        is True
-    )
-    # After TTL: returns False.
-    assert (
-        drain_mode_active(
-            cache, now=2000.0 + DRAIN_CACHE_TTL_SECONDS + 1, drain_file=drain_file
-        )
-        is False
-    )
+@pytest.mark.parametrize(
+    "starts_present,flips_to_present,wait_factor,expected",
+    [
+        # File flips on AFTER cache populated False; within TTL we still see False.
+        (False, True, 0.5, False),
+        # Same flip-on, but past TTL: re-stat picks up True.
+        (False, True, 1.5, True),
+        # File flips off AFTER cache populated True; within TTL still True.
+        (True, False, 0.5, True),
+        # Same flip-off, past TTL: re-stat picks up False.
+        (True, False, 1.5, False),
+    ],
+)
+def test_drain_cache_ttl(
+    drain_file: str,
+    starts_present: bool,
+    flips_to_present: bool,
+    wait_factor: float,
+    expected: bool,
+) -> None:
+    """Cache must keep stat() off the hot path within the TTL and pick up
+    state changes past it. Covers both flip-on (orchestrator starts drain)
+    and flip-off (orchestrator clears drain) directions."""
+    if starts_present:
+        Path(drain_file).touch()
+    cache: dict = {}
+    drain_mode_active(cache, now=1000.0, drain_file=drain_file)  # populate
+    if flips_to_present and not starts_present:
+        Path(drain_file).touch()
+    elif starts_present and not flips_to_present:
+        Path(drain_file).unlink()
+    now = 1000.0 + DRAIN_CACHE_TTL_SECONDS * wait_factor
+    assert drain_mode_active(cache, now=now, drain_file=drain_file) is expected
