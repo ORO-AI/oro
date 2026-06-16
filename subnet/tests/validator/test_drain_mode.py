@@ -7,11 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from subnet.validator.drain import (
-    DRAIN_CACHE_TTL_SECONDS,
-    drain_mode_active,
-    handle_drain_tick,
-)
+from subnet.validator.drain import drain_mode_active, handle_drain_tick
 
 
 @pytest.fixture
@@ -23,29 +19,7 @@ def drain_file(tmp_path: Path) -> str:
 def test_drain_mode_reads_sentinel(drain_file, present, expected):
     if present:
         Path(drain_file).touch()
-    assert drain_mode_active({}, drain_file=drain_file) is expected
-
-
-@pytest.mark.parametrize(
-    "starts,flips_to,wait_factor,expected",
-    [
-        (False, True, 0.5, False),  # flip-on within TTL: stale False
-        (False, True, 1.5, True),   # flip-on past TTL: re-stat picks up True
-        (True, False, 0.5, True),   # flip-off within TTL: stale True
-        (True, False, 1.5, False),  # flip-off past TTL: re-stat picks up False
-    ],
-)
-def test_drain_cache_ttl(drain_file, starts, flips_to, wait_factor, expected):
-    if starts:
-        Path(drain_file).touch()
-    cache: dict = {}
-    drain_mode_active(cache, now=1000.0, drain_file=drain_file)
-    if flips_to and not starts:
-        Path(drain_file).touch()
-    elif starts and not flips_to:
-        Path(drain_file).unlink()
-    now = 1000.0 + DRAIN_CACHE_TTL_SECONDS * wait_factor
-    assert drain_mode_active(cache, now=now, drain_file=drain_file) is expected
+    assert drain_mode_active(drain_file=drain_file) is expected
 
 
 def test_drain_mode_fails_closed_on_oserror(tmp_path):
@@ -53,7 +27,7 @@ def test_drain_mode_fails_closed_on_oserror(tmp_path):
     parent = tmp_path / "nope"
     parent.write_text("not a directory")  # NotADirectoryError on stat()
     with patch("subnet.validator.drain.logging") as log:
-        assert drain_mode_active({}, drain_file=str(parent / "drain")) is True
+        assert drain_mode_active(drain_file=str(parent / "drain")) is True
         assert any("fail-CLOSED" in str(c) for c in log.warning.call_args_list)
 
 

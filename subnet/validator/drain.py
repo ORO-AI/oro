@@ -13,32 +13,24 @@ import time
 from .metrics import DRAIN_TICKS_TOTAL
 
 DRAIN_FILE = os.environ.get("ORO_DRAIN_FILE", "/var/run/oro-validator/drain")
-DRAIN_CACHE_TTL_SECONDS = 10
 
 
-def drain_mode_active(
-    cache: dict, *, now: float | None = None, drain_file: str = DRAIN_FILE
-) -> bool:
+def drain_mode_active(*, drain_file: str = DRAIN_FILE) -> bool:
     """True iff drain_file exists. Fail-CLOSED on unreadable path
     (EACCES / ENOTDIR / missing mount) — silently claiming work while
     the orchestrator thinks we're draining is the worse failure mode.
     """
-    t = time.time() if now is None else now
-    if t - cache.get("checked_at", 0.0) < DRAIN_CACHE_TTL_SECONDS:
-        return bool(cache.get("active", False))
-    cache["checked_at"] = t
     try:
         os.stat(drain_file)
-        cache["active"] = True
+        return True
     except FileNotFoundError:
-        cache["active"] = False
+        return False
     except OSError as e:
         logging.warning(
             f"Drain sentinel path unreadable ({type(e).__name__}: {e}) — "
             "fail-CLOSED. Check the host bind mount."
         )
-        cache["active"] = True
-    return cache["active"]
+        return True
 
 
 def handle_drain_tick(
@@ -50,7 +42,7 @@ def handle_drain_tick(
     coincident backend transient can't burn retry budget on reports we
     haven't actually given up on.
     """
-    if drain_mode_active(state, drain_file=drain_file):
+    if drain_mode_active(drain_file=drain_file):
         if not state.get("logged"):
             logging.info("Drain sentinel present — pausing claim_work")
             state["logged"] = True
