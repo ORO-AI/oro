@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import validator.metrics  # noqa: F401 — needed so patch() can resolve the lazy import target
+
 from validator.drain import drain_mode_active, handle_drain_tick
 
 
@@ -26,7 +28,7 @@ def test_drain_mode_fails_closed_on_oserror(tmp_path):
     """Mount-misconfig → fail-CLOSED + WARNING (prevents silent-claim)."""
     parent = tmp_path / "nope"
     parent.write_text("not a directory")  # NotADirectoryError on stat()
-    with patch("validator.drain.logging") as log:
+    with patch("validator.drain._log") as log:
         assert drain_mode_active(drain_file=str(parent / "drain")) is True
         assert any("fail-CLOSED" in str(c) for c in log.warning.call_args_list)
 
@@ -38,7 +40,7 @@ def test_handle_drain_tick_draining_flushes_no_burn(drain_file):
     rq.get_pending_count.return_value = 3
     state: dict = {}
     with patch("validator.metrics.DRAIN_TICKS_TOTAL") as metric, patch(
-        "validator.drain.logging"
+        "validator.drain._log"
     ) as log:
         for _ in range(2):
             assert handle_drain_tick(state, rq, 0.0, drain_file=drain_file) is True
@@ -59,7 +61,7 @@ def test_handle_drain_tick_absent_passes_through(drain_file):
 
 def test_handle_drain_tick_logs_resume_on_clear(drain_file):
     state = {"logged": True}
-    with patch("validator.drain.logging") as log:
+    with patch("validator.drain._log") as log:
         assert handle_drain_tick(state, MagicMock(), 0.0, drain_file=drain_file) is False
         assert state["logged"] is False
         assert any("cleared" in str(c) for c in log.info.call_args_list)

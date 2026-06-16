@@ -12,6 +12,11 @@ import time
 
 DRAIN_FILE = os.environ.get("ORO_DRAIN_FILE", "/var/run/oro-validator/drain")
 
+# bittensor's btlogging configures a stdlib StreamHandler on the "bittensor"
+# logger; the root logger has none. Use the named logger so drain messages
+# actually reach docker logs (rest of the validator does the same).
+_log = logging.getLogger("bittensor")
+
 
 def drain_mode_active(*, drain_file: str = DRAIN_FILE) -> bool:
     """True iff drain_file exists. Fail-CLOSED on unreadable path
@@ -24,7 +29,7 @@ def drain_mode_active(*, drain_file: str = DRAIN_FILE) -> bool:
     except FileNotFoundError:
         return False
     except OSError as e:
-        logging.warning(
+        _log.warning(
             f"Drain sentinel path unreadable ({type(e).__name__}: {e}) — "
             "fail-CLOSED. Check the host bind mount."
         )
@@ -42,7 +47,7 @@ def handle_drain_tick(
     """
     if drain_mode_active(drain_file=drain_file):
         if not state.get("logged"):
-            logging.info("Drain sentinel present — pausing claim_work")
+            _log.info("Drain sentinel present — pausing claim_work")
             state["logged"] = True
         # Lazy import: module-level import triggers dual-registration when
         # test_auto_update imports via `validator.metrics` while this file
@@ -55,6 +60,6 @@ def handle_drain_tick(
         time.sleep(poll_interval)
         return True
     if state.get("logged"):
-        logging.info("Drain sentinel cleared — resuming claim_work")
+        _log.info("Drain sentinel cleared — resuming claim_work")
         state["logged"] = False
     return False
