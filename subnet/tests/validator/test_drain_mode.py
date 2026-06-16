@@ -37,7 +37,7 @@ def test_handle_drain_tick_draining_flushes_no_burn(drain_file):
     rq = MagicMock()
     rq.get_pending_count.return_value = 3
     state: dict = {}
-    with patch("subnet.validator.drain.DRAIN_TICKS_TOTAL") as metric, patch(
+    with patch("subnet.validator.metrics.DRAIN_TICKS_TOTAL") as metric, patch(
         "subnet.validator.drain.logging"
     ) as log:
         for _ in range(2):
@@ -51,7 +51,7 @@ def test_handle_drain_tick_draining_flushes_no_burn(drain_file):
 
 def test_handle_drain_tick_absent_passes_through(drain_file):
     rq = MagicMock()
-    with patch("subnet.validator.drain.DRAIN_TICKS_TOTAL") as metric:
+    with patch("subnet.validator.metrics.DRAIN_TICKS_TOTAL") as metric:
         assert handle_drain_tick({}, rq, 0.0, drain_file=drain_file) is False
         metric.inc.assert_not_called()
         rq.process_pending.assert_not_called()

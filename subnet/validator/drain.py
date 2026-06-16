@@ -10,8 +10,6 @@ import logging
 import os
 import time
 
-from .metrics import DRAIN_TICKS_TOTAL
-
 DRAIN_FILE = os.environ.get("ORO_DRAIN_FILE", "/var/run/oro-validator/drain")
 
 
@@ -46,6 +44,11 @@ def handle_drain_tick(
         if not state.get("logged"):
             logging.info("Drain sentinel present — pausing claim_work")
             state["logged"] = True
+        # Lazy import: module-level import triggers dual-registration when
+        # test_auto_update imports via `validator.metrics` while this file
+        # imports via `subnet.validator.metrics`.
+        from .metrics import DRAIN_TICKS_TOTAL
+
         DRAIN_TICKS_TOTAL.inc()
         if retry_queue.get_pending_count() > 0:
             retry_queue.process_pending(count_attempts=False)
