@@ -25,7 +25,14 @@ CLAIM_WORK_SECONDS = Histogram(
 CLAIM_WORK_TOTAL = Counter(
     "validator_claim_work_total",
     "Outcome of claim_work polls",
-    labelnames=("result",),  # success | empty | error | draining
+    labelnames=("result",),  # success | empty | error
+)
+
+DRAIN_TICKS_TOTAL = Counter(
+    "validator_drain_ticks_total",
+    "Main-loop ticks short-circuited because the drain sentinel was present "
+    "(ORO-1150). Counter is independent of CLAIM_WORK_TOTAL so claim-success "
+    "dashboards aren't skewed by drain windows.",
 )
 
 SANDBOX_ACTIVE = Gauge(

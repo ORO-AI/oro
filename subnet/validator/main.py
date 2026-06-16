@@ -27,6 +27,7 @@ from .metrics import (
     ACTIVE_RUNS,
     CLAIM_WORK_SECONDS,
     CLAIM_WORK_TOTAL,
+    DRAIN_TICKS_TOTAL,
     SANDBOX_ACTIVE,
     SANDBOX_DURATION_SECONDS,
 )
@@ -36,7 +37,7 @@ from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
-from .drain import drain_mode_active
+from .drain import handle_drain_tick
 from .models import CompletionRequest
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
@@ -509,8 +510,7 @@ class Validator:
             f"Weight setter started (interval: {self.config.weight_update_interval}s)"
         )
 
-        drain_cache: dict = {}
-        drain_logged = False
+        self._drain_state: dict = {}
 
         try:
             while True:
@@ -518,24 +518,14 @@ class Validator:
                     # ORO-1150: drain check sits ABOVE auto-update so a
                     # Watchtower image roll can't restart the container
                     # mid-drain (which would kill the in-flight eval the
-                    # feature exists to protect). Also flush the retry
-                    # queue here so any pending completion/score reports
-                    # leave the node before it terminates.
-                    if drain_mode_active(drain_cache):
-                        if not drain_logged:
-                            logging.info(
-                                "Drain sentinel present — skipping new claim_work; "
-                                "in-flight evals finish normally, auto-update suppressed"
-                            )
-                            drain_logged = True
-                        CLAIM_WORK_TOTAL.labels(result="draining").inc()
-                        if self.retry_queue.get_pending_count() > 0:
-                            self.retry_queue.process_pending()
-                        time.sleep(self.config.poll_interval)
+                    # feature exists to protect).
+                    if handle_drain_tick(
+                        self._drain_state,
+                        self.retry_queue,
+                        self.config.poll_interval,
+                        metric_counter=DRAIN_TICKS_TOTAL,
+                    ):
                         continue
-                    elif drain_logged:
-                        logging.info("Drain sentinel cleared — resuming claim_work")
-                        drain_logged = False
 
                     # Check for image updates every 5 minutes
                     if time.time() - self._last_update_check >= UPDATE_CHECK_INTERVAL:

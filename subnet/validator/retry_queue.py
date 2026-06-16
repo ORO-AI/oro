@@ -76,8 +76,21 @@ class LocalRetryQueue:
         data = self._load()
         return len(data["pending"])
 
-    def process_pending(self) -> None:
-        """Attempt to process all pending completions."""
+    def process_pending(self, *, count_attempts: bool = True) -> None:
+        """Attempt to process all pending completions.
+
+        ``count_attempts``: when True (default), each transient failure
+        increments the entry's retry_count and the entry is dropped after
+        ``max_retries`` exhaustions — the right behavior for the post-eval
+        opportunistic flush in the normal loop.
+
+        When False, transient failures do NOT burn retry budget — the
+        entry stays in the queue at the same retry_count. Used by the
+        drain branch (ORO-1150) so a multi-minute drain + coincident
+        backend transient can't permanently drop completion/score reports
+        before instance termination. The next successful loop iteration
+        post-drain re-flushes against the unchanged budget.
+        """
         data = self._load()
         remaining = []
 
@@ -90,14 +103,15 @@ class LocalRetryQueue:
                 else:
                     logging.warning(f"Unknown entry type '{entry_type}', dropping")
             except _TransientRetry:
-                entry["retry_count"] += 1
-                if entry["retry_count"] >= self.max_retries:
-                    logging.error(
-                        f"Max retries ({self.max_retries}) exceeded for "
-                        f"{entry_type} {entry.get('eval_run_id')}, dropping"
-                    )
-                else:
-                    remaining.append(entry)
+                if count_attempts:
+                    entry["retry_count"] += 1
+                    if entry["retry_count"] >= self.max_retries:
+                        logging.error(
+                            f"Max retries ({self.max_retries}) exceeded for "
+                            f"{entry_type} {entry.get('eval_run_id')}, dropping"
+                        )
+                        continue
+                remaining.append(entry)
 
         data["pending"] = remaining
         self._save(data)

@@ -10,6 +10,7 @@ import pytest
 from subnet.validator.drain import (
     DRAIN_CACHE_TTL_SECONDS,
     drain_mode_active,
+    handle_drain_tick,
 )
 
 
@@ -60,45 +61,112 @@ def test_drain_cache_ttl(
     assert drain_mode_active(cache, now=now, drain_file=drain_file) is expected
 
 
-def test_main_loop_skips_claim_and_flushes_retry_queue_under_drain(
-    drain_file: str,
+@pytest.fixture
+def fake_retry_queue():
+    rq = MagicMock()
+    rq.get_pending_count.return_value = 3
+    return rq
+
+
+def test_handle_drain_tick_returns_true_and_flushes_no_burn(
+    drain_file: str, fake_retry_queue
 ) -> None:
-    """The main loop's drain branch (ORO-1150) must:
-      1. Skip backend_client.claim_work (no new work)
-      2. Skip _check_for_updates (Watchtower can't restart mid-drain)
-      3. Drive retry_queue.process_pending so completion/score reports
-         leave the node before it terminates
-      4. Bump CLAIM_WORK_TOTAL{result="draining"}
-
-    This locks the wiring: a future refactor that drops the `continue`
-    or moves the auto-update gate above the drain check will fail here.
-    """
+    """Sentinel present → return True (caller short-circuits), flush
+    retry_queue with count_attempts=False so a multi-minute drain +
+    transient outage doesn't drop reports, increment metric, log-once
+    on entry. Second tick under same drain must NOT log again."""
     Path(drain_file).touch()
+    metric = MagicMock()
+    sleeps: list[float] = []
+    state: dict = {}
 
-    backend = MagicMock()
-    retry_queue = MagicMock()
-    retry_queue.get_pending_count.return_value = 3
-    counter_inc = MagicMock()
+    with patch("subnet.validator.drain.logging") as log:
+        assert (
+            handle_drain_tick(
+                state,
+                fake_retry_queue,
+                poll_interval=0.0,
+                metric_counter=metric,
+                sleep_fn=sleeps.append,
+                drain_file=drain_file,
+            )
+            is True
+        )
+        assert state["logged"] is True
+        metric.inc.assert_called_once()
+        fake_retry_queue.process_pending.assert_called_once_with(count_attempts=False)
+        assert sleeps == [0.0]
+        entry_logs = [c for c in log.info.call_args_list if "present" in str(c)]
+        assert len(entry_logs) == 1
 
-    with patch("subnet.validator.drain.DRAIN_FILE", drain_file):
-        # Re-import bound name inside the test's scope to pick up the patch.
-        from subnet.validator.drain import drain_mode_active as gate
+        # Second tick, same drain → still True, no second entry log.
+        assert (
+            handle_drain_tick(
+                state,
+                fake_retry_queue,
+                poll_interval=0.0,
+                metric_counter=metric,
+                sleep_fn=sleeps.append,
+                # Bypass TTL by advancing now past cache window.
+                now=10_000.0,
+                drain_file=drain_file,
+            )
+            is True
+        )
+        entry_logs = [c for c in log.info.call_args_list if "present" in str(c)]
+        assert len(entry_logs) == 1
 
-        cache: dict = {}
 
-        # Simulate ONE iteration of the loop body, with the drain check at
-        # the top and the auto-update + claim_work below.
-        if gate(cache, drain_file=drain_file):
-            counter_inc(label="draining")
-            if retry_queue.get_pending_count() > 0:
-                retry_queue.process_pending()
-        else:
-            backend.check_for_updates()
-            backend.claim_work()
+def test_handle_drain_tick_returns_false_when_sentinel_absent(
+    drain_file: str, fake_retry_queue
+) -> None:
+    """No sentinel → return False so the caller proceeds to claim_work.
+    No retry flush, no metric tick, no sleep."""
+    metric = MagicMock()
+    sleeps: list[float] = []
+    assert (
+        handle_drain_tick(
+            {},
+            fake_retry_queue,
+            poll_interval=0.0,
+            metric_counter=metric,
+            sleep_fn=sleeps.append,
+            drain_file=drain_file,
+        )
+        is False
+    )
+    metric.inc.assert_not_called()
+    fake_retry_queue.process_pending.assert_not_called()
+    assert sleeps == []
 
-    # Drain branch fired:
-    counter_inc.assert_called_once_with(label="draining")
-    retry_queue.process_pending.assert_called_once()
-    # ...and the new-work / auto-update branches did NOT:
-    backend.claim_work.assert_not_called()
-    backend.check_for_updates.assert_not_called()
+
+def test_handle_drain_tick_logs_resume_on_clear(drain_file: str, fake_retry_queue) -> None:
+    """Sentinel was present (logged=True) → cleared between ticks →
+    resume-log fires once and logged flips back to False."""
+    state: dict = {"logged": True}
+    with patch("subnet.validator.drain.logging") as log:
+        assert (
+            handle_drain_tick(
+                state,
+                fake_retry_queue,
+                poll_interval=0.0,
+                metric_counter=MagicMock(),
+                sleep_fn=lambda _: None,
+                drain_file=drain_file,
+            )
+            is False
+        )
+        assert state["logged"] is False
+        cleared = [c for c in log.info.call_args_list if "cleared" in str(c)]
+        assert len(cleared) == 1
+
+
+def test_drain_mode_active_fails_closed_on_eacces(tmp_path: Path) -> None:
+    """Mount-misconfig (OSError on stat) → fail-CLOSED (return True) +
+    surface a WARNING. Prevents the silent-keep-claiming failure mode."""
+    parent = tmp_path / "nope"
+    parent.write_text("not a directory")  # NotADirectoryError on stat()
+    bad_path = str(parent / "drain")
+    with patch("subnet.validator.drain.logging") as log:
+        assert drain_mode_active({}, drain_file=bad_path) is True
+        assert any("fail-CLOSED" in str(c) for c in log.warning.call_args_list)
