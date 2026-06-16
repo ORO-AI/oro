@@ -30,9 +30,8 @@ CLAIM_WORK_TOTAL = Counter(
 
 DRAIN_TICKS_TOTAL = Counter(
     "validator_drain_ticks_total",
-    "Main-loop ticks short-circuited because the drain sentinel was present "
-    "(ORO-1150). Counter is independent of CLAIM_WORK_TOTAL so claim-success "
-    "dashboards aren't skewed by drain windows.",
+    "Main-loop ticks short-circuited by the drain sentinel (ORO-1150). "
+    "Separate from CLAIM_WORK_TOTAL so claim-success rate stays clean.",
 )
 
 SANDBOX_ACTIVE = Gauge(

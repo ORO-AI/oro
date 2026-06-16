@@ -102,11 +102,7 @@ services:
       - ${HOME}/.bittensor/wallets:/root/.bittensor/wallets:ro
       - ./logs:/app/logs
       - validator-data:/root/.validator
-      # ORO-1150: drain-mode sentinel. The host orchestrator (e.g. AWS
-      # ASG drain script, k8s preStop hook, systemd timer, manual `touch`)
-      # writes to /var/run/oro-validator/drain on the host; the validator
-      # polls the same path inside the container and stops claiming new
-      # work when the file is present. See subnet/validator/drain.py.
+      # Drain-mode sentinel — host writes /drain, validator polls (ORO-1150).
       - /var/run/oro-validator:/var/run/oro-validator
     environment:
       - DOCKER_CONTEXT=default

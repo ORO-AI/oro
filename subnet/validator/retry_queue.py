@@ -79,17 +79,9 @@ class LocalRetryQueue:
     def process_pending(self, *, count_attempts: bool = True) -> None:
         """Attempt to process all pending completions.
 
-        ``count_attempts``: when True (default), each transient failure
-        increments the entry's retry_count and the entry is dropped after
-        ``max_retries`` exhaustions — the right behavior for the post-eval
-        opportunistic flush in the normal loop.
-
-        When False, transient failures do NOT burn retry budget — the
-        entry stays in the queue at the same retry_count. Used by the
-        drain branch (ORO-1150) so a multi-minute drain + coincident
-        backend transient can't permanently drop completion/score reports
-        before instance termination. The next successful loop iteration
-        post-drain re-flushes against the unchanged budget.
+        ``count_attempts=False`` skips the retry-budget increment so a
+        multi-minute drain (ORO-1150) plus a coincident backend transient
+        can't permanently drop reports before instance termination.
         """
         data = self._load()
         remaining = []

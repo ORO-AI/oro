@@ -27,7 +27,6 @@ from .metrics import (
     ACTIVE_RUNS,
     CLAIM_WORK_SECONDS,
     CLAIM_WORK_TOTAL,
-    DRAIN_TICKS_TOTAL,
     SANDBOX_ACTIVE,
     SANDBOX_DURATION_SECONDS,
 )
@@ -515,15 +514,12 @@ class Validator:
         try:
             while True:
                 try:
-                    # ORO-1150: drain check sits ABOVE auto-update so a
-                    # Watchtower image roll can't restart the container
-                    # mid-drain (which would kill the in-flight eval the
-                    # feature exists to protect).
+                    # Drain check sits ABOVE auto-update so a Watchtower
+                    # image roll can't restart mid-drain (ORO-1150).
                     if handle_drain_tick(
                         self._drain_state,
                         self.retry_queue,
                         self.config.poll_interval,
-                        metric_counter=DRAIN_TICKS_TOTAL,
                     ):
                         continue
 
