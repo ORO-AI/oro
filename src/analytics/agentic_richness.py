@@ -1,7 +1,7 @@
 """Deterministic agentic_richness calculator (ORO-1372).
 
 Walks an eval trajectory bundle (list of step objects as captured by
-the sandbox sandbox_output writer) and reports the share of catalogue
+the sandbox_output writer) and reports the share of catalogue
 tool dispatches whose immediate-preceding LLM inference output
 explicitly requested them. See the design spec for the algorithm
 contract, anti-gaming rule, and worked examples.
@@ -75,6 +75,8 @@ def _extract_native_tool_names(message: dict[str, Any]) -> list[str]:
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function", {}) or {}
+        if not isinstance(fn, dict):
+            continue
         name = fn.get("name")
         if isinstance(name, str):
             out.append(name)
@@ -88,19 +90,40 @@ def _llm_emitted_targets(inference_call: dict[str, Any]) -> list[str]:
         return []
     targets: list[str] = []
     for choice in resp.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
         msg = choice.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
         targets.extend(_extract_native_tool_names(msg))
-        targets.extend(_extract_xml_tool_names(msg.get("content") or ""))
+        content = msg.get("content") or ""
+        if not isinstance(content, str):
+            continue
+        targets.extend(_extract_xml_tool_names(content))
     return targets
 
 
-def calc_agentic_richness_for_step(step: dict[str, Any]) -> tuple[int, int]:
-    """Walk one step's proxy_calls list. Return (llm_emitted_count, total_dispatch_count)."""
-    proxy_calls = (step.get("extra_info") or {}).get("proxy_calls") or []
-    summaries = [c for c in proxy_calls if c.get("kind") == "summary"]
+def calc_agentic_richness_for_step(
+    step: dict[str, Any],
+) -> tuple[int, int, Counter[str]]:
+    """Walk one step's proxy_calls list.
+
+    Returns ``(llm_emitted_count, total_dispatch_count, tool_breakdown)``
+    where ``tool_breakdown`` counts catalogue dispatches by tool name.
+    """
+    extra_info = step.get("extra_info") or {}
+    if not isinstance(extra_info, dict):
+        extra_info = {}
+    proxy_calls = extra_info.get("proxy_calls") or []
+    if not isinstance(proxy_calls, list):
+        proxy_calls = []
+    summaries = [
+        c for c in proxy_calls if isinstance(c, dict) and c.get("kind") == "summary"
+    ]
 
     llm_emitted = 0
     total_dispatch = 0
+    tool_breakdown: Counter[str] = Counter()
     pending_targets: list[str] = []
 
     for call in summaries:
@@ -112,11 +135,12 @@ def calc_agentic_richness_for_step(step: dict[str, Any]) -> tuple[int, int]:
         if tool is None:
             continue  # not a catalogue dispatch — skip
         total_dispatch += 1
+        tool_breakdown[tool] += 1
         if pending_targets and pending_targets[0] == tool:
             llm_emitted += 1
         if pending_targets:
             pending_targets.pop(0)
-    return llm_emitted, total_dispatch
+    return llm_emitted, total_dispatch, tool_breakdown
 
 
 def calc_agentic_richness(bundle: list[dict[str, Any]]) -> AgenticRichnessResult:
@@ -126,15 +150,10 @@ def calc_agentic_richness(bundle: list[dict[str, Any]]) -> AgenticRichnessResult
     tools: Counter[str] = Counter()
 
     for step in bundle:
-        l, t = calc_agentic_richness_for_step(step)
-        total_llm += l
-        total_disp += t
-        for call in (step.get("extra_info") or {}).get("proxy_calls") or []:
-            if call.get("kind") != "summary":
-                continue
-            tool = CATALOGUE_PATHS_TO_TOOLS.get(_normalize_path(call.get("path", "")))
-            if tool is not None:
-                tools[tool] += 1
+        step_llm, step_disp, step_tools = calc_agentic_richness_for_step(step)
+        total_llm += step_llm
+        total_disp += step_disp
+        tools.update(step_tools)
 
     ratio = (total_llm / total_disp) if total_disp else 0.0
     return AgenticRichnessResult(
