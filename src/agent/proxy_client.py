@@ -360,7 +360,11 @@ class ProxyClient:
         """Extract the proxy-injected tool nonces from a /inference response.
 
         Returns a {call_id: nonce} mapping. Empty dict if the response did
-        not carry oro_metadata (e.g. pre-enforcement proxy)."""
+        not carry oro_metadata (e.g. pre-enforcement proxy).
+
+        NOTE: kept byte-identical with `agent_native_v2.parse_nonces`
+        so the reference agent and the runtime stay in sync.
+        """
         meta = (response_json or {}).get("oro_metadata") or {}
         nonces = meta.get("tool_nonces") or {}
         return {str(k): str(v) for k, v in nonces.items() if isinstance(v, str)}

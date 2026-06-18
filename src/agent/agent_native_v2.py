@@ -45,6 +45,11 @@ Rules:
 # Helpers
 # ---------------------------------------------------------------------------
 
+# NOTE: intentional duplicate of `ProxyClient.parse_nonces` in
+# `proxy_client.py`. The reference agent is standalone (no
+# ProxyClient import) so miners can read it end-to-end without
+# diving into the wider runtime. Keep this and `proxy_client.py`
+# in sync when changing the nonce metadata shape.
 def parse_nonces(resp: dict[str, Any]) -> dict[str, str]:
     """Extract {call_id: nonce} from oro_metadata.tool_nonces."""
     meta = (resp or {}).get("oro_metadata") or {}
