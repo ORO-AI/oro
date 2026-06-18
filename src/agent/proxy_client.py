@@ -355,3 +355,46 @@ class ProxyClient:
             duration_ms=duration_ms,
         )
         return result
+
+    def parse_nonces(self, response_json: dict) -> dict:
+        """Extract the proxy-injected tool nonces from a /inference response.
+
+        Returns a {call_id: nonce} mapping. Empty dict if the response did
+        not carry oro_metadata (e.g. pre-enforcement proxy)."""
+        meta = (response_json or {}).get("oro_metadata") or {}
+        nonces = meta.get("tool_nonces") or {}
+        return {str(k): str(v) for k, v in nonces.items() if isinstance(v, str)}
+
+    def dispatch_tool(self, tool_name: str, arguments_raw: str, nonce: str, call_id: str) -> Optional[Dict]:
+        """POST a catalogue dispatch with the nonce header set.
+
+        `arguments_raw` is the LLM's raw `arguments` JSON string — passed
+        verbatim as the request body so the proxy's body hash matches the
+        args_hash inside the nonce payload. Do NOT json.loads + re-serialise.
+        """
+        headers = {
+            "Content-Type": "application/json",
+            "X-Tool-Nonce": nonce,
+            "X-Tool-Call-Id": call_id,
+        }
+        url = self._build_url(f"/search/{tool_name}")
+
+        def make_request():
+            return requests.post(url, data=arguments_raw.encode(), headers=headers, timeout=self.timeout)
+
+        t0 = time.monotonic()
+        response = self._make_request_with_retries(make_request, "POST", f"/search/{tool_name}")
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        result = None
+        if response and response.status_code == 200:
+            result = response.json()
+
+        self.request_log.record(
+            method="POST",
+            path=f"/search/{tool_name}",
+            status_code=response.status_code if response else None,
+            response_body=result,
+            duration_ms=duration_ms,
+        )
+        return result
