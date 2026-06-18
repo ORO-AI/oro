@@ -1362,7 +1362,7 @@ wheels = [
 
 [[package]]
 name = "oro-sdk"
-version = "1.0.73"
+version = "1.0.85"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -1370,9 +1370,9 @@ dependencies = [
     { name = "httpx" },
     { name = "python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/87/e2dbe9e18ea1d619201859058565353a17dbc2cbdaedcfb45e90d643ed43/oro_sdk-1.0.73.tar.gz", hash = "sha256:6e83be34a5010974d8a16eb61a0529082739a87c00497a7802ceb50035cacc1a", size = 131684, upload-time = "2026-05-11T21:36:34.598Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/b9/58f481cb2f2d9aa22b6ea22432d395a087a6aca0e477b29244392009b6a1/oro_sdk-1.0.85.tar.gz", hash = "sha256:d49c88d345ee0084abb3fbbd1f4a251553b2fef5ea6824d0ce2d0a872685d626", size = 136332, upload-time = "2026-06-18T17:40:44.615Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/4e/12e8ca1ab0ea07a71eaa8d6e45e80f8967169619e43919b8ad650666104c/oro_sdk-1.0.73-py3-none-any.whl", hash = "sha256:79c35b7e583d08facad27c427e6953c9904d3fc18cae035aad869307f757158a", size = 325477, upload-time = "2026-05-11T21:36:32.943Z" },
+    { url = "https://files.pythonhosted.org/packages/df/a5/7ad9fac7811a5581601b4b5a2e406e8d8bf69bf68352ac3ea3a8b9f42726/oro_sdk-1.0.85-py3-none-any.whl", hash = "sha256:70999268b7facab6c9f639739c98d9dfefeeab26e0857e0b0fe5475b1bbf425e", size = 332939, upload-time = "2026-06-18T17:40:43.188Z" },
 ]
 
 [[package]]
@@ -1398,7 +1398,7 @@ requires-dist = [
     { name = "async-substrate-interface", specifier = "==1.6.4" },
     { name = "bittensor", specifier = "==10.1.0" },
     { name = "bittensor-wallet", specifier = "==4.0.1" },
-    { name = "oro-sdk", specifier = "==1.0.73" },
+    { name = "oro-sdk", specifier = "==1.0.85" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "requests", specifier = "==2.33.0" },

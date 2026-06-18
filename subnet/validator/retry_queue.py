@@ -121,6 +121,8 @@ class LocalRetryQueue:
             kwargs["results_s3_key"] = entry["results_s3_key"]
         if entry.get("failure_reason"):
             kwargs["failure_reason"] = entry["failure_reason"]
+        if entry.get("agentic_richness") is not None:
+            kwargs["agentic_richness"] = entry["agentic_richness"]
 
         try:
             self.backend_client.complete_run(**kwargs)

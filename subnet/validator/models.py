@@ -32,6 +32,7 @@ class CompletionRequest:
     results_s3_key: str = ""
     failure_reason: Optional[str] = None
     sandbox_metadata: Optional[SandboxMetadata] = None
+    agentic_richness: Optional[float] = None  # ORO-1372
 
     def to_dict(self) -> dict:
         """Serialize to dict for JSON persistence."""
@@ -46,6 +47,8 @@ class CompletionRequest:
             d["failure_reason"] = self.failure_reason
         if self.sandbox_metadata:
             d["sandbox_metadata"] = self.sandbox_metadata
+        if self.agentic_richness is not None:
+            d["agentic_richness"] = self.agentic_richness
         return d
 
     @classmethod
@@ -59,4 +62,5 @@ class CompletionRequest:
             results_s3_key=data.get("results_s3_key", ""),
             failure_reason=data.get("failure_reason"),
             sandbox_metadata=data.get("sandbox_metadata"),
+            agentic_richness=data.get("agentic_richness"),
         )

@@ -62,6 +62,39 @@ def _rewrite_localhost_url(url: str) -> str:
     return url
 
 
+def _compute_agentic_richness_from_output_file(output_file: Path) -> Optional[float]:
+    """Walk the trajectory bundle JSONL written by the sandbox and return
+    agentic_richness in [0.0, 1.0]. Returns None for pre-enforcement bundles
+    (no nonce_status stamps on any catalogue dispatch).
+
+    output_file is the per-eval bundle in JSONL format: one JSON line per
+    problem envelope with a ``dialogue`` list of trajectory steps.
+    Each step may carry ``extra_info.proxy_calls`` entries with
+    ``nonce_status`` stamps. See src.analytics.agentic_richness.
+    """
+    from src.analytics.agentic_richness import calc_agentic_richness
+
+    try:
+        bundle: list[dict] = []
+        with open(output_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    envelope = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(envelope, dict):
+                    dialogue = envelope.get("dialogue") or []
+                    if isinstance(dialogue, list):
+                        bundle.extend(dialogue)
+        return calc_agentic_richness(bundle).agentic_richness
+    except Exception:
+        logging.exception("agentic_richness: compute failed for %s", output_file)
+        return None
+
+
 class Validator:
     def __init__(self):
         self.config = self.get_config()
@@ -883,6 +916,14 @@ class Validator:
                 eval_run_id, output_file, problem_ids, progress_reporter
             )
 
+            # ORO-1372: compute agentic_richness from the trajectory bundle.
+            # NULL = pre-enforcement bundle (proxy didn't stamp nonce_status).
+            agentic_richness = _compute_agentic_richness_from_output_file(output_file)
+            logging.info(
+                "Score: agentic_richness=%s",
+                agentic_richness if agentic_richness is not None else "NULL",
+            )
+
             # Step 6: Complete the run
             self._complete_run(
                 eval_run_id=eval_run_id,
@@ -891,6 +932,7 @@ class Validator:
                 score_components=aggregate,
                 results_s3_key=results_s3_key,
                 sandbox_metadata=sandbox_metadata,
+                agentic_richness=agentic_richness,
             )
 
         except Exception as e:
@@ -1017,6 +1059,7 @@ class Validator:
         results_s3_key: str = "",
         score_components: Optional[Dict[str, Any]] = None,
         sandbox_metadata: Optional[SandboxMetadata] = None,
+        agentic_richness: Optional[float] = None,
     ) -> None:
         """Complete an evaluation run, with retry queue fallback.
 
@@ -1027,6 +1070,8 @@ class Validator:
             results_s3_key: S3 key for logs.
             score_components: Optional dict with detailed score breakdown.
             sandbox_metadata: Optional sandbox execution metadata.
+            agentic_richness: Fraction of catalogue dispatches with valid nonces
+                (ORO-1372). None for pre-enforcement bundles.
         """
         if score_components is None:
             score_components = {"success_rate": score}
@@ -1039,6 +1084,7 @@ class Validator:
                 score_components=score_components,
                 results_s3_key=results_s3_key,
                 sandbox_metadata=sandbox_metadata,
+                agentic_richness=agentic_richness,
             )
             logging.info(
                 f"Completed {eval_run_id}: {result.status}, "
@@ -1063,6 +1109,7 @@ class Validator:
                         score_components=score_components,
                         results_s3_key=results_s3_key,
                         sandbox_metadata=sandbox_metadata,
+                        agentic_richness=agentic_richness,
                     )
                 )
             else:

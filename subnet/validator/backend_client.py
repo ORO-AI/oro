@@ -489,6 +489,7 @@ class BackendClient:
         results_s3_key: str = "",
         failure_reason: Optional[str] = None,
         sandbox_metadata: Optional[dict] = None,
+        agentic_richness: Optional[float] = None,  # ORO-1372
     ) -> CompleteRunResponse:
         """Complete an evaluation run.
 
@@ -501,6 +502,8 @@ class BackendClient:
             failure_reason: Reason for failure (sent for non-SUCCESS statuses).
             sandbox_metadata: Optional dict with sandbox execution metadata
                 (exit_code, duration_seconds, stderr_tail).
+            agentic_richness: Fraction of catalogue dispatches with valid nonces
+                in [0.0, 1.0], or None for pre-enforcement bundles (ORO-1372).
 
         Returns:
             CompleteRunResponse with final status and eligibility.
@@ -525,6 +528,7 @@ class BackendClient:
                 score_components=sdk_score_components,
                 results_s3_key=results_s3_key if results_s3_key else UNSET,
                 sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
+                agentic_richness=agentic_richness if agentic_richness is not None else UNSET,
             )
         else:
             # For FAILED/TIMED_OUT, include failure reason

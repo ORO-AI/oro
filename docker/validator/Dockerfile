@@ -33,6 +33,7 @@ RUN mkdir -p /app/logs && ln -sf /app/logs /app/subnet/logs
 
 # Copy evaluation/scoring code (used by test_runner and ProgressReporter)
 COPY src/agent/ /app/src/agent/
+COPY src/analytics/ /app/src/analytics/
 COPY src/__init__.py /app/src/
 
 # Copy data files (test problems for local testing)
