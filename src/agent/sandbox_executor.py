@@ -20,6 +20,14 @@ from src.agent.sandbox_status import SandboxProblemStatus
 
 logger = logging.getLogger(__name__)
 
+# Default "fork" start method on Linux deadlocks intermittently when
+# execute_problems_parallel forks children from a ThreadPoolExecutor:
+# fork-after-threads inherits locks (logging, malloc, mp.Queue feeder)
+# held by sibling threads, wedging the child until the per-problem
+# timeout fires. "forkserver" clones from a single-threaded helper
+# process and avoids the race.
+_MP_CTX = multiprocessing.get_context("forkserver")
+
 
 @dataclass
 class ErrorInfo:
@@ -202,7 +210,7 @@ def _problem_id_for(problem: Dict) -> str:
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
-    result_queue: multiprocessing.Queue,
+    result_queue,
     stats_file: Optional[str] = None,
     request_log_file: Optional[str] = None,
 ) -> None:
@@ -255,8 +263,8 @@ def execute_single_problem(
     output_dir = os.path.dirname(output_file) if output_file else "/tmp"
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
     request_log_file = os.path.join(output_dir, f"request_log_{problem_id}.jsonl")
-    result_queue: multiprocessing.Queue = multiprocessing.Queue()
-    process = multiprocessing.Process(
+    result_queue: multiprocessing.Queue = _MP_CTX.Queue()
+    process = _MP_CTX.Process(
         target=_run_in_process,
         args=(problem, agent_file, result_queue, stats_file, request_log_file),
     )

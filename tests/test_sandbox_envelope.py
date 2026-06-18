@@ -62,7 +62,7 @@ class TestExecuteSingleProblemStatus:
         mock_proc.pid = 1
         mock_proc.exitcode = None
         with patch.object(
-            sandbox_executor.multiprocessing, "Process", return_value=mock_proc
+            sandbox_executor._MP_CTX, "Process", return_value=mock_proc
         ):
             result = sandbox_executor.execute_single_problem(
                 {"query": "q", "problem_id": "p1"}, timeout=0.01
@@ -79,7 +79,7 @@ class TestExecuteSingleProblemStatus:
         mock_proc.pid = 2
         mock_proc.exitcode = 1
         with patch.object(
-            sandbox_executor.multiprocessing, "Process", return_value=mock_proc
+            sandbox_executor._MP_CTX, "Process", return_value=mock_proc
         ):
             result = sandbox_executor.execute_single_problem(
                 {"query": "q", "problem_id": "p2"}, timeout=0.01
@@ -99,7 +99,7 @@ class TestExecuteSingleProblemStatus:
         mock_proc.pid = 3
         mock_proc.exitcode = 1
         with patch.object(
-            sandbox_executor.multiprocessing, "Process", return_value=mock_proc
+            sandbox_executor._MP_CTX, "Process", return_value=mock_proc
         ):
             first = sandbox_executor.execute_single_problem(
                 {"query": "cream bowl", "category": "voucher"},
