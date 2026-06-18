@@ -41,8 +41,12 @@ http {
     # Limit request body size (prevents memory exhaustion from oversized payloads)
     client_max_body_size 10m;
 
-    # Allow large LLM responses through njs subrequests (default 4KB is too small)
-    subrequest_output_buffer_size 256k;
+    # ORO-1372: Bumped from 256k to 4m so that JSON.parse + enrichment in
+    # tool_nonce.js never silently truncates a large LLM response. Long
+    # reasoning + multiple tool_calls can easily exceed 256K. Memory cost
+    # is per-subrequest-in-flight which is bounded by concurrent inference
+    # calls (~16 per validator host worst case).
+    subrequest_output_buffer_size 4m;
 
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
