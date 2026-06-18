@@ -519,16 +519,18 @@ class BackendClient:
                 CompleteRunRequestScoreComponentsType0,
             )
 
-            sdk_score_components = CompleteRunRequestScoreComponentsType0.from_dict(
-                score_components or {}
-            )
+            # ORO-1372: agentic_richness rides inside score_components alongside
+            # reasoning_coefficient (Backend extracts + bounds-checks it on read).
+            sc = dict(score_components or {})
+            if agentic_richness is not None:
+                sc["agentic_richness"] = agentic_richness
+            sdk_score_components = CompleteRunRequestScoreComponentsType0.from_dict(sc)
             request_body = CompleteRunRequest(
                 terminal_status=status,
                 validator_score=score,
                 score_components=sdk_score_components,
                 results_s3_key=results_s3_key if results_s3_key else UNSET,
                 sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
-                agentic_richness=agentic_richness if agentic_richness is not None else UNSET,
             )
         else:
             # For FAILED/TIMED_OUT, include failure reason
