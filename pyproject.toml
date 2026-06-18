@@ -21,3 +21,6 @@ pythonpath = [".", "subnet", "src/agent"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+markers = [
+    "docker: requires docker compose orchestration (skipped by default)",
+]

@@ -6,6 +6,14 @@ http {
     # Load njs validation script
     js_import validate_model from /etc/nginx/validate_model.js;
 
+    # ORO-1372: nonce mint + verify for catalogue tool calls. The proxy is the
+    # canonical authority for "did the LLM emit this tool_call?" — see
+    # tool_nonce.js for the mint/verify protocol. validate_model.js imports
+    # this module directly via ES module import (relative path); we still
+    # declare it here so the verifyDispatch handler is reachable from
+    # `/search/`.
+    js_import tool_nonce from /etc/nginx/tool_nonce.js;
+
     # Per-request outcome label written by validate_model.js. `js_set` makes
     # the variable lazy: nginx calls `validate_model.outcome(r)` only when the
     # value is needed (at access-log time), which returns whatever label the
@@ -22,6 +30,14 @@ http {
     # headroom is for future entries.
     js_shared_dict_zone zone=oro_models:64K timeout=24h;
 
+    # Cross-worker single-use tracker for catalogue tool_call nonces
+    # (ORO-1372). The shared dict's `add()` is atomic across nginx workers,
+    # so a replayed nonce is rejected by whichever worker handles the second
+    # request. TTL is well beyond the 60s mint TTL (60s + slack) so an
+    # expired nonce's slot doesn't get freed mid-flight; once a nonce
+    # expires its slot can naturally roll out under load.
+    js_shared_dict_zone zone=nonce_used:1m timeout=120s;
+
     # Limit request body size (prevents memory exhaustion from oversized payloads)
     client_max_body_size 10m;
 
@@ -33,13 +49,13 @@ http {
 
     # Combined access log + upstream metadata + per-request outcome label.
     # `$upstream_status` propagates the upstream HTTP status when a parent
-    # location uses `proxy_pass` (e.g. /search/*) but stays `-` when the
-    # parent uses `js_content` and dispatches to upstream via an njs
-    # subrequest (e.g. /inference/). `$proxy_outcome` covers the gap for the
-    # inference path — see js_set above and validate_model.js. CloudWatch
-    # metric filters key off `outcome=upstream-5` vs `outcome=internal-` to
-    # tell upstream-relayed 5xx apart from proxy-internal failures. See
-    # ORO-1159.
+    # location uses `proxy_pass` directly, but stays `-` when the parent
+    # uses `js_content` and dispatches to upstream via an njs subrequest
+    # (now true of /inference/ AND /search/ after ORO-1372).
+    # `$proxy_outcome` covers the gap for the inference path — see js_set
+    # above and validate_model.js. CloudWatch metric filters key off
+    # `outcome=upstream-5` vs `outcome=internal-` to tell upstream-relayed
+    # 5xx apart from proxy-internal failures. See ORO-1159.
     log_format inference_combined '$remote_addr - $remote_user [$time_local] '
                                   '"$request" $status $body_bytes_sent '
                                   '"$http_referer" "$http_user_agent" '
@@ -81,17 +97,31 @@ http {
             add_header Content-Type application/json;
         }
 
-        # Route /search/* requests to search-server
+        # Route /search/* requests through tool_nonce verification
+        # (ORO-1372). verifyDispatch reads X-Tool-Nonce, checks HMAC + args
+        # hash + single-use, stamps X-Nonce-Status on the response, and
+        # subrequests the actual upstream call to /_search_upstream/. In
+        # Phase 0-2 (default) any nonce status is allowed through so the
+        # trajectory recorder can log the verdict without breaking miners;
+        # set ORO_PROXY_NONCE_STRICT=true to flip to hard 403 on non-valid.
         location /search/ {
             limit_req zone=agent burst=50 nodelay;
+            client_body_buffer_size 1m;
+            js_content tool_nonce.verifyDispatch;
+        }
+
+        # Internal location for the actual /search/* upstream call. The
+        # public /search/ handler subrequests this after nonce verification.
+        location /_search_upstream/ {
+            internal;
 
             # Re-resolve Docker DNS on every request so container IP changes
             # (e.g. from Watchtower image updates) are picked up automatically.
             resolver 127.0.0.11 valid=10s;
             set $search_upstream http://${SEARCH_SERVER_URL}:${SEARCH_SERVER_PORT};
 
-            # Strip /search prefix and forward to search-server
-            rewrite ^/search/(.*) /$1 break;
+            # Strip the internal prefix and forward to search-server
+            rewrite ^/_search_upstream/(.*) /$1 break;
             proxy_pass $search_upstream;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;

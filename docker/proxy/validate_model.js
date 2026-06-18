@@ -38,6 +38,7 @@
 // log. See ORO-1159.
 
 import fs from "fs";
+import tool_nonce from "./tool_nonce.js";
 
 // Tag this request with what happened so the access log can record it.
 // Called before every r.return(...) in validate(). Read back via outcome(r)
@@ -267,6 +268,28 @@ function validate(r) {
         _tag(r, _upstreamLabel(reply.status));
         for (var h in reply.headersOut) {
           r.headersOut[h] = reply.headersOut[h];
+        }
+
+        // Mint tool-call nonces for chat-completions responses (ORO-1372).
+        // Only on 2xx — pass non-2xx through verbatim. The enrich function is
+        // fail-open: it returns the original body on any error, so this hook
+        // can never break inference.
+        var isChatCompletions = r.uri.indexOf("/inference/chat/completions") === 0;
+        if (isChatCompletions && reply.status >= 200 && reply.status < 300) {
+          tool_nonce.enrichResponseText(r, reply.responseText)
+            .then(function (enriched) {
+              // The body bytes changed; nginx will recompute Content-Length
+              // automatically for r.return. Strip any inherited Content-Length
+              // header to avoid mismatch on cached headers.
+              delete r.headersOut["Content-Length"];
+              delete r.headersOut["content-length"];
+              r.return(reply.status, enriched);
+            })
+            .catch(function (err) {
+              r.error("tool_nonce enrich rejected: " + (err && err.message));
+              r.return(reply.status, reply.responseText);
+            });
+          return;
         }
         r.return(reply.status, reply.responseText);
       }
