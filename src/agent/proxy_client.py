@@ -1,5 +1,7 @@
 """HTTP proxy client for ShoppingBench services."""
 
+import base64
+import hashlib
 import json
 import os
 import logging
@@ -11,6 +13,23 @@ from urllib.parse import urlencode
 import requests
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize(value: object) -> str:
+    """Canonical JSON: sorted keys recursively, no whitespace, UTF-8.
+
+    Arrays are preserved in original order. Matches the canonicalizeJSON
+    helper in the proxy's tool_nonce.js so args hashes agree.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _args_hash(args_dict: dict) -> str:
+    """SHA-256 of the canonical JSON of args_dict, base64url-encoded (no padding)."""
+    canonical = _canonicalize(args_dict).encode("utf-8")
+    digest = hashlib.sha256(canonical).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
 
 # Constants
 DEFAULT_TIMEOUT = 120
@@ -38,6 +57,7 @@ class RequestLog:
         status_code: Optional[int] = None,
         response_body: object = None,
         duration_ms: float = 0.0,
+        nonce_status: Optional[str] = None,
     ) -> None:
         if not self._log_file:
             return
@@ -49,6 +69,9 @@ class RequestLog:
             "duration_ms": round(duration_ms, 1),
             "status_code": status_code,
         }
+        # ORO-1372: proxy stamps X-Nonce-Status on every /search/* dispatch.
+        if nonce_status is not None:
+            entry["nonce_status"] = nonce_status
         if params:
             entry["params"] = {k: v for k, v in params.items() if v is not None}
         if json_data:
@@ -192,6 +215,10 @@ class ProxyClient:
         self.inference_stats = InferenceStats(stats_file)
         request_log_file = os.environ.get("REQUEST_LOG_FILE")
         self.request_log = RequestLog(request_log_file)
+        # ORO-1372: cache of nonces from most recent inference response(s).
+        # Keyed by (tool_name, args_hash). Each entry is single-use — evicted
+        # on first /search/* dispatch that matches.
+        self._nonce_cache: dict[tuple[str, str], str] = {}
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -314,15 +341,41 @@ class ProxyClient:
             status_code=response.status_code if response else None,
             response_body=result,
             duration_ms=duration_ms,
+            nonce_status=response.headers.get("X-Nonce-Status") if response else None,
         )
         return result
 
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
-        """Make a POST request to the proxy."""
+        """Make a POST request to the proxy.
+
+        For /inference/ responses, caches the proxy-minted nonces keyed by
+        (tool_name, args_hash). For /search/* dispatches, looks up the matching
+        nonce in the cache and auto-attaches it as X-Tool-Nonce. Single-use:
+        a matched nonce is evicted from the cache.
+
+        Miner code does not need to change — same `.post()` calls work, and
+        nonces flow through automatically as long as the agent dispatches
+        args that match what the LLM requested.
+        """
         url = self._build_url(path)
         headers: Dict[str, str] = {}
         if self.api_key and "/inference/" in path:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        # ORO-1372: auto-attach nonce on /search/* dispatches.
+        if path.startswith("/search/") and json_data is not None and "X-Tool-Nonce" not in headers:
+            tool_name = path.split("/search/", 1)[1].split("?", 1)[0]
+            try:
+                ah = _args_hash(json_data)
+            except (TypeError, ValueError):
+                ah = None
+            if ah is not None:
+                nonce = self._nonce_cache.pop((tool_name, ah), None)
+                if nonce is not None:
+                    headers["X-Tool-Nonce"] = nonce
+                    # Synthetic call_id for trajectory log; proxy ignores its
+                    # value for verification but records it in the trace.
+                    headers["X-Tool-Call-Id"] = f"{tool_name}:{ah[:8]}"
 
         def make_request():
             response = requests.post(
@@ -346,6 +399,10 @@ class ProxyClient:
         if response and response.status_code == 200:
             result = response.json()
 
+        # ORO-1372: refresh nonce cache from inference response.
+        if "/inference/" in path and isinstance(result, dict):
+            self._update_nonce_cache(result)
+
         self.request_log.record(
             method="POST",
             path=path,
@@ -353,8 +410,36 @@ class ProxyClient:
             status_code=response.status_code if response else None,
             response_body=result,
             duration_ms=duration_ms,
+            nonce_status=response.headers.get("X-Nonce-Status") if response else None,
         )
         return result
+
+    def _update_nonce_cache(self, inference_response: dict) -> None:
+        """Read oro_metadata from an /inference response and populate the
+        nonce cache keyed by (tool_name, args_hash).
+
+        parsed_tool_calls is a list of {call_id, tool_name, args_hash}.
+        tool_nonces is {call_id → nonce}. We zip them by call_id.
+        """
+        meta = inference_response.get("oro_metadata") or {}
+        parsed = meta.get("parsed_tool_calls") or []
+        nonces = meta.get("tool_nonces") or {}
+        if not isinstance(parsed, list) or not isinstance(nonces, dict):
+            return
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            call_id = entry.get("call_id")
+            tool_name = entry.get("tool_name")
+            args_hash = entry.get("args_hash")
+            nonce = nonces.get(call_id) if call_id is not None else None
+            if not (
+                isinstance(tool_name, str)
+                and isinstance(args_hash, str)
+                and isinstance(nonce, str)
+            ):
+                continue
+            self._nonce_cache[(tool_name, args_hash)] = nonce
 
     def parse_nonces(self, response_json: dict) -> dict:
         """Extract the proxy-injected tool nonces from a /inference response.
@@ -372,9 +457,13 @@ class ProxyClient:
     def dispatch_tool(self, tool_name: str, arguments_raw: str, nonce: str, call_id: str) -> Optional[Dict]:
         """POST a catalogue dispatch with the nonce header set.
 
-        `arguments_raw` is the LLM's raw `arguments` JSON string — passed
-        verbatim as the request body so the proxy's body hash matches the
-        args_hash inside the nonce payload. Do NOT json.loads + re-serialise.
+        `arguments_raw` is the LLM's raw `arguments` JSON string. It is sent
+        verbatim as the request body; the proxy parses it and compares its
+        canonical form against the args_hash inside the nonce payload.
+
+        Note: the proxy now uses canonical-JSON hashing (sorted keys), so
+        key order in arguments_raw does not matter as long as the parsed dict
+        matches what the LLM requested.
         """
         headers = {
             "Content-Type": "application/json",
@@ -400,5 +489,6 @@ class ProxyClient:
             status_code=response.status_code if response else None,
             response_body=result,
             duration_ms=duration_ms,
+            nonce_status=response.headers.get("X-Nonce-Status") if response else None,
         )
         return result
