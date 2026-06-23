@@ -21,6 +21,7 @@ from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
+from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
 from .metrics import (
@@ -104,6 +105,17 @@ class Validator:
             type=int,
             default=int(os.environ.get("SANDBOX_TIMEOUT") or "1800"),
             help="Timeout in seconds for the entire sandbox subprocess (env: SANDBOX_TIMEOUT, default: 1800 = 30 min).",
+        )
+        parser.add_argument(
+            "--validator-watchdog-timeout",
+            type=float,
+            default=float(os.environ.get("VALIDATOR_WATCHDOG_TIMEOUT") or "5400"),
+            help=(
+                "Seconds the main loop may go without progress before the watchdog "
+                "aborts the process so the container restart policy recovers it "
+                "(env: VALIDATOR_WATCHDOG_TIMEOUT, default: 5400 = 90 min). Must "
+                "exceed the longest legitimate single iteration. 0 disables (ORO-1414)."
+            ),
         )
         parser.add_argument(
             "--sandbox-max-workers",
@@ -509,10 +521,23 @@ class Validator:
             f"Weight setter started (interval: {self.config.weight_update_interval}s)"
         )
 
+        # Recover a wedged validator: if the loop stops making progress (e.g. the
+        # host disk fills and an iteration hangs), abort so the container's
+        # restart policy brings a fresh one up (ORO-1414).
+        watchdog: Optional[ProgressWatchdog] = None
+        if self.config.validator_watchdog_timeout > 0:
+            watchdog = ProgressWatchdog(self.config.validator_watchdog_timeout)
+            watchdog.start()
+            logging.info(
+                f"Watchdog started (timeout: {self.config.validator_watchdog_timeout}s)"
+            )
+
         self._drain_state: dict = {}
 
         try:
             while True:
+                if watchdog is not None:
+                    watchdog.beat()
                 try:
                     # Drain check sits ABOVE auto-update so a Watchtower
                     # image roll can't restart mid-drain (ORO-1150).
@@ -639,6 +664,8 @@ class Validator:
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt detected, shutting down...")
         finally:
+            if watchdog is not None:
+                watchdog.stop()
             weight_setter.stop()
             logging.info("Validator stopped.")
 
