@@ -21,6 +21,7 @@ from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
+from .bounded_io import run_capped
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
 from .metrics import (
@@ -104,6 +105,16 @@ class Validator:
             type=int,
             default=int(os.environ.get("SANDBOX_TIMEOUT") or "1800"),
             help="Timeout in seconds for the entire sandbox subprocess (env: SANDBOX_TIMEOUT, default: 1800 = 30 min).",
+        )
+        parser.add_argument(
+            "--sandbox-log-max-bytes",
+            type=int,
+            default=int(os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)),
+            help=(
+                "Max bytes captured per sandbox stdout/stderr log before truncation "
+                "(env: SANDBOX_LOG_MAX_BYTES, default: 256 MiB). Bounds disk use so a "
+                "runaway agent cannot fill the host (ORO-1414)."
+            ),
         )
         parser.add_argument(
             "--sandbox-max-workers",
@@ -343,24 +354,24 @@ class Validator:
         metadata: SandboxMetadata,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
-            with (
-                open(stdout_log, "w") as stdout_file,
-                open(stderr_log, "w") as stderr_file,
-            ):
-                result = subprocess.run(
-                    cmd,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=self.config.sandbox_timeout,
-                )
-            metadata["exit_code"] = result.returncode
+            # Capture through a byte cap so a runaway agent's stdout/stderr can't
+            # fill the host disk (ORO-1414); the stream is still fully drained so
+            # the sandbox never blocks on a full pipe.
+            returncode = run_capped(
+                cmd,
+                stdout_path=stdout_log,
+                stderr_path=stderr_log,
+                max_bytes=self.config.sandbox_log_max_bytes,
+                timeout=self.config.sandbox_timeout,
+            )
+            metadata["exit_code"] = returncode
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
                 stderr_content = stderr_log.read_text()
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
-                    log_fn = logging.error if result.returncode != 0 else logging.info
+                    log_fn = logging.error if returncode != 0 else logging.info
                     log_fn(
                         f"Sandbox stderr for eval_run {eval_run_id}:\n{stderr_content}"
                     )
@@ -372,9 +383,9 @@ class Validator:
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
                     )
 
-            if result.returncode != 0:
+            if returncode != 0:
                 logging.error(
-                    f"Sandbox execution failed for eval_run {eval_run_id} (exit code: {result.returncode})"
+                    f"Sandbox execution failed for eval_run {eval_run_id} (exit code: {returncode})"
                 )
                 # Partial success: sandbox exits non-zero when some problems
                 # fail/timeout, but still writes successful results to the
