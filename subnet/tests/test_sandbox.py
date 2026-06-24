@@ -207,15 +207,18 @@ class TestBuildSandboxCommand:
         # PIDs
         pids_idx = cmd.index("--pids-limit")
         assert cmd[pids_idx + 1] == "256"
-        # File descriptors
+        # File descriptors — bumped to 4096 so a SANDBOX_MAX_WORKERS=60 agent
+        # holding ~5 sockets per worker doesn't silently hit the 1024 cap.
         ulimit_idx = cmd.index("--ulimit")
-        assert cmd[ulimit_idx + 1] == "nofile=1024:1024"
+        assert cmd[ulimit_idx + 1] == "nofile=4096:4096"
         # Non-root user
         user_idx = cmd.index("--user")
         assert cmd[user_idx + 1] == "1000:1000"
-        # CPU shares — sandbox at half the default so validator preempts under contention
+        # CPU shares — 2x the default so smaller validator hosts don't starve
+        # sandbox workers at high SANDBOX_MAX_WORKERS while the validator main
+        # thread is blocked in subprocess.run() anyway.
         shares_idx = cmd.index("--cpu-shares")
-        assert cmd[shares_idx + 1] == "512"
+        assert cmd[shares_idx + 1] == "2048"
 
     def test_inference_access_token_injected(self):
         cmd = build_sandbox_command(

@@ -165,12 +165,17 @@ def build_sandbox_command(
         "--pids-limit",
         "256",
         "--ulimit",
-        "nofile=1024:1024",
-        # CPU priority — validator + search-server (default cpu-shares=1024) preempt the
-        # sandbox under contention so heartbeats and the work-claim loop stay responsive.
-        # Sandbox still uses idle CPU; this only matters when the host is saturated.
+        # 4096 fds: at SANDBOX_MAX_WORKERS=60 a typical agent holds ~5 sockets
+        # in flight per worker (HTTP + DNS + keepalive), pushing toward the
+        # 1024 cap and silently capping throughput before the worker count.
+        "nofile=4096:4096",
+        # CPU priority — sandbox runs during the validator's blocked
+        # subprocess.run(); only the heartbeat + weight-setter threads compete
+        # for CPU at that point, so giving sandbox 2x the default share keeps
+        # those threads responsive while no longer starving sandbox workers on
+        # smaller (8 vCPU) validator hosts at SANDBOX_MAX_WORKERS=60.
         "--cpu-shares",
-        "512",
+        "2048",
         "--user",
         "1000:1000",
         # Security hardening — minimize container attack surface
