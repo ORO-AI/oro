@@ -102,8 +102,8 @@ def test_compute_pinned_weights_all_top():
 
 
 def test_compute_pinned_weights_burn_zero_absorbs_tail_into_top():
-    """ORO-1439: at t_burn=0, top miner absorbs the tail-share deficit.
-    Burn clamps to 0; top miner's effective share falls slightly below
+    """At t_burn=0, the top miner absorbs the tail-share deficit. Burn
+    clamps to 0; the top miner's effective share falls slightly below
     1.0 to leave room for the tail's protection weights."""
     tail_sum = 190  # M=19, race size 40
     top, burn = compute_pinned_weights(0.0, tail_sum=tail_sum)
@@ -134,9 +134,9 @@ def test_compute_pinned_weights_rejects_negative_tail_sum():
 
 
 def test_compute_pinned_weights_oversized_tail_at_low_burn_absorbs_into_top():
-    """ORO-1439: top-dominant + tail bigger than burn budget — used to
-    raise ValueError. Now the top miner absorbs the deficit (burn
-    clamps to 0) and the vector still emits valid u16 weights."""
+    """Top-dominant + tail bigger than burn budget — used to raise
+    ValueError. Now the top miner absorbs the deficit (burn clamps to
+    0) and the vector still emits valid u16 weights."""
     # t_burn=0.01 → burn would be round(0.01 * U16_MAX / 0.99) - 1000 = 662 - 1000 = -338
     top, burn = compute_pinned_weights(0.01, tail_sum=1000)
     assert top == U16_MAX
@@ -550,7 +550,7 @@ def test_two_validators_with_top_override_emit_byte_identical_weights():
     assert a_weights == b_weights
 
 
-# --- ORO-1439: burn-from-backend, deficit absorption ---
+# --- burn-from-backend, deficit absorption ---
 
 
 def test_build_metagraph_vector_burn_zero_emits_top_dominant_vector():
