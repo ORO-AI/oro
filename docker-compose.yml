@@ -9,6 +9,8 @@ services:
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-5632}
       - WAITRESS_CONNECTION_LIMIT=${WAITRESS_CONNECTION_LIMIT:-1000}
+      # JVM heap passthrough — Dockerfile sets a default, override here per host.
+      - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx2g -Xms1g}
     ports:
       - "${PORT:-5632}:${PORT:-5632}"
     healthcheck:
