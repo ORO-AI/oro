@@ -18,7 +18,7 @@ def _get_sentence_model():
 
             _sentence_model = SentenceTransformer(
                 "Qwen/Qwen3-Embedding-0.6B",
-                model_kwargs={"torch_dtype": "float32"},
+                model_kwargs={"torch_dtype": "bfloat16"},
             )
         except ImportError:
             _sentence_model_unavailable = True

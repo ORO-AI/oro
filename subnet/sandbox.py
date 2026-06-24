@@ -104,6 +104,7 @@ def build_sandbox_command(
     inference_provider: Optional[str] = None,
     inference_base_url: Optional[str] = None,
     agent_container_path: Optional[str] = None,
+    container_name: Optional[str] = None,
 ) -> list[str]:
     """Build a ``docker run`` command for the sandbox container.
 
@@ -134,6 +135,10 @@ def build_sandbox_command(
             inside the container instead of mounting *agent_host_path* to
             ``/app/user_agent.py``.  Useful when the agent file is already
             accessible via the logs volume mount.
+        container_name: If set, passed as ``--name`` so the container can be
+            killed by name on timeout. ``docker run`` is attached, so SIGKILLing
+            the CLI client leaves the container running on the daemon; a stable
+            name lets the caller ``docker kill`` the orphan (ORO-1414).
 
     Returns:
         Complete ``docker run`` command as a list of strings.
@@ -146,6 +151,12 @@ def build_sandbox_command(
         "--rm",
         "--network",
         network,
+    ]
+
+    if container_name:
+        cmd.extend(["--name", container_name])
+
+    cmd.extend([
         # Resource limits — prevent runaway miner agents from impacting the host
         "--memory",
         "4g",
@@ -171,7 +182,7 @@ def build_sandbox_command(
         "/tmp:rw,noexec,nosuid,size=256m",
         "-e",
         "SANDBOX_PROXY_URL=http://proxy:80",
-    ]
+    ])
 
     # Only mount agent file separately when it's not already in the logs dir
     if not agent_container_path:

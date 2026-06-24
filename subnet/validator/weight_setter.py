@@ -19,6 +19,7 @@ from oro_sdk.types import UNSET
 from .backend_client import BackendClient, BackendError
 from .weight_distribution import (
     RankedFinisher,
+    _validate_burn,
     build_metagraph_weight_vector,
     compute_pinned_weights,
 )
@@ -86,6 +87,11 @@ class WeightSetterThread:
     # cadence (one in-progress + a handful of completed) without paging.
     _RACE_HISTORY_SCAN_LIMIT = 5
 
+    # Fallback burn rate when Backend policy is unreachable. Matches the
+    # historical default; ops can flip the live value via Backend env
+    # without a validator release.
+    _DEFAULT_BURN_RATE = 0.75
+
     def __init__(
         self,
         backend_client: BackendClient,
@@ -94,8 +100,7 @@ class WeightSetterThread:
         wallet,
         netuid: int,
         interval_seconds: int = 300,
-        t_top: float = 0.25,
-        t_burn: float = 0.75,
+        t_burn_fallback: float = _DEFAULT_BURN_RATE,
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -103,14 +108,12 @@ class WeightSetterThread:
         self.wallet = wallet
         self.netuid = netuid
         self.interval_seconds = interval_seconds
-        self.t_top = t_top
-        self.t_burn = t_burn
+        self.t_burn_fallback = t_burn_fallback
 
-        # Fail fast on misconfiguration — the validator process should not
-        # start setting weights with invalid ratios. tail_sum=0 is the
-        # smallest case (any t_top + t_burn = 1 will pass), validating the
-        # ratio constraint without requiring a representative N.
-        compute_pinned_weights(t_top, t_burn, tail_sum=0)
+        # Fail fast on misconfiguration of the fallback value. The live
+        # value pulled from Backend is validated each tick by
+        # `compute_pinned_weights`.
+        compute_pinned_weights(t_burn_fallback, tail_sum=0)
 
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -166,30 +169,53 @@ class WeightSetterThread:
                 return _qualifiers_to_finishers(qualifiers)
         return None
 
-    def _fetch_top_hotkey(self) -> Optional[str]:
-        """Return the canonical "current top miner" hotkey for emissions.
+    def _fetch_top_state(self) -> tuple[Optional[str], float]:
+        """Return `(top_hotkey, t_burn)` from `GET /v1/public/top`.
 
-        Reads `GET /v1/public/top` (the score-to-beat designation). Returns
-        None when there's no admin-designated top (fresh subnet, suite
-        switch, or designated top was discarded) or the request fails. In
-        all such cases `build_metagraph_weight_vector` burns the 25% top
-        share rather than synthesizing a top from rank-1 of finishers —
-        the top slot belongs to the admin-designated top only.
+        `top_hotkey` is the canonical "current top miner" for emissions.
+        None when no admin-designated top exists (fresh subnet, suite
+        switch, or designated top was discarded) — in those cases the
+        top share folds into the burn slot.
+
+        `t_burn` is the live `emission_baseline_burn_rate` from the
+        Backend policy block. Lets ops flip burn (CDK env var) without
+        a validator release. On any Backend error OR a missing/invalid
+        policy value, falls back to `self.t_burn_fallback`.
         """
         try:
             top = self.backend_client.get_top_miner()
         except BackendError as e:
             logging.warning(
-                f"Top-miner fetch failed, falling back to last-race rank-1: {e}"
+                f"Top fetch failed, using fallback burn rate: {e}"
             )
-            return None
+            return None, self.t_burn_fallback
+
         hk = top.top_miner_hotkey
-        if hk is None or hk is UNSET:
-            return None
-        return str(hk)
+        top_hotkey = (
+            str(hk) if hk is not None and hk is not UNSET else None
+        )
+
+        t_burn = self.t_burn_fallback
+        policy = top.policy
+        if policy is not None and policy is not UNSET:
+            try:
+                value = policy["emission_baseline_burn_rate"]
+                t_burn = float(value)
+                _validate_burn(t_burn)
+            except (KeyError, TypeError, ValueError) as e:
+                logging.warning(
+                    f"Invalid emission_baseline_burn_rate in policy, "
+                    f"using fallback {self.t_burn_fallback}: {e}"
+                )
+                t_burn = self.t_burn_fallback
+
+        return top_hotkey, t_burn
 
     def _build_weights_from_race(
-        self, finishers: list[RankedFinisher], top_hotkey: Optional[str]
+        self,
+        finishers: list[RankedFinisher],
+        top_hotkey: Optional[str],
+        t_burn: float,
     ) -> tuple[list[int], list[int]]:
         """Compute the full `(uids, u16 weights)` vector for the metagraph.
 
@@ -213,13 +239,12 @@ class WeightSetterThread:
         if top_hotkey is not None and top_hotkey not in present:
             logging.warning(
                 f"Designated top miner {top_hotkey} not in current metagraph; "
-                f"falling back to rank-1 of last-race finishers for top slot"
+                f"top share folds into burn slot"
             )
         return build_metagraph_weight_vector(
             finishers,
             metagraph_hotkeys=metagraph_hotkeys,
-            t_top=self.t_top,
-            t_burn=self.t_burn,
+            t_burn=t_burn,
             top_hotkey=top_hotkey,
         )
 
@@ -255,13 +280,13 @@ class WeightSetterThread:
             )
             return
 
-        top_hotkey = self._fetch_top_hotkey()
-        uids, weights = self._build_weights_from_race(finishers, top_hotkey)
+        top_hotkey, t_burn = self._fetch_top_state()
+        uids, weights = self._build_weights_from_race(finishers, top_hotkey, t_burn)
         non_zero = sum(1 for w in weights if w > 0)
         logging.info(
             f"Race-based weight vector: N={len(finishers)} finishers, "
             f"top={top_hotkey or '(none — top share burns)'}, "
-            f"{non_zero} non-zero metagraph slots"
+            f"t_burn={t_burn:.3f}, {non_zero} non-zero metagraph slots"
         )
 
         if not weights:

@@ -16,7 +16,11 @@ EXPOSE 5632
 # Set environment variables
 ENV HOST=0.0.0.0
 ENV PORT=5632
-ENV JAVA_OPTS="-Xmx4g -Xms2g"
+# Pyserini embeds a JVM via JNI (Lucene). The JVM reads _JAVA_OPTIONS
+# directly at startup; JAVA_OPTS is non-standard and was being ignored.
+# 2g cap fits comfortably for the prod workload (sustained ≥17 rps at 60
+# concurrent) and saves ~2 GiB on memory-constrained hosts.
+ENV _JAVA_OPTIONS="-Xmx2g -Xms1g"
 
 # Use entrypoint script
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -21,6 +21,7 @@ from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
+from .bounded_io import read_text_lossy, run_capped
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -105,6 +106,16 @@ class Validator:
             type=int,
             default=int(os.environ.get("SANDBOX_TIMEOUT") or "1800"),
             help="Timeout in seconds for the entire sandbox subprocess (env: SANDBOX_TIMEOUT, default: 1800 = 30 min).",
+        )
+        parser.add_argument(
+            "--sandbox-log-max-bytes",
+            type=int,
+            default=int(os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)),
+            help=(
+                "Max bytes captured per sandbox stdout/stderr log before truncation "
+                "(env: SANDBOX_LOG_MAX_BYTES, default: 256 MiB). Bounds disk use so a "
+                "runaway agent cannot fill the host (ORO-1414)."
+            ),
         )
         parser.add_argument(
             "--validator-watchdog-timeout",
@@ -314,6 +325,7 @@ class Validator:
             agent_container_path="/app/logs/agent.py",
             max_workers=self.config.sandbox_max_workers,
             timeout=self.config.sandbox_problem_timeout,
+            container_name=f"oro-sandbox-{eval_run_id}",
         )
 
         logging.info(f"Running sandbox for eval_run {eval_run_id}")
@@ -355,38 +367,38 @@ class Validator:
         metadata: SandboxMetadata,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
-            with (
-                open(stdout_log, "w") as stdout_file,
-                open(stderr_log, "w") as stderr_file,
-            ):
-                result = subprocess.run(
-                    cmd,
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=self.config.sandbox_timeout,
-                )
-            metadata["exit_code"] = result.returncode
+            # Capture through a byte cap so a runaway agent's stdout/stderr can't
+            # fill the host disk (ORO-1414); the stream is still fully drained so
+            # the sandbox never blocks on a full pipe.
+            returncode = run_capped(
+                cmd,
+                stdout_path=stdout_log,
+                stderr_path=stderr_log,
+                max_bytes=self.config.sandbox_log_max_bytes,
+                timeout=self.config.sandbox_timeout,
+            )
+            metadata["exit_code"] = returncode
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
-                stderr_content = stderr_log.read_text()
+                stderr_content = read_text_lossy(stderr_log)
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
-                    log_fn = logging.error if result.returncode != 0 else logging.info
+                    log_fn = logging.error if returncode != 0 else logging.info
                     log_fn(
                         f"Sandbox stderr for eval_run {eval_run_id}:\n{stderr_content}"
                     )
 
             if stdout_log.exists():
-                stdout_content = stdout_log.read_text()
+                stdout_content = read_text_lossy(stdout_log)
                 if stdout_content.strip():
                     logging.info(
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
                     )
 
-            if result.returncode != 0:
+            if returncode != 0:
                 logging.error(
-                    f"Sandbox execution failed for eval_run {eval_run_id} (exit code: {result.returncode})"
+                    f"Sandbox execution failed for eval_run {eval_run_id} (exit code: {returncode})"
                 )
                 # Partial success: sandbox exits non-zero when some problems
                 # fail/timeout, but still writes successful results to the
@@ -409,15 +421,20 @@ class Validator:
                     f"Output file not found after sandbox execution: {output_file}"
                 )
                 if stderr_log.exists():
-                    stderr_content = stderr_log.read_text()
+                    stderr_content = read_text_lossy(stderr_log)
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
 
         except subprocess.TimeoutExpired:
             metadata["exit_code"] = -1
+            # run_capped SIGKILLs the `docker run` CLI, but the container keeps
+            # running on the daemon (it's attached, not the client's child), so
+            # a timed-out runaway agent would keep burning CPU/network until its
+            # own internal timeout. Kill the orphan by name (ORO-1414).
+            self._kill_sandbox_container(eval_run_id)
             if stderr_log.exists():
-                stderr_content = stderr_log.read_text()
+                stderr_content = read_text_lossy(stderr_log)
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(
@@ -433,7 +450,30 @@ class Validator:
             return None, metadata
         except Exception as e:
             logging.error(f"Error running sandbox for eval_run {eval_run_id}: {e}")
+            # run_capped may have already started the container before failing
+            # (e.g. opening the cap files raised on a full disk); kill the orphan
+            # here too, not just on the timeout path. No-op if it never started.
+            self._kill_sandbox_container(eval_run_id)
             return None, metadata
+
+    def _kill_sandbox_container(self, eval_run_id: str) -> None:
+        """Best-effort kill of the sandbox container left running after a timeout.
+
+        Matches the ``--name`` set in :func:`build_sandbox_command`. The container
+        is ``--rm`` so killing it also removes it. Never raises: if it already
+        exited (the common case) ``docker kill`` just errors out harmlessly.
+        """
+        name = f"oro-sandbox-{eval_run_id}"
+        try:
+            result = subprocess.run(
+                ["docker", "kill", name],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                logging.info(f"Killed orphaned sandbox container {name}")
+        except Exception as e:
+            logging.warning(f"Failed to kill sandbox container {name}: {e}")
 
     def _check_for_updates(self):
         """Trigger Watchtower update check and pull sandbox image.

@@ -102,7 +102,7 @@ class TestWeightSetterThread:
         setter.stop()
         assert not setter._thread.is_alive()
 
-    def test_invalid_ratio_raises_at_construction(
+    def test_invalid_burn_fallback_raises_at_construction(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
         with pytest.raises(ValueError):
@@ -112,8 +112,7 @@ class TestWeightSetterThread:
                 metagraph=mock_metagraph,
                 wallet=mock_wallet,
                 netuid=1,
-                t_top=0.6,
-                t_burn=0.5,  # sum > 1
+                t_burn_fallback=1.1,  # > 1
             )
 
     # --- race-based path (only path remaining) ---
@@ -194,7 +193,7 @@ class TestWeightSetterThread:
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
         # K=3, tail (ranks 2..3) = [2, 1] → tail_sum_actual = 3.
-        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=3)
+        top_u16, burn_u16 = compute_pinned_weights(0.75, tail_sum=3)
         assert weights[0] == burn_u16
         assert weights[1] == top_u16
         assert weights[2] == 2
@@ -247,7 +246,7 @@ class TestWeightSetterThread:
         for call in mock_backend_client.get_race_detail.call_args_list:
             assert call.args == (completed_id,) or call.kwargs == {"race_id": completed_id}
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, _ = compute_pinned_weights(0.25, 0.75, tail_sum=3)
+        top_u16, _ = compute_pinned_weights(0.75, tail_sum=3)
         assert weights[1] == top_u16
 
     def test_drift_correction_when_protected_finishers_deregistered(
@@ -286,7 +285,7 @@ class TestWeightSetterThread:
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
         # Tail dereg'd → tail_sum_actual = 0 → recompute pins top, burn.
-        top_u16, burn_u16 = compute_pinned_weights(0.25, 0.75, tail_sum=0)
+        top_u16, burn_u16 = compute_pinned_weights(0.75, tail_sum=0)
         assert weights[0] == burn_u16
         assert weights[1] == top_u16
         # Submitted top share matches t_top exactly.
