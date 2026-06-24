@@ -81,33 +81,48 @@ def run_capped(
     ``subprocess.run``. Returns the child's exit code.
     """
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    with (
-        open(stdout_path, "wb") as out_file,
-        open(stderr_path, "wb") as err_file,
-    ):
-        assert proc.stdout is not None and proc.stderr is not None
-        readers = [
-            threading.Thread(
-                target=drain_capped,
-                args=(pipe, dst, max_bytes),
-                kwargs={"chunk_size": chunk_size},
-                daemon=True,
-            )
-            for pipe, dst in ((proc.stdout, out_file), (proc.stderr, err_file))
-        ]
-        for t in readers:
-            t.start()
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-            raise
-        finally:
-            # The child owns the only write ends of these pipes, so once it
-            # exits (or is killed above) the reads hit EOF and the threads
-            # finish; join before the dest files close. daemon=True keeps a
-            # wedged reader from blocking interpreter shutdown as a backstop.
+    # Once Popen succeeds the child is running; any failure before we normally
+    # return (e.g. opening the cap files raises ENOSPC — the very disk-full case
+    # this guards against) must still kill it, or we leak an undrained, unwaited
+    # process whose pipe eventually fills and blocks.
+    try:
+        with (
+            open(stdout_path, "wb") as out_file,
+            open(stderr_path, "wb") as err_file,
+        ):
+            assert proc.stdout is not None and proc.stderr is not None
+            readers = [
+                threading.Thread(
+                    target=drain_capped,
+                    args=(pipe, dst, max_bytes),
+                    kwargs={"chunk_size": chunk_size},
+                    daemon=True,
+                )
+                for pipe, dst in ((proc.stdout, out_file), (proc.stderr, err_file))
+            ]
             for t in readers:
-                t.join()
+                t.start()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Kill BEFORE joining: the readers only reach EOF once the child
+                # exits, so joining a live child would deadlock.
+                proc.kill()
+                proc.wait()
+                raise
+            finally:
+                # The child owns the only write ends of these pipes, so once it
+                # exits (or is killed above) the reads hit EOF and the threads
+                # finish; join before the dest files close. daemon=True keeps a
+                # wedged reader from blocking interpreter shutdown as a backstop.
+                for t in readers:
+                    t.join()
+    except BaseException:
+        # Reached if the cap files fail to open before any reader starts (no
+        # readers to join), or re-raised from the timeout path above (child
+        # already dead, so kill/wait are no-ops). Either way, never leak the
+        # child.
+        proc.kill()
+        proc.wait()
+        raise
     return proc.returncode

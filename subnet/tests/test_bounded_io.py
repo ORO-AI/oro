@@ -93,3 +93,34 @@ def test_run_capped_kills_on_timeout(tmp_path):
         )
     # process was killed at the timeout, not waited out for 30s
     assert time.monotonic() - start < 10
+
+
+def test_run_capped_reaps_child_when_log_open_fails(tmp_path, monkeypatch):
+    # Popen starts the child before the cap files are opened. If open() fails
+    # (here: a missing parent dir; in prod: ENOSPC on a full disk — the case
+    # this guards), run_capped must still reap the child, not leak it running.
+    import validator.bounded_io as bio
+
+    captured: dict = {}
+    real_popen = subprocess.Popen
+
+    def spy_popen(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        captured["proc"] = proc
+        return proc
+
+    monkeypatch.setattr(bio.subprocess, "Popen", spy_popen)
+
+    cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    with pytest.raises(FileNotFoundError):
+        run_capped(
+            cmd,
+            stdout_path=tmp_path / "missing_dir" / "o.log",  # open() raises
+            stderr_path=tmp_path / "e.log",
+            max_bytes=4096,
+            timeout=30,
+        )
+
+    proc = captured["proc"]
+    proc.wait(timeout=5)  # must not hang; the child was killed on the way out
+    assert proc.poll() is not None

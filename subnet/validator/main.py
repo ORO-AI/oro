@@ -438,6 +438,10 @@ class Validator:
             return None, metadata
         except Exception as e:
             logging.error(f"Error running sandbox for eval_run {eval_run_id}: {e}")
+            # run_capped may have already started the container before failing
+            # (e.g. opening the cap files raised on a full disk); kill the orphan
+            # here too, not just on the timeout path. No-op if it never started.
+            self._kill_sandbox_container(eval_run_id)
             return None, metadata
 
     def _kill_sandbox_container(self, eval_run_id: str) -> None:
