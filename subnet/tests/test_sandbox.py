@@ -171,6 +171,26 @@ class TestBuildSandboxCommand:
         assert cmd[net_idx + 1] == "custom-net"
         assert "custom:latest" in cmd
 
+    def test_container_name_sets_docker_name(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+            container_name="oro-sandbox-abc123",
+        )
+        name_idx = cmd.index("--name")
+        assert cmd[name_idx + 1] == "oro-sandbox-abc123"
+
+    def test_container_name_omitted_when_none(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert "--name" not in cmd
+
     def test_resource_limits_present(self):
         """Verify Docker resource limits are included in the command."""
         cmd = build_sandbox_command(

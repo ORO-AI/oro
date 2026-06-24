@@ -313,6 +313,7 @@ class Validator:
             agent_container_path="/app/logs/agent.py",
             max_workers=self.config.sandbox_max_workers,
             timeout=self.config.sandbox_problem_timeout,
+            container_name=f"oro-sandbox-{eval_run_id}",
         )
 
         logging.info(f"Running sandbox for eval_run {eval_run_id}")
@@ -415,6 +416,11 @@ class Validator:
 
         except subprocess.TimeoutExpired:
             metadata["exit_code"] = -1
+            # run_capped SIGKILLs the `docker run` CLI, but the container keeps
+            # running on the daemon (it's attached, not the client's child), so
+            # a timed-out runaway agent would keep burning CPU/network until its
+            # own internal timeout. Kill the orphan by name (ORO-1414).
+            self._kill_sandbox_container(eval_run_id)
             if stderr_log.exists():
                 stderr_content = read_text_lossy(stderr_log)
                 if stderr_content.strip():
@@ -433,6 +439,25 @@ class Validator:
         except Exception as e:
             logging.error(f"Error running sandbox for eval_run {eval_run_id}: {e}")
             return None, metadata
+
+    def _kill_sandbox_container(self, eval_run_id: str) -> None:
+        """Best-effort kill of the sandbox container left running after a timeout.
+
+        Matches the ``--name`` set in :func:`build_sandbox_command`. The container
+        is ``--rm`` so killing it also removes it. Never raises: if it already
+        exited (the common case) ``docker kill`` just errors out harmlessly.
+        """
+        name = f"oro-sandbox-{eval_run_id}"
+        try:
+            result = subprocess.run(
+                ["docker", "kill", name],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                logging.info(f"Killed orphaned sandbox container {name}")
+        except Exception as e:
+            logging.warning(f"Failed to kill sandbox container {name}: {e}")
 
     def _check_for_updates(self):
         """Trigger Watchtower update check and pull sandbox image.
