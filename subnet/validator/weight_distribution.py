@@ -31,17 +31,24 @@ U16_MAX = 65535
 
 # Allocation model
 # ----------------
-# Top miner receives exactly `t_top` of normalised emission. Burn uid +
-# tail (top-half ranks 2..K) together receive exactly `t_burn`.
-# `t_top + t_burn == 1` is required — there is no third bucket.
+# Single knob: `t_burn`, the baseline burn rate (0..1). The top miner's
+# share is implicitly `t_top = 1.0 - t_burn` — there is no third bucket.
 #
-# Concretely with `t_top=0.25`, `t_burn=0.75`:
+# When `t_burn >= t_top` (e.g. 0.75 / 0.25 today):
 #   * burn slot pinned at U16_MAX = 65535
 #   * total = (U16_MAX + tail_sum) / t_burn
 #   * top u16 = round(t_top * total)
-# so the top miner's share is invariant under `tail_sum` (i.e. under N),
-# and the tail "comes out of" the burn allocation rather than from both
-# top and burn proportionally.
+# The tail (top-half ranks 2..K, integer taper M, M-1, ..., 1) comes out
+# of the burn allocation; top miner stays at exactly `t_top` regardless
+# of race size.
+#
+# When `t_burn < t_top` (low-burn regime, e.g. burn=0):
+#   * top slot pinned at U16_MAX
+#   * burn = round(t_burn * U16_MAX / t_top) - tail_sum, clamped at 0
+# If the tail exceeds the burn budget, the top miner absorbs the
+# deficit — their effective share falls from `t_top` to
+# `U16_MAX / (U16_MAX + tail_sum)`. The tail's protection share is
+# preserved; only the burn-vs-top split shifts.
 
 
 @dataclass(frozen=True)
@@ -71,15 +78,9 @@ def rank_finishers(qualifiers: Iterable[RankedFinisher]) -> list[RankedFinisher]
     )
 
 
-def _validate_ratios(t_top: float, t_burn: float) -> None:
-    if t_top < 0 or t_burn < 0:
-        raise ValueError("t_top and t_burn must be non-negative")
-    if abs((t_top + t_burn) - 1.0) > 1e-9:
-        raise ValueError(
-            "t_top + t_burn must equal 1; the tail comes out of t_burn's share"
-        )
-    if t_top == 0 and t_burn == 0:
-        raise ValueError("at least one of t_top / t_burn must be > 0")
+def _validate_burn(t_burn: float) -> None:
+    if t_burn < 0 or t_burn > 1:
+        raise ValueError("t_burn must be in [0, 1]")
 
 
 def _tail_sum_for(k: int) -> int:
@@ -92,56 +93,54 @@ def _tail_sum_for(k: int) -> int:
     return (k - 1) * k // 2
 
 
-def compute_pinned_weights(
-    t_top: float, t_burn: float, tail_sum: int
-) -> tuple[int, int]:
-    """Return `(top_u16, burn_u16)` such that the chain-normalised vector
-    yields exactly `t_top` for the top miner and `t_burn` for the burn uid
-    plus tail combined.
+def compute_pinned_weights(t_burn: float, tail_sum: int) -> tuple[int, int]:
+    """Return `(top_u16, burn_u16)` for the chain-normalised vector.
 
-    The tail allocation comes out of `t_burn`'s share, not from both
-    proportionally — top miner stays at exactly `t_top` regardless of N.
+    `t_top` is derived as `1.0 - t_burn` — the two are always
+    complementary, so a single knob suffices. Backend's
+    `emission_baseline_burn_rate` is the source of truth.
 
-    The larger of `t_top` / `t_burn` is pinned at `U16_MAX`; the smaller
-    is derived from the ratio + the tail sum so the integrated total
-    sums to the right normalised shares.
+    When `t_burn >= t_top` (e.g. today's 0.75 / 0.25 split), burn is
+    pinned at `U16_MAX` and top derives from the ratio; the tail's
+    share comes out of `t_burn`'s budget, so the top miner stays at
+    exactly `t_top` regardless of N.
+
+    When `t_burn < t_top` (lower-burn regime) AND the rank-j tail
+    exceeds what the burn budget can fund, the deficit is absorbed by
+    the top miner — burn clamps to 0 and the top miner's effective
+    share falls slightly below `t_top` (specifically to
+    `U16_MAX / (U16_MAX + tail_sum)`). The tail's protection share is
+    never compromised; only the burn-vs-top split shifts.
     """
-    _validate_ratios(t_top, t_burn)
+    _validate_burn(t_burn)
     if tail_sum < 0:
         raise ValueError("tail_sum must be non-negative")
 
+    t_top = 1.0 - t_burn
+
     if t_burn >= t_top:
-        # Pin burn slot at U16_MAX. Burn share equals (burn + tail) / total,
-        # so total = (U16_MAX + tail_sum) / t_burn and top = t_top * total.
-        burn = U16_MAX
+        # Pin burn at U16_MAX. total = (U16_MAX + tail_sum) / t_burn,
+        # top = t_top * total. Tail's share fits inside t_burn's budget.
         if t_burn == 0:
             return 0, 0
         total = (U16_MAX + tail_sum) / t_burn
         top = round(t_top * total) if t_top > 0 else 0
-        return top, burn
+        return top, U16_MAX
 
-    # Pin top at U16_MAX. Total = U16_MAX / t_top; burn slot is the
-    # share of t_burn that's left after the tail consumes its part.
-    top = U16_MAX
-    if t_top == 0:
+    # t_burn < t_top: pin top at U16_MAX. Burn = remaining share after
+    # the tail consumes its rank-j integers. Clamp at 0 — the top miner
+    # absorbs the deficit when the tail would push burn negative.
+    if t_top == 0:  # unreachable given t_burn < t_top branch, defensive
         return 0, 0
     total = U16_MAX / t_top
     burn = round(t_burn * total) - tail_sum
     if burn < 0:
-        # Tail consumed more than the burn share — the configured t_burn
-        # is too small for the race size at this t_top. The caller would
-        # need to either drop t_top, raise t_burn, or shrink K. Fail loud
-        # rather than silently emitting a negative burn.
-        raise ValueError(
-            f"tail_sum {tail_sum} exceeds burn share at "
-            f"t_top={t_top}, t_burn={t_burn}; lower N or adjust ratios"
-        )
-    return top, burn
+        burn = 0
+    return U16_MAX, burn
 
 
 def compute_hotkey_weights(
     qualifiers: Iterable[RankedFinisher],
-    t_top: float,
     t_burn: float,
     top_hotkey: str | None = None,
 ) -> dict[str, int]:
@@ -175,7 +174,7 @@ def compute_hotkey_weights(
     m = len(tail_finishers)
     tail_sum = m * (m + 1) // 2  # M + (M-1) + ... + 1
 
-    top_u16, _ = compute_pinned_weights(t_top, t_burn, tail_sum)
+    top_u16, _ = compute_pinned_weights(t_burn, tail_sum)
     weights: dict[str, int] = {}
     if top_hotkey is not None:
         weights[top_hotkey] = top_u16
@@ -188,7 +187,6 @@ def compute_hotkey_weights(
 def build_metagraph_weight_vector(
     qualifiers: Iterable[RankedFinisher],
     metagraph_hotkeys: list[str],
-    t_top: float,
     t_burn: float,
     top_hotkey: str | None = None,
 ) -> tuple[list[int], list[int]]:
@@ -235,7 +233,7 @@ def build_metagraph_weight_vector(
     effective_top = top_hotkey if has_eligible_top else None
 
     hotkey_weights = compute_hotkey_weights(
-        list(qualifiers), t_top, t_burn, top_hotkey=effective_top
+        list(qualifiers), t_burn, top_hotkey=effective_top
     )
 
     # Place the tail. The top entry (if any) is pinned below from the
@@ -255,7 +253,7 @@ def build_metagraph_weight_vector(
     # Pin top + burn from the *actual* tail sum so the top miner lands at
     # exactly `t_top` of the submitted vector. Additive assignment handles
     # the rare testnet case where uid 0 is itself the top hotkey.
-    top_u16, burn_u16 = compute_pinned_weights(t_top, t_burn, tail_sum_actual)
+    top_u16, burn_u16 = compute_pinned_weights(t_burn, tail_sum_actual)
     weights[0] += burn_u16
     if has_eligible_top:
         weights[hotkey_to_idx[top_hotkey]] += top_u16
