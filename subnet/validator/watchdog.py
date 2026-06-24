@@ -79,9 +79,14 @@ class ProgressWatchdog:
 
     def _abort(self) -> None:
         elapsed = self._now() - self._last_beat
+        # WATCHDOG_ABORT is a stable token so a CloudWatch Logs metric filter can
+        # alarm on validator self-recoveries (otherwise a restart loop is
+        # invisible unless someone reads container logs). A Prometheus counter
+        # would not work here: the process exits immediately, before the next
+        # scrape, and the counter resets to 0 on restart (ORO-1414).
         logging.error(
-            "Validator watchdog: no progress for %.0fs (timeout %.0fs) — aborting "
-            "so the container restart policy recovers the validator (ORO-1414).",
+            "WATCHDOG_ABORT: validator made no progress for %.0fs (timeout %.0fs); "
+            "aborting so the container restart policy recovers the validator (ORO-1414).",
             elapsed,
             self._timeout,
         )

@@ -10,8 +10,10 @@ validator conftest dir.
 
 from __future__ import annotations
 
+import logging
 import threading
 
+from validator import watchdog as watchdog_module
 from validator.watchdog import ProgressWatchdog
 
 
@@ -60,6 +62,22 @@ def test_monitor_thread_aborts_when_stalled():
         assert fired.wait(2.0) is True
     finally:
         wd.stop()
+
+
+def test_abort_logs_stable_alert_token(monkeypatch, caplog):
+    # _abort calls os._exit, which would kill pytest; stub it so we can assert
+    # the WATCHDOG_ABORT token a CloudWatch metric filter alarms on is emitted.
+    exited: dict[str, int] = {}
+    monkeypatch.setattr(
+        watchdog_module.os, "_exit", lambda code: exited.__setitem__("code", code)
+    )
+    clk = _FakeClock()
+    wd = ProgressWatchdog(timeout_seconds=100, now=clk)
+    clk.t = 500
+    with caplog.at_level(logging.ERROR):
+        wd._abort()
+    assert exited["code"] == 1
+    assert "WATCHDOG_ABORT" in caplog.text
 
 
 def test_monitor_thread_quiet_while_healthy():
