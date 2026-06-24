@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from validator.bounded_io import drain_capped, run_capped
+from validator.bounded_io import drain_capped, read_text_lossy, run_capped
 
 
 def test_under_cap_writes_everything_verbatim():
@@ -66,6 +66,17 @@ def test_run_capped_bounds_a_runaway_stdout_to_disk(tmp_path):
     assert len(data) < 4096 + 512
     assert data[:4096] == b"A" * 4096
     assert b"truncated" in data
+
+
+def test_read_text_lossy_tolerates_non_utf8(tmp_path):
+    # An agent can emit arbitrary bytes; reading the captured log must not raise.
+    path = tmp_path / "sandbox_stdout.log"
+    path.write_bytes(b"before \xff\xfe\x80 after")
+
+    text = read_text_lossy(path)
+
+    assert "before " in text
+    assert "after" in text  # decode replaced the invalid bytes instead of raising
 
 
 def test_run_capped_kills_on_timeout(tmp_path):

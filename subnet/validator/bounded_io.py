@@ -53,6 +53,16 @@ def drain_capped(
     return total
 
 
+def read_text_lossy(path: Path) -> str:
+    """Read a captured sandbox log as text, tolerating non-UTF-8 bytes.
+
+    An agent can emit arbitrary bytes, so a plain ``Path.read_text()`` can raise
+    ``UnicodeDecodeError`` and lose the very stderr/stdout we want for debugging.
+    Invalid bytes are replaced instead of raising.
+    """
+    return path.read_text(errors="replace")
+
+
 def run_capped(
     cmd: list[str],
     *,

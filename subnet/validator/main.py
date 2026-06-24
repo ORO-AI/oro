@@ -21,7 +21,7 @@ from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
-from .bounded_io import run_capped
+from .bounded_io import read_text_lossy, run_capped
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
 from .metrics import (
@@ -368,7 +368,7 @@ class Validator:
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
-                stderr_content = stderr_log.read_text()
+                stderr_content = read_text_lossy(stderr_log)
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
                     log_fn = logging.error if returncode != 0 else logging.info
@@ -377,7 +377,7 @@ class Validator:
                     )
 
             if stdout_log.exists():
-                stdout_content = stdout_log.read_text()
+                stdout_content = read_text_lossy(stdout_log)
                 if stdout_content.strip():
                     logging.info(
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
@@ -408,7 +408,7 @@ class Validator:
                     f"Output file not found after sandbox execution: {output_file}"
                 )
                 if stderr_log.exists():
-                    stderr_content = stderr_log.read_text()
+                    stderr_content = read_text_lossy(stderr_log)
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
@@ -416,7 +416,7 @@ class Validator:
         except subprocess.TimeoutExpired:
             metadata["exit_code"] = -1
             if stderr_log.exists():
-                stderr_content = stderr_log.read_text()
+                stderr_content = read_text_lossy(stderr_log)
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(
