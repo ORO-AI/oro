@@ -175,6 +175,13 @@ class BackendError(Exception):
         return self.message
 
 
+# Long-lived Session used by ``upload_to_s3`` so the validator's per-eval
+# upload burst reuses TCP+TLS connections instead of opening a fresh socket
+# per problem. Default urllib3 pool size (10) is enough to keep the
+# parallel uploader in _upload_logs cache-warm.
+_S3_SESSION = requests.Session()
+
+
 class BackendClient:
     """HTTP client for ORO Backend API using oro-sdk.
 
@@ -599,7 +606,7 @@ class BackendClient:
         """
         method = presign.method if presign.method is not UNSET else "PUT"
         headers = {"Content-Type": "application/gzip"}
-        response = requests.request(
+        response = _S3_SESSION.request(
             method,
             presign.upload_url,
             headers=headers,
