@@ -151,7 +151,7 @@ class Validator:
         parser.add_argument(
             "--reasoning-max-workers",
             type=int,
-            default=int(os.environ.get("REASONING_MAX_WORKERS") or "8"),
+            default=int(os.environ.get("REASONING_MAX_WORKERS") or "4"),
             help="Number of parallel reasoning judge workers (env: REASONING_MAX_WORKERS).",
         )
         # Backend API configuration
