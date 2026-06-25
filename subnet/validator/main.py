@@ -139,7 +139,7 @@ class Validator:
         parser.add_argument(
             "--sandbox-max-workers",
             type=int,
-            default=int(os.environ.get("SANDBOX_MAX_WORKERS") or "15"),
+            default=int(os.environ.get("SANDBOX_MAX_WORKERS") or "30"),
             help="Number of parallel problem workers in sandbox (env: SANDBOX_MAX_WORKERS).",
         )
         parser.add_argument(
@@ -151,7 +151,7 @@ class Validator:
         parser.add_argument(
             "--reasoning-max-workers",
             type=int,
-            default=int(os.environ.get("REASONING_MAX_WORKERS") or "4"),
+            default=int(os.environ.get("REASONING_MAX_WORKERS") or "8"),
             help="Number of parallel reasoning judge workers (env: REASONING_MAX_WORKERS).",
         )
         # Backend API configuration
