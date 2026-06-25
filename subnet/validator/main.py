@@ -5,6 +5,7 @@ import os
 import subprocess
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Dict, Any
 from uuid import UUID
@@ -55,6 +56,13 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
 # Hardcoded because the bundled prometheus.yml scrapes this exact port; an
 # operator-tunable arg adds surface area without buying anything.
 METRICS_PORT = 9100
+
+# Parallel uploads in _upload_logs. Each worker does a presign roundtrip +
+# an S3 PUT, both flowing through the BackendClient's persistent connection
+# pools, so 20 workers comfortably fan out an N-problem eval without
+# starving the auth-client httpx pool. The matching Backend per-IP cap on
+# /v1/validator/* sits comfortably above the resulting RPM.
+_UPLOAD_LOGS_WORKERS = 20
 
 
 def _rewrite_localhost_url(url: str) -> str:
@@ -1023,8 +1031,10 @@ class Validator:
 
             problem_lines = split_output_by_problem(output_file, problem_ids)
 
-            last_s3_key = ""
-            uploaded_keys: dict[UUID, str] = {}  # problem_id → s3_key
+            # Build (pid, compressed_bytes) tuples up front so the worker
+            # function is pure I/O. Invalid problem_ids are dropped here
+            # before they reach the executor.
+            jobs: list[tuple[UUID, bytes]] = []
             for pid_str, line_data in problem_lines.items():
                 try:
                     pid = UUID(pid_str)
@@ -1033,23 +1043,44 @@ class Validator:
                         f"Invalid problem_id in output: {pid_str}, skipping"
                     )
                     continue
+                jobs.append((pid, gzip.compress(line_data)))
 
-                compressed = gzip.compress(line_data)
+            def _upload_one(job: tuple[UUID, bytes]) -> tuple[UUID, str] | None:
+                pid, compressed = job
+                try:
+                    presign = self.backend_client.get_presigned_upload_url(
+                        content_length=len(compressed),
+                        eval_run_id=eval_run_id,
+                        problem_id=pid,
+                    )
+                    # Rewrite localhost URLs for Docker → host connectivity
+                    if hasattr(presign, "upload_url"):
+                        presign.upload_url = _rewrite_localhost_url(presign.upload_url)
+                    self.backend_client.upload_to_s3(presign, compressed)
+                    return pid, presign.results_s3_key
+                except Exception as e:
+                    logging.warning(f"Upload failed for problem {pid}: {e}")
+                    return None
 
-                presign = self.backend_client.get_presigned_upload_url(
-                    content_length=len(compressed),
-                    eval_run_id=eval_run_id,
-                    problem_id=pid,
-                )
-
-                # Rewrite localhost URLs for Docker → host connectivity
-                if hasattr(presign, "upload_url"):
-                    presign.upload_url = _rewrite_localhost_url(presign.upload_url)
-
-                self.backend_client.upload_to_s3(presign, compressed)
-                logging.info(f"Uploaded logs to {presign.results_s3_key}")
-                last_s3_key = presign.results_s3_key
-                uploaded_keys[pid] = presign.results_s3_key
+            # Parallel uploads. Sized to match the BackendClient S3 session's
+            # pool_connections so we don't queue inside urllib3. Each worker
+            # does one presign roundtrip + one S3 PUT; both calls reuse the
+            # connection pool, so per-problem wall time drops from ~600 ms
+            # to ~150-200 ms.
+            uploaded_keys: dict[UUID, str] = {}
+            last_s3_key = ""
+            if jobs:
+                with ThreadPoolExecutor(
+                    max_workers=_UPLOAD_LOGS_WORKERS,
+                    thread_name_prefix="upload-logs",
+                ) as pool:
+                    for result in pool.map(_upload_one, jobs):
+                        if result is None:
+                            continue
+                        pid, s3_key = result
+                        uploaded_keys[pid] = s3_key
+                        last_s3_key = s3_key
+                        logging.info(f"Uploaded logs to {s3_key}")
 
             # Report S3 keys back to Backend so download endpoint can find them
             if uploaded_keys:

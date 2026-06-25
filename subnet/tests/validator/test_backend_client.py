@@ -312,7 +312,7 @@ class TestBackendClientUploadToS3:
         mock_response.status_code = 200
 
         with patch(
-            "validator.backend_client.requests.request", return_value=mock_response
+            "validator.backend_client._S3_SESSION.request", return_value=mock_response
         ):
             client.upload_to_s3(presign, b"test data")  # Should not raise
 
@@ -331,7 +331,7 @@ class TestBackendClientUploadToS3:
         mock_response.status_code = 403
 
         with patch(
-            "validator.backend_client.requests.request", return_value=mock_response
+            "validator.backend_client._S3_SESSION.request", return_value=mock_response
         ):
             with pytest.raises(BackendError):
                 client.upload_to_s3(presign, b"test data")
