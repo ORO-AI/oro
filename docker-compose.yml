@@ -23,6 +23,12 @@ services:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     networks:
       - main
+    # Match sandbox container's --cpu-shares=2048 (see subnet/sandbox.py).
+    # Search-server sits on the sandbox's hot path (every find_product /
+    # view_product call). Leaving it at Docker's 1024 default lets the
+    # sandbox starve it on saturated hosts, elongating sandbox phase and
+    # tripping per-problem timeouts.
+    cpu_shares: 2048
     restart: unless-stopped
 
   proxy:
@@ -52,6 +58,11 @@ services:
       start_period: 10s
     labels:
       com.centurylinklabs.watchtower.scope: "oro-validator"
+    # Match sandbox container's --cpu-shares=2048. Proxy fans every
+    # /inference and /search call from sandbox + reasoning judge; if
+    # sandbox outweighs proxy under CPU pressure, both inference and
+    # search round-trips stall.
+    cpu_shares: 2048
     restart: unless-stopped
 
   sandbox:
