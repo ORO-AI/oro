@@ -2,6 +2,26 @@ FROM ghcr.io/oro-ai/oro/search-server-base:latest
 
 WORKDIR /app
 
+# Bundle async-profiler so we can JVMTI-attach to the embedded Lucene JVM
+# (pyserini) at runtime without restarting the container. ~5 MiB; opt-in
+# only — never invoked unless an operator runs `asprof` manually inside
+# the container.
+ARG ASPROF_VERSION=3.0
+RUN set -eux; \
+    arch="$(uname -m)"; case "$arch" in \
+        x86_64) asprof_arch=x64 ;; \
+        aarch64|arm64) asprof_arch=arm64 ;; \
+        *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
+    mkdir -p /opt/async-profiler; \
+    curl -fsSL "https://github.com/async-profiler/async-profiler/releases/download/v${ASPROF_VERSION}/async-profiler-${ASPROF_VERSION}-linux-${asprof_arch}.tar.gz" \
+        | tar xz --strip-components=1 -C /opt/async-profiler; \
+    ln -s /opt/async-profiler/bin/asprof /usr/local/bin/asprof; \
+    apt-get purge -y curl; \
+    apt-get autoremove -y; \
+    rm -rf /var/lib/apt/lists/*
+
 # Only the code layer — changes on every release
 COPY src/search_engine /app/src/search_engine
 COPY src/__init__.py /app/src/
