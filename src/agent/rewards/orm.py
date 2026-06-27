@@ -1,5 +1,8 @@
 from collections import Counter
 
+SENTENCE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+TITLE_SIM_THRESHOLD = 0.95
+
 _sentence_model = None
 _sentence_model_unavailable = False
 
@@ -16,10 +19,7 @@ def _get_sentence_model():
         try:
             from sentence_transformers import SentenceTransformer
 
-            _sentence_model = SentenceTransformer(
-                "Qwen/Qwen3-Embedding-0.6B",
-                model_kwargs={"torch_dtype": "bfloat16"},
-            )
+            _sentence_model = SentenceTransformer(SENTENCE_MODEL_NAME)
         except ImportError:
             _sentence_model_unavailable = True
             return None
@@ -78,7 +78,7 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
                     sim = model.similarity(product_emb, gt_emb)[0][0]
                     total_count += 1
                     total_counter["title"] += 1
-                    if sim >= 0.7:
+                    if sim >= TITLE_SIM_THRESHOLD:
                         hit_count += 1
                         hit_counter["title"] += 1
     # price
