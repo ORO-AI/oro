@@ -56,6 +56,29 @@ def test_non_gt_calls_encode(mock_get):
     assert score == 1.0         # 3/3
 
 
+@patch("src.agent.rewards.orm._get_sentence_model")
+def test_stale_precomputed_embedding_dim_mismatch_falls_back(mock_get):
+    """Suite-shipped embeddings from a different-dim model are discarded."""
+    m = MagicMock()
+    m.get_sentence_embedding_dimension.return_value = 384
+    m.encode.return_value = [[0.0] * 384]
+    m.similarity.return_value = [[0.99]]
+    mock_get.return_value = m
+
+    reward = {
+        "product_id": "Z",
+        "title": ["GT title"],
+        "_title_embeddings": {"GT title": [0.0] * 1024},  # stale (old model)
+    }
+    score, _, hits = rule_score_reward(_product(pid="A"), reward)
+
+    # Both product and GT title get live-encoded (2 encode calls, each length-1).
+    assert m.encode.call_count == 2
+    # similarity() must only see 384-dim tensors — no shape mismatch.
+    assert hits["title"] == 1
+    assert score == 1.0
+
+
 @patch("src.agent.problem_scorer.get_product")
 @patch("src.agent.rewards.orm._get_sentence_model")
 def test_shop_batch_encodes_non_gt_titles(mock_get, mock_prod):
