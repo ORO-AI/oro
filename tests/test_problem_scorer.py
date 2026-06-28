@@ -1052,3 +1052,86 @@ class TestLoggingOnErrors:
             f"Expected 3 format scoring warnings (one per broken step), "
             f"got {len(format_warnings)}: {format_warnings}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Negative cache poisoning regression
+# ---------------------------------------------------------------------------
+
+
+class TestGetProductNegativeCache:
+    """A transient empty response from search-server must NOT poison the
+    in-memory cache. Otherwise every subsequent agent that recommends the
+    same product is silently flipped to FAILED until the validator process
+    restarts."""
+
+    def test_empty_response_not_cached(self):
+        """resp.ok + empty list => function returns None but does not cache it."""
+        from src.agent import problem_scorer
+
+        problem_scorer.clear_product_cache()
+
+        class FakeResp:
+            ok = True
+            def json(self):
+                return []
+
+        with patch("src.agent.problem_scorer.requests.get", return_value=FakeResp()):
+            assert problem_scorer.get_product("4452706615") is None
+
+        assert "4452706615" not in problem_scorer._product_cache, (
+            "Empty response must not be cached; otherwise a transient search-server "
+            "hiccup poisons every subsequent lookup for the rest of the validator's "
+            "session and flips all agents recommending this product to FAILED."
+        )
+
+    def test_error_status_not_cached(self):
+        """resp.ok=False (5xx/4xx) returns None and does not cache."""
+        from src.agent import problem_scorer
+
+        problem_scorer.clear_product_cache()
+
+        class FakeResp:
+            ok = False
+            def json(self):
+                return []
+
+        with patch("src.agent.problem_scorer.requests.get", return_value=FakeResp()):
+            assert problem_scorer.get_product("4452706615") is None
+
+        assert "4452706615" not in problem_scorer._product_cache
+
+    def test_retry_after_transient_failure_succeeds(self):
+        """After a transient empty response, a follow-up call must hit the
+        search-server again (no negative-cache entry) and return the product."""
+        from src.agent import problem_scorer
+
+        problem_scorer.clear_product_cache()
+
+        empty = type("R", (), {"ok": True, "json": lambda self: []})()
+        good = type("R", (), {"ok": True, "json": lambda self: [{"product_id": "4452706615"}]})()
+
+        with patch("src.agent.problem_scorer.requests.get", side_effect=[empty, good]) as mock_get:
+            first = problem_scorer.get_product("4452706615")
+            second = problem_scorer.get_product("4452706615")
+
+        assert first is None
+        assert second == {"product_id": "4452706615"}
+        assert mock_get.call_count == 2, "Second call must reach search-server, not return cached None"
+        # And now the successful result IS cached
+        assert problem_scorer._product_cache.get("4452706615") == {"product_id": "4452706615"}
+
+    def test_successful_response_still_cached(self):
+        """Positive caching path is unchanged."""
+        from src.agent import problem_scorer
+
+        problem_scorer.clear_product_cache()
+
+        good = type("R", (), {"ok": True, "json": lambda self: [{"product_id": "p1", "price": 5.0}]})()
+
+        with patch("src.agent.problem_scorer.requests.get", return_value=good) as mock_get:
+            problem_scorer.get_product("p1")
+            problem_scorer.get_product("p1")
+
+        assert mock_get.call_count == 1, "Successful lookup must be cached, not re-fetched"
+        assert problem_scorer._product_cache["p1"] == {"product_id": "p1", "price": 5.0}

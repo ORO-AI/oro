@@ -41,12 +41,15 @@ def get_product(product_id: str) -> Optional[dict]:
         product_id: Product ID to look up
 
     Returns:
-        Full product dict or None if not found
+        Full product dict, or None if the search-server returns empty/error
+        for this call. Misses are NOT cached: a transient empty response would
+        otherwise poison the cache for the rest of the validator's session and
+        flip every subsequent agent that recommended the same product to
+        FAILED. Only successful lookups are cached.
     """
     if not product_id:
         return None
 
-    # Check cache first
     if product_id in _product_cache:
         return _product_cache[product_id]
 
@@ -61,7 +64,6 @@ def get_product(product_id: str) -> Optional[dict]:
             if products and len(products) > 0:
                 _product_cache[product_id] = products[0]
                 return products[0]
-        _product_cache[product_id] = None
         return None
     except requests.RequestException as e:
         logging.warning(f"Failed to fetch product {product_id}: {e}")
