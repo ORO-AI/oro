@@ -1,10 +1,24 @@
+import json
+import logging
+import os
 from collections import Counter
 
-SENTENCE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
-TITLE_SIM_THRESHOLD = 0.95
+SENTENCE_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+TITLE_SIM_THRESHOLD = 0.7
+
+# ORO-1474 shadow scoring: when SHADOW_SCORE_MODEL is set, encode the same
+# (product_title, gt_title) pair with the candidate model and log the
+# canonical + shadow cosine similarity so we can grep CW Logs Insights and
+# replay any threshold offline before promoting a model swap. Threshold is
+# never enforced by shadow — we only need the raw similarity.
+SHADOW_MODEL_ENV = "SHADOW_SCORE_MODEL"
 
 _sentence_model = None
 _sentence_model_unavailable = False
+_shadow_model = None
+_shadow_unavailable = False
+
+_logger = logging.getLogger(__name__)
 
 
 def _get_sentence_model():
@@ -19,11 +33,67 @@ def _get_sentence_model():
         try:
             from sentence_transformers import SentenceTransformer
 
-            _sentence_model = SentenceTransformer(SENTENCE_MODEL_NAME)
+            _sentence_model = SentenceTransformer(
+                SENTENCE_MODEL_NAME,
+                model_kwargs={"torch_dtype": "bfloat16"},
+            )
         except ImportError:
             _sentence_model_unavailable = True
             return None
     return _sentence_model
+
+
+def _get_shadow_model():
+    """Lazy-load the shadow sentence model named by SHADOW_SCORE_MODEL."""
+    global _shadow_model, _shadow_unavailable
+    if _shadow_unavailable:
+        return None
+    name = os.environ.get(SHADOW_MODEL_ENV)
+    if not name:
+        return None
+    if _shadow_model is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            _shadow_model = SentenceTransformer(name)
+        except (ImportError, OSError, ValueError) as exc:
+            _logger.warning("Shadow scorer disabled — failed to load %s: %s", name, exc)
+            _shadow_unavailable = True
+            return None
+    return _shadow_model
+
+
+def _log_shadow_sim(product_title: str, gt_title: str, canonical_sim: float) -> None:
+    """Encode the same title pair with the shadow model and log both sims.
+
+    No-op when ``SHADOW_SCORE_MODEL`` is unset or the shadow model failed to
+    load. One JSON line per pair; grep CW Logs Insights with ``shadow_sim``
+    and apply any threshold offline to estimate the per-row effect of a
+    swap. ORO-1474.
+    """
+    shadow = _get_shadow_model()
+    if shadow is None:
+        return
+    try:
+        product_emb = shadow.encode([product_title])
+        gt_emb = shadow.encode([gt_title])
+        shadow_sim = float(shadow.similarity(product_emb, gt_emb)[0][0])
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("Shadow sim failed for product=%r gt=%r: %s", product_title[:60], gt_title[:60], exc)
+        return
+    _logger.info(
+        "shadow_sim %s",
+        json.dumps(
+            {
+                "canonical_sim": canonical_sim,
+                "shadow_sim": shadow_sim,
+                "canonical_model": SENTENCE_MODEL_NAME,
+                "shadow_model": os.environ.get(SHADOW_MODEL_ENV, ""),
+                "product_title": product_title,
+                "gt_title": gt_title,
+            }
+        ),
+    )
 
 
 def batch_encode_titles(titles: list[str]) -> list:
@@ -87,6 +157,7 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
                     if sim >= TITLE_SIM_THRESHOLD:
                         hit_count += 1
                         hit_counter["title"] += 1
+                    _log_shadow_sim(product["title"], title, float(sim))
     # price
     if "price" in reward:
         price = product["price"]
