@@ -131,6 +131,10 @@ services:
       - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
+      # Opt-in shadow scoring. When set, the validator computes a
+      # second cosine sim per (product, gt) title pair with the named model
+      # and logs both sims for offline comparison. Unset = no behaviour change.
+      - SHADOW_SCORE_MODEL=${SHADOW_SCORE_MODEL:-}
     command:
       - "--wallet.name"
       - "${WALLET_NAME:-default}"
@@ -232,6 +236,8 @@ services:
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INFERENCE_PROVIDER=${INFERENCE_PROVIDER:-}
+      # Opt-in shadow scoring (mirrors the validator service).
+      - SHADOW_SCORE_MODEL=${SHADOW_SCORE_MODEL:-}
     # Use the venv interpreter — bare `python` is the system Python and
     # has no project dependencies installed (e.g. `requests`).
     entrypoint: [".venv/bin/python", "-m", "subnet.test_runner"]
