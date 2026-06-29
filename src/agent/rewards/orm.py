@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 from collections import Counter
 
 SENTENCE_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
@@ -75,12 +76,32 @@ def _log_shadow_sim(product_title: str, gt_title: str, canonical_sim: float) -> 
     if shadow is None:
         return
     try:
+        t0 = time.perf_counter()
         product_emb = shadow.encode([product_title])
         gt_emb = shadow.encode([gt_title])
+        shadow_encode_ms = (time.perf_counter() - t0) * 1000
+        t1 = time.perf_counter()
         shadow_sim = float(shadow.similarity(product_emb, gt_emb)[0][0])
+        shadow_sim_ms = (time.perf_counter() - t1) * 1000
     except Exception as exc:  # noqa: BLE001
         _logger.warning("Shadow sim failed for product=%r gt=%r: %s", product_title[:60], gt_title[:60], exc)
         return
+
+    canonical = _get_sentence_model()
+    canonical_encode_ms = None
+    canonical_sim_ms = None
+    if canonical is not None:
+        try:
+            t0 = time.perf_counter()
+            c_product_emb = canonical.encode([product_title])
+            c_gt_emb = canonical.encode([gt_title])
+            canonical_encode_ms = (time.perf_counter() - t0) * 1000
+            t1 = time.perf_counter()
+            canonical.similarity(c_product_emb, c_gt_emb)
+            canonical_sim_ms = (time.perf_counter() - t1) * 1000
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("Canonical timing probe failed: %s", exc)
+
     _logger.info(
         "shadow_sim %s",
         json.dumps(
@@ -91,6 +112,14 @@ def _log_shadow_sim(product_title: str, gt_title: str, canonical_sim: float) -> 
                 "shadow_model": os.environ.get(SHADOW_MODEL_ENV, ""),
                 "product_title": product_title,
                 "gt_title": gt_title,
+                "shadow_encode_ms": round(shadow_encode_ms, 3),
+                "shadow_sim_ms": round(shadow_sim_ms, 3),
+                "canonical_encode_ms": (
+                    round(canonical_encode_ms, 3) if canonical_encode_ms is not None else None
+                ),
+                "canonical_sim_ms": (
+                    round(canonical_sim_ms, 3) if canonical_sim_ms is not None else None
+                ),
             }
         ),
     )

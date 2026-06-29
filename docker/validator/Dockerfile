@@ -20,10 +20,10 @@ COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Pre-cache SentenceTransformer models (avoids runtime download). The
-# canonical Qwen3 model is always loaded; the bge-small bundle is for the
-# optional ORO-1474 shadow scorer enabled via SHADOW_SCORE_MODEL at runtime.
+# canonical Qwen3 model is always loaded; the bge-small + e5-base bundles
+# are candidate shadow scorers enabled via SHADOW_SCORE_MODEL at runtime.
 ARG HF_TOKEN=""
-RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} .venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B'); SentenceTransformer('BAAI/bge-small-en-v1.5')"
+RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} .venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('Qwen/Qwen3-Embedding-0.6B'); SentenceTransformer('BAAI/bge-small-en-v1.5'); SentenceTransformer('intfloat/e5-base-v2')"
 
 # Copy validator code
 COPY subnet/ /app/subnet/

@@ -93,6 +93,11 @@ def test_shadow_sim_logged_when_enabled(mock_get, mock_shadow, monkeypatch, capl
     assert payload["shadow_sim"] == pytest.approx(0.42)
     assert payload["shadow_model"] == "BAAI/bge-small-en-v1.5"
     assert payload["gt_title"] == "the gt title"
+    # Timing fields populated (real numbers, not None) when both models load.
+    assert isinstance(payload["shadow_encode_ms"], (int, float))
+    assert isinstance(payload["shadow_sim_ms"], (int, float))
+    assert isinstance(payload["canonical_encode_ms"], (int, float))
+    assert isinstance(payload["canonical_sim_ms"], (int, float))
 
 
 def test_shadow_sim_silent_when_disabled(monkeypatch, caplog):
