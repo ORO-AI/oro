@@ -133,7 +133,7 @@ def _score_output(
                 output = parsed.get("dialogue") or []
             else:
                 output = parsed
-            if not output:
+            if not isinstance(output, list) or not output or not isinstance(output[0], dict):
                 continue
             query = output[0].get("extra_info", {}).get("query", "")
             if query not in rewards:
