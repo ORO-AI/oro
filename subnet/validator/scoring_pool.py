@@ -23,7 +23,7 @@ from src.agent.types import ProblemDict
 from subnet.sandbox import attach_title_embeddings
 
 from .reasoning_judge import ReasoningJudge
-from .types import EnvelopeMeta, ProblemResult
+from .types import EnvelopeMeta, ProblemFailureReason, ProblemResult
 
 
 DEFAULT_SCORING_WORKERS = 4
@@ -114,69 +114,154 @@ class ScoringPool:
             self.scorers = {}
 
     def _score_problem(self, dialogue: list, problem_id: str) -> None:
-        """Score a single problem end-to-end. Runs in a worker thread."""
+        """Score a single problem end-to-end. Runs in a worker thread.
+
+        Always publishes a ProblemResult for ``problem_id``. Failure paths
+        write a FAILED result with a specific ``failure_reason`` instead
+        of leaving the problem unscored — the end-of-run sweep would
+        otherwise mark them TIMED_OUT and mask the real cause (ORO-1461).
+        """
+        pid = str(problem_id)
+        problem = self._id_to_problem.get(pid)
+        category = problem.get("category", "product").lower() if problem else "product"
+
         if not self.scorers:
+            self._record_failure(
+                pid, category, ProblemFailureReason.NO_SCORER_FOR_CATEGORY
+            )
             return
         if not isinstance(dialogue, list) or not dialogue:
+            self._record_failure(pid, category, ProblemFailureReason.NO_DIALOGUE)
+            return
+        if not problem:
+            self._record_failure(pid, category, ProblemFailureReason.UNKNOWN_PROBLEM)
             return
 
-        try:
-            problem = self._id_to_problem.get(str(problem_id))
-            if not problem:
-                logging.warning(f"Unknown problem_id: {problem_id}")
-                return
-
-            extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
-            with self._lock:
-                meta = self._envelope_meta.get(str(problem_id))
-            execution_time = (
-                meta.execution_time
-                if meta is not None
-                else extra_info.get("execution_time")
+        scorer = self.scorers.get(category)
+        if not scorer:
+            self._record_failure(
+                pid, category, ProblemFailureReason.NO_SCORER_FOR_CATEGORY
             )
-            query = problem.get("query") or extra_info.get("query")
-            category = problem.get("category", "product").lower()
+            return
 
-            scorer = self.scorers.get(category)
-            if not scorer:
-                logging.warning(f"No scorer for category '{category}'")
-                return
+        extra_info = (dialogue[0].get("extra_info") or {}) if dialogue else {}
+        with self._lock:
+            meta = self._envelope_meta.get(pid)
+        execution_time = (
+            meta.execution_time
+            if meta is not None
+            else extra_info.get("execution_time")
+        )
+        query = problem.get("query") or extra_info.get("query")
+        inf_failures = meta.inference_failure_count if meta else 0
+        inf_total = meta.inference_total if meta else 0
 
-            with self._lock:
-                scored_count = len(self._results) + 1
-            logging.info(
-                f"Scoring problem {scored_count}/{self._total_problems}: "
-                f"{query[:50]}..."
-            )
-
-            score_dict = scorer.score_problem(query=query, output=dialogue)
-            is_successful = is_problem_successful(score_dict, category)
-            score = 1.0 if is_successful else 0.0
-            status = ProblemStatus.SUCCESS if is_successful else ProblemStatus.FAILED
-            inf_failures = meta.inference_failure_count if meta else 0
-            inf_total = meta.inference_total if meta else 0
-
-            reasoning = self._reasoning_judge.score(dialogue, problem_id)
-
-            result = ProblemResult(
-                problem_id=str(problem_id),
-                category=category,
-                status=status,
-                score=score,
-                score_dict=score_dict if isinstance(score_dict, dict) else {},
-                inference_failures=inf_failures,
-                inference_total=inf_total,
+        # Voucher problems must carry a `voucher` budget dict for the scorer
+        # to evaluate the constraint. Without it, ProblemScorer raises deep
+        # inside score_problem and the result was silently lost (ORO-1461).
+        if category == "voucher" and not problem.get("voucher"):
+            self._record_failure(
+                pid,
+                category,
+                ProblemFailureReason.MISSING_METADATA,
                 execution_time=execution_time,
-                **reasoning,
+                inf_failures=inf_failures,
+                inf_total=inf_total,
+                extra={"missing_field": "voucher"},
             )
-            with self._lock:
-                self._results[str(problem_id)] = result
-                completed = len(self._results)
+            return
 
-            logging.info(
-                f"Problem {completed}/{self._total_problems} scored: "
-                f"{score:.4f} (query: {query[:50]}...)"
-            )
+        with self._lock:
+            scored_count = len(self._results) + 1
+        logging.info(
+            f"Scoring problem {scored_count}/{self._total_problems}: {query[:50]}..."
+        )
+
+        try:
+            score_dict = scorer.score_problem(query=query, output=dialogue)
         except Exception as e:
-            logging.error(f"Error scoring problem {problem_id}: {e}")
+            logging.warning(
+                f"AUDIT scoring_exception problem_id={pid} category={category} "
+                f"exc={type(e).__name__} msg={str(e)[:200]}"
+            )
             traceback.print_exc()
+            self._record_failure(
+                pid,
+                category,
+                ProblemFailureReason.SCORING_EXCEPTION,
+                execution_time=execution_time,
+                inf_failures=inf_failures,
+                inf_total=inf_total,
+                extra={"exception_type": type(e).__name__},
+            )
+            return
+
+        if not isinstance(score_dict, dict):
+            logging.warning(
+                f"AUDIT scoring_returned_none problem_id={pid} category={category} "
+                f"type={type(score_dict).__name__}"
+            )
+            self._record_failure(
+                pid,
+                category,
+                ProblemFailureReason.SCORING_RETURNED_NONE,
+                execution_time=execution_time,
+                inf_failures=inf_failures,
+                inf_total=inf_total,
+            )
+            return
+
+        is_successful = is_problem_successful(score_dict, category)
+        score = 1.0 if is_successful else 0.0
+        status = ProblemStatus.SUCCESS if is_successful else ProblemStatus.FAILED
+
+        reasoning = self._reasoning_judge.score(dialogue, problem_id)
+
+        result = ProblemResult(
+            problem_id=pid,
+            category=category,
+            status=status,
+            score=score,
+            score_dict=score_dict,
+            inference_failures=inf_failures,
+            inference_total=inf_total,
+            execution_time=execution_time,
+            **reasoning,
+        )
+        with self._lock:
+            self._results[pid] = result
+            completed = len(self._results)
+
+        logging.info(
+            f"Problem {completed}/{self._total_problems} scored: "
+            f"{score:.4f} (query: {query[:50]}...)"
+        )
+
+    def _record_failure(
+        self,
+        problem_id: str,
+        category: str,
+        reason: ProblemFailureReason,
+        *,
+        execution_time: float | None = None,
+        inf_failures: int = 0,
+        inf_total: int = 0,
+        extra: dict | None = None,
+    ) -> None:
+        """Write a FAILED ProblemResult with an attributed failure_reason."""
+        logging.warning(
+            f"AUDIT problem_failure problem_id={problem_id} category={category} "
+            f"reason={reason.value} extra={extra or {}}"
+        )
+        result = ProblemResult(
+            problem_id=problem_id,
+            category=category,
+            status=ProblemStatus.FAILED,
+            score=0.0,
+            inference_failures=inf_failures,
+            inference_total=inf_total,
+            execution_time=execution_time,
+            failure_reason=reason,
+        )
+        with self._lock:
+            self._results[problem_id] = result
