@@ -3,10 +3,10 @@ import logging
 import os
 from collections import Counter
 
-SENTENCE_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
-TITLE_SIM_THRESHOLD = 0.7
+SENTENCE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+TITLE_SIM_THRESHOLD = 0.72
 
-# ORO-1474 shadow scoring: when SHADOW_SCORE_MODEL is set, encode the same
+# Shadow scoring: when SHADOW_SCORE_MODEL is set, encode the same
 # (product_title, gt_title) pair with the candidate model and log the
 # canonical + shadow cosine similarity so we can grep CW Logs Insights and
 # replay any threshold offline before promoting a model swap. Threshold is
@@ -33,10 +33,7 @@ def _get_sentence_model():
         try:
             from sentence_transformers import SentenceTransformer
 
-            _sentence_model = SentenceTransformer(
-                SENTENCE_MODEL_NAME,
-                model_kwargs={"torch_dtype": "bfloat16"},
-            )
+            _sentence_model = SentenceTransformer(SENTENCE_MODEL_NAME)
         except ImportError:
             _sentence_model_unavailable = True
             return None

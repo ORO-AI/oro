@@ -52,7 +52,7 @@ def test_non_gt_calls_encode(mock_get):
     )
 
     assert m.encode.call_count >= 1
-    assert hits["title"] == 1   # similarity 0.95 >= TITLE_SIM_THRESHOLD (0.7)
+    assert hits["title"] == 1   # similarity 0.95 >= TITLE_SIM_THRESHOLD (0.72)
     assert hits["price"] == 1   # 15 <= 20
     assert hits["service"] == 1
     assert score == 1.0         # 3/3
