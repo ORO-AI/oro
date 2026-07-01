@@ -218,6 +218,10 @@ class ProgressReporter:
             return result.status
         return ProblemStatus.FAILED
 
+    def get_result(self, problem_id: str) -> Optional[ProblemResult]:
+        with self._lock:
+            return self._results.get(problem_id)
+
     def _run(self) -> None:
         """Main monitoring loop.
 

@@ -17,6 +17,7 @@ import requests
 from bittensor.utils.btlogging import logging
 
 from oro_sdk.models import ProblemProgressUpdate
+from oro_sdk.types import UNSET, Unset
 
 from src.agent.types import ScoreComponentsSummary
 
@@ -26,6 +27,38 @@ from .types import ProblemResult
 
 # Report to backend at most every N seconds
 REPORT_INTERVAL_SECONDS = 10.0
+
+
+def problem_result_to_update(
+    result: ProblemResult, logs_s3_key: str | Unset = UNSET
+) -> ProblemProgressUpdate:
+    """Build a ProblemProgressUpdate from a scored ProblemResult.
+
+    Shared by ProgressBatcher.batch_report (periodic score push) and
+    Validator._upload_logs (post-scoring flush that also carries the
+    per-problem log S3 key). Backend upsert is idempotent so calling both
+    is safe — this guards against ProgressBatcher silently dropping scores
+    on fast evals (see progress_batcher.py:108).
+    """
+    scs: Optional[ScoreComponentsSummary] = None
+    if result.reasoning_score is not None:
+        scs = {
+            "reasoning_explanation": result.reasoning_explanation,
+            "reasoning_model": result.reasoning_model,
+        }
+    return ProblemProgressUpdate(
+        problem_id=UUID(result.problem_id),
+        status=result.status,
+        score=result.score,
+        reasoning_score=result.reasoning_score,
+        score_components_summary=scs,
+        inference_failure_count=result.inference_failures
+        if result.inference_total > 0
+        else None,
+        inference_total=result.inference_total if result.inference_total > 0 else None,
+        execution_time=result.execution_time,
+        logs_s3_key=logs_s3_key,
+    )
 
 
 class ProgressBatcher:
@@ -76,29 +109,7 @@ class ProgressBatcher:
         if not results:
             return
 
-        updates = []
-        for r in results:
-            # Include per-problem reasoning data if judge ran
-            scs: Optional[ScoreComponentsSummary] = None
-            if r.reasoning_score is not None:
-                scs = {
-                    "reasoning_explanation": r.reasoning_explanation,
-                    "reasoning_model": r.reasoning_model,
-                }
-
-            update = ProblemProgressUpdate(
-                problem_id=UUID(r.problem_id),
-                status=r.status,
-                score=r.score,
-                reasoning_score=r.reasoning_score,
-                score_components_summary=scs,
-                inference_failure_count=r.inference_failures
-                if r.inference_total > 0
-                else None,
-                inference_total=r.inference_total if r.inference_total > 0 else None,
-                execution_time=r.execution_time,
-            )
-            updates.append(update)
+        updates = [problem_result_to_update(r) for r in results]
 
         try:
             self._backend_client.report_progress(self._eval_run_id, updates)
