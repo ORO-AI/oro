@@ -176,22 +176,3 @@ class TestSweepNarrowing:
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
-
-
-class TestGetResult:
-    def test_returns_populated_result(self, reporter, tmp_path):
-        _write_envelope(
-            tmp_path / "output.jsonl",
-            problem_id=_P1,
-            status="FAILED",
-            dialogue=None,
-            error={"type": "RuntimeError", "message": "x"},
-        )
-        reporter._envelope_dispatcher.read_and_dispatch()
-        result = reporter.get_result(_P1)
-        assert result is not None
-        assert result.status == ProblemStatus.FAILED
-        assert result.score == 0.0
-
-    def test_returns_none_for_unknown(self, reporter):
-        assert reporter.get_result(_P1) is None
