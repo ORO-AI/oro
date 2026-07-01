@@ -37,6 +37,7 @@ from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
+from .progress_batcher import problem_result_to_update
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
@@ -118,7 +119,9 @@ class Validator:
         parser.add_argument(
             "--sandbox-log-max-bytes",
             type=int,
-            default=int(os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)),
+            default=int(
+                os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)
+            ),
             help=(
                 "Max bytes captured per sandbox stdout/stderr log before truncation "
                 "(env: SANDBOX_LOG_MAX_BYTES, default: 256 MiB). Bounds disk use so a "
@@ -1082,16 +1085,29 @@ class Validator:
                         last_s3_key = s3_key
                         logging.info(f"Uploaded logs to {s3_key}")
 
-            # Report S3 keys back to Backend so download endpoint can find them
+            # Report S3 keys back to Backend so download endpoint can find them.
+            # Also re-attach per-problem score + reasoning: `_upload_logs` runs
+            # post-scoring, so `progress_reporter._results` is fully populated
+            # here. `ProgressBatcher.batch_report` may have silently failed
+            # earlier (swallowed at `progress_batcher.py:108`); resending here
+            # is idempotent on the backend and stops null-score rows leaking
+            # into problem_progress on fast evals.
             if uploaded_keys:
-                progress_updates = [
-                    ProblemProgressUpdate(
-                        problem_id=pid,
-                        status=progress_reporter.get_problem_status(str(pid)),
-                        logs_s3_key=s3_key,
-                    )
-                    for pid, s3_key in uploaded_keys.items()
-                ]
+                progress_updates = []
+                for pid, s3_key in uploaded_keys.items():
+                    result = progress_reporter.get_result(str(pid))
+                    if result is not None:
+                        progress_updates.append(
+                            problem_result_to_update(result, logs_s3_key=s3_key)
+                        )
+                    else:
+                        progress_updates.append(
+                            ProblemProgressUpdate(
+                                problem_id=pid,
+                                status=progress_reporter.get_problem_status(str(pid)),
+                                logs_s3_key=s3_key,
+                            )
+                        )
                 try:
                     self.backend_client.report_progress(eval_run_id, progress_updates)
                     logging.info(
