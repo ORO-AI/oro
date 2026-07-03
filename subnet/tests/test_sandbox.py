@@ -127,6 +127,27 @@ class TestBuildSandboxCommand:
         )
         assert "--enable-scoring" not in cmd
 
+    def test_log_size_capped(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        # `max-size` / `max-file` are only accepted by the json-file / local
+        # drivers; awslogs (prod's daemon default) errors at
+        # container-create if we hand them anything else. Assert the driver
+        # is set explicitly so behavior is host-independent and each opt
+        # sits directly after its `--log-opt` flag.
+        drv_idx = cmd.index("--log-driver")
+        assert cmd[drv_idx + 1] == "json-file"
+
+        for value in ("max-size=10m", "max-file=1"):
+            value_idx = cmd.index(value)
+            assert cmd[value_idx - 1] == "--log-opt", (
+                f"{value} must directly follow --log-opt, got {cmd[value_idx - 1]}"
+            )
+
     def test_extra_volumes_mounted_readonly(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",
