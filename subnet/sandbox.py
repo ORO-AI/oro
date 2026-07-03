@@ -156,38 +156,50 @@ def build_sandbox_command(
     if container_name:
         cmd.extend(["--name", container_name])
 
-    cmd.extend([
-        # Resource limits — prevent runaway miner agents from impacting the host
-        "--memory",
-        "4g",
-        "--memory-swap",
-        "4g",
-        "--pids-limit",
-        "256",
-        "--ulimit",
-        # 4096 fds: at SANDBOX_MAX_WORKERS=60 a typical agent holds ~5 sockets
-        # in flight per worker (HTTP + DNS + keepalive), pushing toward the
-        # 1024 cap and silently capping throughput before the worker count.
-        "nofile=4096:4096",
-        # CPU priority — sandbox runs during the validator's blocked
-        # subprocess.run(); only the heartbeat + weight-setter threads compete
-        # for CPU at that point, so giving sandbox 2x the default share keeps
-        # those threads responsive while no longer starving sandbox workers on
-        # smaller (8 vCPU) validator hosts at SANDBOX_MAX_WORKERS=60.
-        "--cpu-shares",
-        "2048",
-        "--user",
-        "1000:1000",
-        # Security hardening — minimize container attack surface
-        "--cap-drop=ALL",
-        "--security-opt",
-        "no-new-privileges=true",
-        "--read-only",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=256m",
-        "-e",
-        "SANDBOX_PROXY_URL=http://proxy:80",
-    ])
+    cmd.extend(
+        [
+            # Cap per-container stdout so a runaway agent (e.g. tight print loop
+            # in an error-handler retry path) cannot flood the host log driver.
+            # Typical eval writes ~150 KB, so 10 MB is a ~66x headroom while
+            # killing the "1 MB/s microsecond spin" pattern that shipped 78 GB
+            # of CW ingest during race 80. Applies to whichever log driver the
+            # host is configured with (awslogs in prod, json-file locally).
+            "--log-opt",
+            "max-size=10m",
+            "--log-opt",
+            "max-file=1",
+            # Resource limits — prevent runaway miner agents from impacting the host
+            "--memory",
+            "4g",
+            "--memory-swap",
+            "4g",
+            "--pids-limit",
+            "256",
+            "--ulimit",
+            # 4096 fds: at SANDBOX_MAX_WORKERS=60 a typical agent holds ~5 sockets
+            # in flight per worker (HTTP + DNS + keepalive), pushing toward the
+            # 1024 cap and silently capping throughput before the worker count.
+            "nofile=4096:4096",
+            # CPU priority — sandbox runs during the validator's blocked
+            # subprocess.run(); only the heartbeat + weight-setter threads compete
+            # for CPU at that point, so giving sandbox 2x the default share keeps
+            # those threads responsive while no longer starving sandbox workers on
+            # smaller (8 vCPU) validator hosts at SANDBOX_MAX_WORKERS=60.
+            "--cpu-shares",
+            "2048",
+            "--user",
+            "1000:1000",
+            # Security hardening — minimize container attack surface
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--read-only",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=256m",
+            "-e",
+            "SANDBOX_PROXY_URL=http://proxy:80",
+        ]
+    )
 
     # Only mount agent file separately when it's not already in the logs dir
     if not agent_container_path:

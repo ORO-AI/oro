@@ -127,6 +127,19 @@ class TestBuildSandboxCommand:
         )
         assert "--enable-scoring" not in cmd
 
+    def test_log_size_capped(self):
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert "--log-opt" in cmd
+        # Both max-size and max-file must be applied so a runaway agent can't
+        # blow past the cap by writing to a rotated file.
+        assert "max-size=10m" in cmd
+        assert "max-file=1" in cmd
+
     def test_extra_volumes_mounted_readonly(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",
