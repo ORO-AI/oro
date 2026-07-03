@@ -158,12 +158,17 @@ def build_sandbox_command(
 
     cmd.extend(
         [
-            # Cap per-container stdout so a runaway agent (e.g. tight print loop
-            # in an error-handler retry path) cannot flood the host log driver.
-            # Typical eval writes ~150 KB, so 10 MB is a ~66x headroom while
-            # killing the "1 MB/s microsecond spin" pattern that shipped 78 GB
-            # of CW ingest during race 80. Applies to whichever log driver the
-            # host is configured with (awslogs in prod, json-file locally).
+            # Force json-file with a hard 10 MB cap. The prod daemon default is
+            # awslogs, which rejects max-size / max-file at container-create
+            # time (would break every eval), and which shipped 78 GB of CW
+            # ingest during race 80 when a runaway agent spun in a tight
+            # print loop in its LLM-error retry path. Sandbox stdout is
+            # already redundant with trajectory JSON (in S3) and the
+            # sandbox_metadata.stderr_tail persisted on eval_run, so the
+            # json-file sink is only needed for live SSH `docker logs` debug.
+            # Typical eval writes ~150 KB → 10 MB is ~66x headroom.
+            "--log-driver",
+            "json-file",
             "--log-opt",
             "max-size=10m",
             "--log-opt",
