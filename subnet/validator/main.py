@@ -1217,11 +1217,9 @@ class Validator:
                 if resp.status_code == 401:
                     if attempt < max_401_retries:
                         logging.warning(
-                            "Inference token 401 (attempt %d/%d) — likely "
-                            "provider key-propagation lag, retrying in %.1fs",
-                            attempt + 1,
-                            max_401_retries + 1,
-                            backoff_seconds,
+                            f"Inference token 401 (attempt {attempt + 1}/"
+                            f"{max_401_retries + 1}) — likely provider "
+                            f"key-propagation lag, retrying in {backoff_seconds:.1f}s"
                         )
                         time.sleep(backoff_seconds)
                         continue
