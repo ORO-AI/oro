@@ -52,13 +52,38 @@ class TestValidateInferenceToken:
         assert ok is True
         assert reason == ""
 
-    def test_401_returns_invalid(self):
-        with patch("validator.main.requests.post", return_value=self._mock_resp(401)):
+    def test_401_persists_fails_after_retries(self):
+        # A genuinely-bad key stays 401 through every attempt → fails fast.
+        with (
+            patch("validator.main.time.sleep") as mock_sleep,
+            patch(
+                "validator.main.requests.post", return_value=self._mock_resp(401)
+            ) as mock_post,
+        ):
             ok, reason = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is False
         assert "401" in reason
+        assert mock_post.call_count == 4  # 1 initial + 3 retries
+        assert mock_sleep.call_count == 3
+
+    def test_401_then_200_retries_and_passes(self):
+        # A freshly-minted key that 401s from propagation lag, then goes live.
+        with (
+            patch("validator.main.time.sleep") as mock_sleep,
+            patch(
+                "validator.main.requests.post",
+                side_effect=[self._mock_resp(401), self._mock_resp(200)],
+            ) as mock_post,
+        ):
+            ok, reason = Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        assert ok is True
+        assert reason == ""
+        assert mock_post.call_count == 2
+        assert mock_sleep.call_count == 1
 
     def test_402_returns_invalid_with_message(self):
         json_body = {"detail": {"message": "insufficient balance"}}

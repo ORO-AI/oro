@@ -1185,47 +1185,67 @@ class Validator:
         against any OpenAI-compatible chat/completions endpoint. On
         transient errors (5xx, timeout, 429), returns (True, "") to avoid
         failing runs unnecessarily.
+
+        A freshly-minted scoped token can return 401 briefly while the
+        provider propagates the newly-created key. The token is valid, so a
+        401 is retried a few times before the run is failed. A genuinely
+        invalid/revoked key stays 401 through every attempt and still fails
+        fast, after which the run re-claims a fresh token.
         """
-        import requests
+        # Only the 401 path loops; every other outcome returns on first attempt.
+        max_401_retries = 3
+        backoff_seconds = 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"
-        try:
-            resp = requests.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "max_tokens": 1,
-                },
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                return True, ""
-            if resp.status_code == 401:
-                return False, "Inference token invalid or expired (HTTP 401)"
-            if resp.status_code == 402:
-                detail = resp.json().get("detail", {})
-                msg = (
-                    detail.get("message", str(detail))
-                    if isinstance(detail, dict)
-                    else str(detail)
+        for attempt in range(max_401_retries + 1):
+            try:
+                resp = requests.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    },
+                    timeout=15,
                 )
-                return False, f"Inference account has no credits ({msg})"
-            if resp.status_code == 429:
+                if resp.status_code == 200:
+                    return True, ""
+                if resp.status_code == 401:
+                    if attempt < max_401_retries:
+                        logging.warning(
+                            f"Inference token 401 (attempt {attempt + 1}/"
+                            f"{max_401_retries + 1}) — likely provider "
+                            f"key-propagation lag, retrying in {backoff_seconds:.1f}s"
+                        )
+                        time.sleep(backoff_seconds)
+                        continue
+                    return False, "Inference token invalid or expired (HTTP 401)"
+                if resp.status_code == 402:
+                    detail = resp.json().get("detail", {})
+                    msg = (
+                        detail.get("message", str(detail))
+                        if isinstance(detail, dict)
+                        else str(detail)
+                    )
+                    return False, f"Inference account has no credits ({msg})"
+                if resp.status_code == 429:
+                    return True, ""
+                logging.warning(
+                    "Inference token validation inconclusive: status=%s url=%s",
+                    resp.status_code,
+                    url,
+                )
                 return True, ""
-            logging.warning(
-                "Inference token validation inconclusive: status=%s url=%s",
-                resp.status_code,
-                url,
-            )
-            return True, ""
-        except Exception as exc:
-            logging.warning("Inference token validation error against %s: %s", url, exc)
-            return True, ""
+            except Exception as exc:
+                logging.warning("Inference token validation error against %s: %s", url, exc)
+                return True, ""
+
+        # Unreachable: the loop returns on every path, but keeps mypy happy.
+        return False, "Inference token invalid or expired (HTTP 401)"
 
     def _complete_with_failure(
         self,
