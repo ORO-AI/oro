@@ -54,6 +54,7 @@ class TestValidateInferenceToken:
 
     def test_401_persists_fails_after_retries(self):
         # A genuinely-bad key stays 401 through every attempt → fails fast.
+        # Retries the token smoke-test on 401 to absorb key-propagation lag.
         with (
             patch("validator.main.time.sleep") as mock_sleep,
             patch(
@@ -65,8 +66,8 @@ class TestValidateInferenceToken:
             )
         assert ok is False
         assert "401" in reason
-        assert mock_post.call_count == 4  # 1 initial + 3 retries
-        assert mock_sleep.call_count == 3
+        assert mock_post.call_count == 6  # 1 initial + 5 retries
+        assert mock_sleep.call_count == 5
 
     def test_401_then_200_retries_and_passes(self):
         # A freshly-minted key that 401s from propagation lag, then goes live.
@@ -84,6 +85,42 @@ class TestValidateInferenceToken:
         assert reason == ""
         assert mock_post.call_count == 2
         assert mock_sleep.call_count == 1
+
+    def test_401_retry_uses_exponential_backoff_with_jitter(self):
+        # Verify per-attempt sleep grows with attempt number and
+        # is drawn from the jittered exponential curve. Pin random.uniform
+        # to a constant so the test asserts the deterministic sleep math.
+        sleeps: list[float] = []
+        with (
+            patch("validator.main.time.sleep", side_effect=sleeps.append),
+            patch("validator.main.random.uniform", return_value=1.0),
+            patch(
+                "validator.main.requests.post", return_value=self._mock_resp(401)
+            ),
+        ):
+            Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        # base=1.5, jitter=1.0 → sleeps are 1.5, 3.0, 4.5, 6.0, 7.5
+        assert sleeps == [1.5, 3.0, 4.5, 6.0, 7.5]
+
+    def test_401_retry_jitter_bounds(self):
+        # Verify jitter multiplier is drawn from [0.5, 1.5]. A
+        # too-narrow range defeats the point of spreading the mint burst.
+        with (
+            patch("validator.main.time.sleep"),
+            patch("validator.main.random.uniform") as mock_uniform,
+            patch(
+                "validator.main.requests.post", return_value=self._mock_resp(401)
+            ),
+        ):
+            mock_uniform.return_value = 1.0
+            Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        for call in mock_uniform.call_args_list:
+            low, high = call.args
+            assert 0.5 <= low < high <= 1.5
 
     def test_402_returns_invalid_with_message(self):
         json_body = {"detail": {"message": "insufficient balance"}}

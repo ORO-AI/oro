@@ -2,6 +2,7 @@ import argparse
 import gzip
 import json
 import os
+import random
 import subprocess
 import time
 import traceback
@@ -1191,10 +1192,25 @@ class Validator:
         401 is retried a few times before the run is failed. A genuinely
         invalid/revoked key stays 401 through every attempt and still fails
         fast, after which the run re-claims a fresh token.
+
+        Retry policy: exponential backoff with jitter. The exponential
+        curve rejects genuinely-bad keys quickly on the early attempts
+        while extending total budget past the observed propagation tail.
+        Jitter spreads the mint-burst so a race full of validators
+        doesn't all retry at the same wall-clock instant and hit the
+        propagation window in lockstep.
         """
         # Only the 401 path loops; every other outcome returns on first attempt.
-        max_401_retries = 3
-        backoff_seconds = 1.5
+        # Sleeps between retries: base * (attempt + 1) * random(0.5, 1.5).
+        # attempt 0 → 1.5s ± 50% ≈ 0.75–2.25s
+        # attempt 1 → 3.0s ± 50% ≈ 1.50–4.50s
+        # attempt 2 → 4.5s ± 50% ≈ 2.25–6.75s
+        # attempt 3 → 6.0s ± 50% ≈ 3.00–9.00s
+        # attempt 4 → 7.5s ± 50% ≈ 3.75–11.25s
+        # Total worst-case: ~34s; typical (early success): 2–6s.
+        max_401_retries = 5
+        backoff_base = 1.5
+        jitter_low, jitter_high = 0.5, 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"
         for attempt in range(max_401_retries + 1):
@@ -1216,12 +1232,17 @@ class Validator:
                     return True, ""
                 if resp.status_code == 401:
                     if attempt < max_401_retries:
+                        sleep_for = (
+                            backoff_base
+                            * (attempt + 1)
+                            * random.uniform(jitter_low, jitter_high)
+                        )
                         logging.warning(
                             f"Inference token 401 (attempt {attempt + 1}/"
                             f"{max_401_retries + 1}) — likely provider "
-                            f"key-propagation lag, retrying in {backoff_seconds:.1f}s"
+                            f"key-propagation lag, retrying in {sleep_for:.1f}s"
                         )
-                        time.sleep(backoff_seconds)
+                        time.sleep(sleep_for)
                         continue
                     return False, "Inference token invalid or expired (HTTP 401)"
                 if resp.status_code == 402:
