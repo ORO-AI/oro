@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import re
+import unicodedata
 from collections import Counter
 
 SENTENCE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -19,6 +21,88 @@ _shadow_model = None
 _shadow_unavailable = False
 
 _logger = logging.getLogger(__name__)
+
+# ── Attribute matching ──────────────────────────────────────────────
+# Reward attribute/sku values were historically matched to the product by
+# exact (key, value) tuple. That produced false-negatives when a valid
+# product encodes the same attribute under a different key spelling or with
+# extra descriptor tokens (e.g. reward "size":"48mm" vs product "size":
+# "1pcs 2#- 48mm"; reward "color family" vs product "color_family"). These
+# helpers add value + key string-normalization and a *same-key* token-subset
+# match. Everything stays exact-after-normalize — no fuzzy/embedding — so
+# distinct values (43≠42, blue≠black) never collide. Semantic cross-key
+# aliases (color↔color_family) are intentionally NOT handled here; they need
+# corpus-derived key co-occurrence stats and are a separate change.
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def normalize_attr_value(value) -> str:
+    """NFKC + lowercase, strip bracket chars (full-width incl.) and collapse
+    whitespace. Values are still compared for *exact equality* after this."""
+    s = unicodedata.normalize("NFKC", str(value)).lower()
+    s = re.sub(r"[【】\[\]\(\)（）]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_attr_key(key) -> str:
+    """Collapse a key to its comparison form: NFKC + lowercase, drop spaces/
+    underscores, and strip a single trailing plural 's'. Makes
+    `color family`==`color_family`==`colorfamily` and `flavors`==`flavor`."""
+    k = unicodedata.normalize("NFKC", str(key)).lower()
+    k = re.sub(r"[_\s]+", "", k)
+    if len(k) > 3 and k.endswith("s"):
+        k = k[:-1]
+    return k
+
+
+def _value_tokens(value) -> list:
+    return _WORD_RE.findall(normalize_attr_value(value))
+
+
+def _is_token_subsequence(sub: list, seq: list) -> bool:
+    """True if every token in `sub` appears in `seq` as a whole token, in
+    order. Whole-token boundaries mean `8gb` is NOT a subsequence of the
+    single token `128gb` — avoids numeric/unit collisions that raw substring
+    matching would create."""
+    if not sub:
+        return False
+    it = iter(seq)
+    return all(tok in it for tok in sub)
+
+
+def _build_attr_index(kv_pairs):
+    """From an iterable of (key, value) product tuples build:
+    - val_keys: normalized value -> set of normalized keys holding it
+    - key_tokens: normalized key -> list of token-lists of its values
+    """
+    val_keys = {}
+    key_tokens = {}
+    for k, v in kv_pairs:
+        nk = normalize_attr_key(k)
+        nv = normalize_attr_value(v)
+        val_keys.setdefault(nv, set()).add(nk)
+        key_tokens.setdefault(nk, []).append(_value_tokens(v))
+    return val_keys, key_tokens
+
+
+def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool:
+    """Does the product satisfy a single reward (key, value) constraint?
+
+    1. Same-key exact match after value + key normalization.
+    2. Same-key token-subset: the reward value's tokens are a whole-token
+       subsequence of one of the product's values under that (normalized) key.
+    """
+    nk = normalize_attr_key(reward_key)
+    nv = normalize_attr_value(reward_value)
+    if nk in val_keys.get(nv, ()):
+        return True
+    rt = _value_tokens(reward_value)
+    if rt:
+        for ptoks in key_tokens.get(nk, ()):
+            if _is_token_subsequence(rt, ptoks):
+                return True
+    return False
 
 
 def _get_sentence_model():
@@ -179,38 +263,38 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
             if serv in product["service"]:
                 hit_count += 1
                 hit_counter["service"] += 1
-    # flat sku options
-    sku_flattens = [set()]
-    if "sku_options" in product and product["sku_options"]:
+    # sku options & attributes — normalized + same-key token-subset matching
+    # (see _attr_constraint_hit). Attributes are always available; sku options
+    # are variant-exclusive, so score against each option (plus an empty
+    # baseline for attribute-only products) and keep the best-matching variant.
+    attr_pairs = [
+        (k, v)
+        for k, vs in (product.get("attributes") or {}).items()
+        for v in vs
+    ]
+    product_options = [[]]
+    if product.get("sku_options"):
         for option in product["sku_options"].values():
-            flatten = set()
-            for k, v in option.items():
-                flatten.add((k, v))
-            sku_flattens.append(flatten)
-    # flat attributes
-    attr_flatten = set()
-    if "attributes" in product and product["attributes"]:
-        for k, vs in product["attributes"].items():
-            for v in vs:
-                attr_flatten.add((k, v))
-    # sku options & attributes
+            product_options.append(list(option.items()))
+
     max_total = 0
     max_hit = 0
-    for sku_flatten in sku_flattens:
+    for option_pairs in product_options:
+        val_keys, key_tokens = _build_attr_index(attr_pairs + option_pairs)
         cur_total = 0
         cur_hit = 0
         if "sku_options" in reward:
             for option in reward["sku_options"]:
                 for k, v in option.items():
                     cur_total += 1
-                    if (k, v) in sku_flatten or (k, v) in attr_flatten:
+                    if _attr_constraint_hit(k, v, val_keys, key_tokens):
                         cur_hit += 1
         if "attributes" in reward:
             for attr in reward["attributes"]:
                 for k, vs in attr.items():
                     for v in vs:
                         cur_total += 1
-                        if (k, v) in sku_flatten or (k, v) in attr_flatten:
+                        if _attr_constraint_hit(k, v, val_keys, key_tokens):
                             cur_hit += 1
         max_total = cur_total if cur_total > max_total else max_total
         max_hit = cur_hit if cur_hit > max_hit else max_hit
