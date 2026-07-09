@@ -1,17 +1,20 @@
-"""Deterministic weight distribution for the top half of race finishers.
+"""Deterministic weight distribution for the survivor set of a race.
 
-A finisher is a qualifier from the most recent completed race that
-actually finished the race (has a non-null `race_score`). Qualifiers
-that DNF'd or were eliminated mid-race land in the public race detail
-with `race_score=null` and are dropped at the boundary in
-`weight_setter._qualifiers_to_finishers`. By the time finishers reach
-this module the list is already filtered.
+A finisher here is a *survivor*: a qualifier from the most recent
+completed race that finished (non-null `race_score`) and was neither
+eliminated (bottom-cut at race end, `eliminated_at`) nor discarded
+(`is_discarded`). DNF/never-executed qualifiers carry `race_score=null`;
+all three exclusions are applied at the boundary in
+`weight_setter._qualifiers_to_finishers`, so by the time finishers reach
+this module the list is already the survivor set.
 
-The protection target is the half of last race's finishers with the
-highest scores: those who actively competed and did not finish at the
-bottom of the pack. They keep `Emission[uid] > 0` between races and
-survive `get_neuron_to_prune` (which ranks by emission asc, reg_block
-asc, uid asc) when their `immunity_period` expires.
+The protection target is every survivor — the agents that advance to the
+next race. They keep `Emission[uid] > 0` between races and survive
+`get_neuron_to_prune` (which ranks by emission asc, reg_block asc, uid
+asc) when their `immunity_period` expires. Tying the protected set to the
+survivor set (rather than a fixed top-N of finishers) keeps it aligned
+with the elimination fraction automatically — no second threshold to
+hand-sync when that fraction changes.
 
 The function in this module is pure — same `(finishers, t_top, t_burn)`
 yields byte-identical u16 weight vectors across validators. That
@@ -38,7 +41,7 @@ U16_MAX = 65535
 #   * burn slot pinned at U16_MAX = 65535
 #   * total = (U16_MAX + tail_sum) / t_burn
 #   * top u16 = round(t_top * total)
-# The tail (top-half ranks 2..K, integer taper M, M-1, ..., 1) comes out
+# The tail (all survivors ranks 2..N, integer taper M, M-1, ..., 1) comes out
 # of the burn allocation; top miner stays at exactly `t_top` regardless
 # of race size.
 #
@@ -156,21 +159,25 @@ def compute_hotkey_weights(
     from rank-1 of finishers: the 25% slot belongs to the admin-designated
     top only.
 
-    The tail is the top 50% of last-race finishers minus the top hotkey if
-    they overlap. Tail entries receive a linear taper M, M-1, ..., 1 in rank
-    order, where M is the number of tail entries. The tail's share comes
-    out of `t_burn` — the top miner's share does not move with N.
+    The tail is the full survivor set — every non-eliminated, non-discarded
+    finisher (the caller filters those upstream in
+    `_qualifiers_to_finishers`) minus the top hotkey if they overlap. Tail
+    entries receive a linear taper M, M-1, ..., 1 in rank order, where M is
+    the number of tail entries. The tail's share comes out of `t_burn` — the
+    top miner's share does not move with N.
 
-    Bottom 50% (and ties at the rank-K boundary, by tiebreak) get no entry.
+    Protecting the survivor set (rather than a fixed top 50%) keeps the
+    protected set aligned with the elimination fraction automatically: an
+    agent is protected iff it advances to the next race, so there is no
+    second threshold to hand-sync when the elimination fraction changes.
     """
     ranked = rank_finishers(qualifiers)
-    k = len(ranked) // 2  # floor — protected-set size
 
-    # Tail = top-K finishers excluding `top_hotkey` if they overlap.
-    # When `top_hotkey` is None the filter never matches, so the tail is
-    # the full top-K. When `top_hotkey` is rank-1 of finishers, the tail
-    # is ranks 2..K (the historical shape).
-    tail_finishers = [f for f in ranked[:k] if f.miner_hotkey != top_hotkey]
+    # Tail = all survivors excluding `top_hotkey` if present. Every `ranked`
+    # entry already survived the race (eliminated/discarded dropped upstream)
+    # and advances to the next one, so all of them must keep Emission[uid] > 0
+    # to avoid deregistration.
+    tail_finishers = [f for f in ranked if f.miner_hotkey != top_hotkey]
     m = len(tail_finishers)
     tail_sum = m * (m + 1) // 2  # M + (M-1) + ... + 1
 

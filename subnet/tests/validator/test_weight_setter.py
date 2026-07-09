@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -43,7 +44,12 @@ def _race_detail(qualifiers: list[dict]):
 
     Each dict needs `miner_hotkey`, `agent_version_id`, `race_score` and may
     optionally provide `is_discarded` (defaults to False — set True to
-    exercise the ORO-1111 filter path).
+    exercise the ORO-1111 filter path) or `eliminated_at` (defaults to None —
+    set to a timestamp to exercise the survivor-set filter path).
+
+    Both flags are set explicitly: a bare `MagicMock` auto-returns a truthy
+    child mock for any unset attribute, which would make every qualifier
+    look eliminated/discarded.
     """
     detail = MagicMock()
     detail.qualifiers = []
@@ -53,6 +59,7 @@ def _race_detail(qualifiers: list[dict]):
         m.agent_version_id = q["agent_version_id"]
         m.race_score = q["race_score"]
         m.is_discarded = q.get("is_discarded", False)
+        m.eliminated_at = q.get("eliminated_at", None)
         detail.qualifiers.append(m)
     return detail
 
@@ -157,12 +164,13 @@ class TestWeightSetterThread:
 
         assert mock_backend_client.get_race_history.call_count >= 2
 
-    def test_race_path_distributes_to_top_half(
+    def test_race_path_distributes_to_survivors(
         self, mock_backend_client, mock_subtensor, mock_wallet
     ):
-        """6 finishers, all in metagraph: top 3 (floor(6/2)) get u16; bottom 3 zero.
-        With every protected finisher present, no drift correction needed —
-        top_u16 lands at 25% of the submitted vector exactly.
+        """6 survivors, all in metagraph: the top slot goes to 5HK0 and the
+        other 5 survivors all get a taper entry (5,4,3,2,1) — no bottom cut.
+        With every survivor present, no drift correction needed — top_u16
+        lands at 25% of the submitted vector exactly.
         """
         finishers = [
             {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
@@ -192,15 +200,15 @@ class TestWeightSetterThread:
         setter.stop()
 
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        # K=3, tail (ranks 2..3) = [2, 1] → tail_sum_actual = 3.
-        top_u16, burn_u16 = compute_pinned_weights(0.75, tail_sum=3)
+        # Survivor tail (ranks 2..6) = [5, 4, 3, 2, 1] → tail_sum_actual = 15.
+        top_u16, burn_u16 = compute_pinned_weights(0.75, tail_sum=15)
         assert weights[0] == burn_u16
         assert weights[1] == top_u16
-        assert weights[2] == 2
-        assert weights[3] == 1
-        assert weights[4] == 0
-        assert weights[5] == 0
-        assert weights[6] == 0
+        assert weights[2] == 5
+        assert weights[3] == 4
+        assert weights[4] == 3
+        assert weights[5] == 2
+        assert weights[6] == 1
 
     def test_race_path_skips_in_progress_and_uses_prior_completed_race(
         self, mock_backend_client, mock_subtensor, mock_wallet
@@ -246,7 +254,7 @@ class TestWeightSetterThread:
         for call in mock_backend_client.get_race_detail.call_args_list:
             assert call.args == (completed_id,) or call.kwargs == {"race_id": completed_id}
         weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, _ = compute_pinned_weights(0.75, tail_sum=3)
+        top_u16, _ = compute_pinned_weights(0.75, tail_sum=15)
         assert weights[1] == top_u16
 
     def test_drift_correction_when_protected_finishers_deregistered(
@@ -256,8 +264,8 @@ class TestWeightSetterThread:
         top_u16 / burn_u16 are recomputed from the *actual* tail_sum so the
         top miner's normalised share stays at exactly t_top.
         """
-        # 6 finishers; rank 2 (5HK1) and rank 3 (5HK2) are deregistered →
-        # protected set drops from 3 (K=floor(6/2)) to 1 in the metagraph.
+        # 6 survivors; only rank-1 (5HK0, the top) is in the metagraph, so the
+        # entire survivor tail (5HK1..5HK5) is deregistered → tail_sum → 0.
         finishers = [
             {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
             for i in range(6)
@@ -326,5 +334,44 @@ class TestQualifiersToFinishersIsDiscarded:
 
     def test_unset_is_discarded_treated_as_false(self):
         qualifiers = [self._q("5HKunset", 0.6, is_discarded=UNSET)]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        assert [f.miner_hotkey for f in finishers] == ["5HKunset"]
+
+
+class TestQualifiersToFinishersEliminated:
+    """Survivor-set filter: drop `eliminated_at` qualifiers (bottom-cut at
+    race end) so the protected tail tracks the survivor set, not a fixed
+    top-N. An agent that finished but was eliminated keeps its non-null
+    `race_score`, so only this filter removes it."""
+
+    @staticmethod
+    def _q(hotkey: str, score: float, *, eliminated_at=None, with_field: bool = True):
+        attrs = {
+            "miner_hotkey": hotkey,
+            "agent_version_id": uuid4(),
+            "race_score": score,
+        }
+        if with_field:
+            attrs["eliminated_at"] = eliminated_at
+        return SimpleNamespace(**attrs)
+
+    def test_drops_eliminated_keeps_survivors(self):
+        elim_ts = datetime(2026, 7, 8, tzinfo=timezone.utc)
+        qualifiers = [
+            self._q("5HKsurvivor", 0.9),
+            self._q("5HKeliminated", 0.85, eliminated_at=elim_ts),
+            self._q("5HKalsoSurvivor", 0.8),
+        ]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        assert {f.miner_hotkey for f in finishers} == {"5HKsurvivor", "5HKalsoSurvivor"}
+
+    def test_missing_eliminated_at_field_defaults_to_kept(self):
+        """Forward-compat with SDK builds pre-dating `eliminated_at`: missing = keep."""
+        qualifiers = [self._q("5HKlegacy", 0.7, with_field=False)]
+        finishers = _qualifiers_to_finishers(qualifiers)
+        assert [f.miner_hotkey for f in finishers] == ["5HKlegacy"]
+
+    def test_unset_eliminated_at_treated_as_kept(self):
+        qualifiers = [self._q("5HKunset", 0.6, eliminated_at=UNSET)]
         finishers = _qualifiers_to_finishers(qualifiers)
         assert [f.miner_hotkey for f in finishers] == ["5HKunset"]

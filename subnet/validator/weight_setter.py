@@ -1,6 +1,6 @@
 """Background thread for periodic weight updates.
 
-Builds a deterministic top-50% race-finisher weight vector via
+Builds a deterministic survivor-set race-finisher weight vector via
 `weight_distribution.build_metagraph_weight_vector` and submits it to the
 chain. Determinism across validators is load-bearing for Yuma consensus on
 subnet 15 (`kappa = 0.5`).
@@ -28,24 +28,25 @@ from .weight_distribution import (
 def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
     """Reduce SDK `RaceQualifierPublic` records to ranked finishers.
 
-    A "finisher" is a qualifier with a non-null `race_score` — i.e.
-    the agent ran the race to completion and got scored. Qualifiers
-    with `race_score=null` (DNF, eliminated mid-race, never executed)
-    are intentionally dropped: they did not finish the race, so they
-    are not protected from deregistration by this mechanism. A
-    `race_score=0.0` finisher is still a finisher (they completed but
-    scored zero) and competes for a top-half slot like everyone else;
-    the linear taper naturally drops them out of the protected set
-    when other finishers outscore them.
+    A "finisher" here is the deregistration-protection *survivor* set:
+    a qualifier with a non-null `race_score` that was NOT eliminated or
+    discarded — i.e. the agent ran the race to completion, got scored,
+    and advances to the next race. Qualifiers with `race_score=null`
+    (DNF, never executed) are dropped: they did not finish. A
+    `race_score=0.0` survivor is still a finisher (completed but scored
+    zero) and takes the smallest taper slot.
 
     Also drops entries without a `miner_hotkey` defensively so a
     partial-data Backend response can't poison the ranking.
 
-    Discarded agents (admin- or auto-discarded, surfaced via
-    `is_discarded` on the SDK record) are dropped so they stop earning
-    emissions via the rank-1 fallback or the protected tail set.
-    Missing or `UNSET` `is_discarded` defaults to False for forward
-    compatibility with older Backend builds that pre-date the field.
+    Discarded agents (admin- or auto-discarded, `is_discarded`) AND
+    eliminated agents (bottom-cut at race end, `eliminated_at`) are
+    dropped so they stop earning emissions via the rank-1 fallback or
+    the protected tail. Tying the protected set to the survivor set
+    keeps it aligned with the elimination fraction automatically — there
+    is no second top-N threshold to hand-sync when that fraction moves.
+    Missing or `UNSET` fields default to not-excluded for forward
+    compatibility with older Backend builds that pre-date them.
     """
     finishers: list[RankedFinisher] = []
     for q in qualifiers:
@@ -64,6 +65,15 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
                 f"hotkey={hotkey} agent_version_id={q.agent_version_id}"
             )
             continue
+        eliminated_at = getattr(q, "eliminated_at", None)
+        if eliminated_at is UNSET:
+            eliminated_at = None
+        if eliminated_at is not None:
+            logging.info(
+                "Dropping eliminated agent from race finishers: "
+                f"hotkey={hotkey} agent_version_id={q.agent_version_id}"
+            )
+            continue
         finishers.append(
             RankedFinisher(
                 miner_hotkey=str(hotkey),
@@ -75,7 +85,7 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
 
 
 class WeightSetterThread:
-    """Periodically computes the top-50% weight vector and submits it on-chain.
+    """Periodically computes the survivor-set weight vector and submits it on-chain.
 
     Runs in a background thread, independent of the evaluation loop.
     """
