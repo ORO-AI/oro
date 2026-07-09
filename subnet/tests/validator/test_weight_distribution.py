@@ -1,4 +1,4 @@
-"""Tests for the deterministic top-50% weight distribution.
+"""Tests for the deterministic survivor-set weight distribution.
 
 Determinism is load-bearing for Yuma consensus on subnet 15
 (`kappa = 0.5`): if two validators emit different weight vectors for the
@@ -193,41 +193,42 @@ def test_rank_finishers_stable_under_input_shuffle():
 @pytest.mark.parametrize("n", [10, 30, 50, 100])
 @pytest.mark.parametrize("t_burn", [0.75, 0.25])
 def test_compute_hotkey_weights_shape_per_spec(n, t_burn):
-    """Rank 1 = top_u16 (sized for exact `1 - t_burn` share), ranks 2..K =
-    K+1-rank, bottom 50% absent."""
+    """Rank 1 = top_u16 (sized for exact `1 - t_burn` share), ranks 2..N =
+    N+1-rank. Every survivor (all N) gets an entry — no top-N cut."""
     finishers = _make_finishers(n, seed=n)
     ranked = rank_finishers(finishers)
     weights = compute_hotkey_weights(
         finishers, t_burn, top_hotkey=ranked[0].miner_hotkey
     )
 
-    k = n // 2
-    assert len(weights) == k
+    # Top slot + a taper entry for every other survivor.
+    assert len(weights) == n
 
-    tail_sum = sum(range(1, k))  # 1 + 2 + ... + (K-1)
+    tail_sum = sum(range(1, n))  # 1 + 2 + ... + (N-1)
     expected_top, _ = compute_pinned_weights(t_burn, tail_sum=tail_sum)
 
     assert weights[ranked[0].miner_hotkey] == expected_top
 
-    for idx in range(1, k):
-        rank_1based = idx + 1
-        assert weights[ranked[idx].miner_hotkey] == k + 1 - rank_1based
+    for idx in range(1, n):
+        assert weights[ranked[idx].miner_hotkey] == n - idx
 
-    assert weights[ranked[k - 1].miner_hotkey] == 1
-
-    for idx in range(k, n):
-        assert ranked[idx].miner_hotkey not in weights
+    assert weights[ranked[n - 1].miner_hotkey] == 1
 
     assert all(w >= 1 for w in weights.values())
 
 
-@pytest.mark.parametrize("n", [0, 1])
-def test_compute_hotkey_weights_empty_for_too_few_finishers(n):
-    """N=0 or N=1 → floor(N/2)=0, no protected tail entries. With no
-    `top_hotkey` either, the dict is empty; the burn uid still fires
+def test_compute_hotkey_weights_empty_for_zero_finishers():
+    """N=0 → no survivors, empty dict; the burn uid still fires
     unconditionally in `build_metagraph_weight_vector`."""
-    weights = compute_hotkey_weights(_make_finishers(n), 0.75)
-    assert weights == {}
+    assert compute_hotkey_weights(_make_finishers(0), 0.75) == {}
+
+
+def test_compute_hotkey_weights_single_survivor_gets_min_taper():
+    """N=1 → the lone survivor is protected. With no `top_hotkey` it takes
+    the single taper slot (weight 1); the burn uid carries the top share."""
+    finishers = _make_finishers(1)
+    weights = compute_hotkey_weights(finishers, 0.75)
+    assert weights == {finishers[0].miner_hotkey: 1}
 
 
 # --- top share is exactly (1 - t_burn) across N (the load-bearing property at high burn) ---
@@ -260,29 +261,29 @@ def test_top_miner_share_is_exactly_t_top_regardless_of_n(n):
 
 
 def test_compute_hotkey_weights_n30_top_share_25pct():
-    """N=30, K=15, tail_sum=105. Top = round(0.25*(65535+105)/0.75) = 21880."""
+    """N=30 survivors, tail=29, tail_sum=435. Top = round(0.25*(65535+435)/0.75) = 21990."""
     finishers = _make_finishers(30, seed=30)
     ranked = rank_finishers(finishers)
     weights = compute_hotkey_weights(
         finishers, 0.75, top_hotkey=ranked[0].miner_hotkey
     )
 
-    assert weights[ranked[0].miner_hotkey] == 21880
-    tail_sum = sum(weights[ranked[idx].miner_hotkey] for idx in range(1, 15))
-    assert tail_sum == 105
+    assert weights[ranked[0].miner_hotkey] == 21990
+    tail_sum = sum(weights[ranked[idx].miner_hotkey] for idx in range(1, 30))
+    assert tail_sum == 435
 
 
 def test_compute_hotkey_weights_n100_top_share_25pct():
-    """N=100, K=50, tail_sum=1225. Top = round(0.25*(65535+1225)/0.75) = 22253."""
+    """N=100 survivors, tail=99, tail_sum=4950. Top = round(0.25*(65535+4950)/0.75) = 23495."""
     finishers = _make_finishers(100, seed=100)
     ranked = rank_finishers(finishers)
     weights = compute_hotkey_weights(
         finishers, 0.75, top_hotkey=ranked[0].miner_hotkey
     )
 
-    assert weights[ranked[0].miner_hotkey] == 22253
-    tail_sum = sum(weights[ranked[idx].miner_hotkey] for idx in range(1, 50))
-    assert tail_sum == 1225
+    assert weights[ranked[0].miner_hotkey] == 23495
+    tail_sum = sum(weights[ranked[idx].miner_hotkey] for idx in range(1, 100))
+    assert tail_sum == 4950
 
 
 # --- determinism (the Yuma-consensus property) ---
@@ -365,19 +366,19 @@ def test_build_metagraph_vector_empty_metagraph_returns_empty():
 
 def test_top_hotkey_none_burns_top_share_no_synthesis():
     """ORO-1120: when no admin-designated top exists, do NOT synthesize
-    one from rank-1 of finishers. The dict carries the full top-K tail
+    one from rank-1 of finishers. The dict carries the full survivor tail
     (no top entry); the caller burns the 25% top share."""
     finishers = _make_finishers(20, seed=42)
     ranked = rank_finishers(finishers)
-    k = len(finishers) // 2
+    n = len(finishers)
 
     weights = compute_hotkey_weights(finishers, 0.75, top_hotkey=None)
 
-    expected_top_u16, _ = compute_pinned_weights(0.75, tail_sum=k * (k + 1) // 2)
+    expected_top_u16, _ = compute_pinned_weights(0.75, tail_sum=n * (n + 1) // 2)
     assert weights[ranked[0].miner_hotkey] != expected_top_u16
-    assert weights[ranked[0].miner_hotkey] == k
-    assert weights[ranked[k - 1].miner_hotkey] == 1
-    assert len(weights) == k
+    assert weights[ranked[0].miner_hotkey] == n
+    assert weights[ranked[n - 1].miner_hotkey] == 1
+    assert len(weights) == n
 
 
 def test_top_hotkey_override_promotes_non_winner_to_top_slot():
@@ -394,15 +395,15 @@ def test_top_hotkey_override_promotes_non_winner_to_top_slot():
     assert weights[rank2] == top_u16
     assert rank1 in weights
     assert weights[rank1] != top_u16
-    k = len(finishers) // 2
-    m = k - 1
+    # Tail = all survivors except the promoted top; rank-1 leads it.
+    m = len(finishers) - 1
     assert weights[rank1] == m
 
 
 def test_top_hotkey_not_in_finishers_keeps_old_winner_in_tail():
     """When `top_hotkey` is a brand-new hotkey not present in last-race
-    finishers, the override hotkey gets the top slot and the full top-K
-    of finishers (including old rank-1) populates the tail."""
+    finishers, the override hotkey gets the top slot and the full survivor
+    set (including old rank-1) populates the tail."""
     finishers = _make_finishers(20, seed=11)
     ranked = rank_finishers(finishers)
     rank1 = ranked[0].miner_hotkey
@@ -412,8 +413,8 @@ def test_top_hotkey_not_in_finishers_keeps_old_winner_in_tail():
 
     top_u16 = max(weights.values())
     assert weights[new_top] == top_u16
-    k = len(finishers) // 2
-    assert weights[rank1] == k
+    # rank-1 leads the survivor tail at taper max = N.
+    assert weights[rank1] == len(finishers)
 
 
 def test_top_hotkey_override_top_share_remains_t_top():
@@ -475,8 +476,8 @@ def test_build_metagraph_vector_top_hotkey_not_in_metagraph_burns_top_share():
 
     assert weights[0] == U16_MAX
     rank1_idx = metagraph_hotkeys.index(rank1_hk)
-    k = len(finishers) // 2
-    assert weights[rank1_idx] == k
+    # Full survivor tail — rank-1 leads it at taper max = N.
+    assert weights[rank1_idx] == len(finishers)
     total = sum(weights)
     burn_share = weights[0] / total
     assert burn_share > 0.99
@@ -500,13 +501,14 @@ def test_build_metagraph_vector_no_top_hotkey_burns_top_share():
 
     assert weights[0] == U16_MAX
     rank1_idx = metagraph_hotkeys.index(ranked[0].miner_hotkey)
-    k = len(finishers) // 2
-    assert weights[rank1_idx] == k
+    # Full survivor tail — rank-1 leads it at taper max = N, every survivor
+    # gets a nonzero entry (no bottom-half cut).
+    assert weights[rank1_idx] == len(finishers)
     total = sum(weights)
     assert weights[0] / total > 0.99
-    for idx in range(k, len(finishers)):
-        bottom_idx = metagraph_hotkeys.index(ranked[idx].miner_hotkey)
-        assert weights[bottom_idx] == 0
+    for f in finishers:
+        idx = metagraph_hotkeys.index(f.miner_hotkey)
+        assert weights[idx] >= 1
 
 
 def test_build_metagraph_vector_no_top_hotkey_no_finishers_burns_everything():
@@ -554,8 +556,9 @@ def test_two_validators_with_top_override_emit_byte_identical_weights():
 
 
 def test_build_metagraph_vector_burn_zero_emits_top_dominant_vector():
-    """At t_burn=0, top miner takes ~99.7% (M=19 race), tail keeps its
-    rank-j integer taper, burn uid stamps 0."""
+    """At t_burn=0, top miner absorbs the deficit. Survivor tail M=39
+    (N=40, minus top), tail_sum=780, so top share = 65535/(65535+780) ≈
+    0.9882. Burn uid stamps 0."""
     finishers = _make_finishers(40, seed=1439)
     ranked = rank_finishers(finishers)
     metagraph = ["burn_uid"] + [f.miner_hotkey for f in finishers]
@@ -569,4 +572,4 @@ def test_build_metagraph_vector_burn_zero_emits_top_dominant_vector():
     assert weights[rank1_idx] == U16_MAX
     assert weights[0] == 0  # burn slot empty
     total = sum(weights)
-    assert weights[rank1_idx] / total == pytest.approx(0.9971, abs=1e-3)
+    assert weights[rank1_idx] / total == pytest.approx(0.9882, abs=1e-3)
