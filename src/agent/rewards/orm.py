@@ -86,12 +86,44 @@ def _build_attr_index(kv_pairs):
     return val_keys, key_tokens
 
 
+# Curated cross-key aliases: pairs of attribute keys that are semantically the
+# same slot, so the SAME value found under either key satisfies the constraint
+# (e.g. a `color_family` requirement met by the product's `color`). Hand-vetted:
+# a dynamic corpus-co-occurrence approach over-matched because the catalog is
+# dirty — unrelated keys share junk values (e.g. `voltage`/`color`
+# both carry "4 modes 12v"), and no threshold separates real aliases from
+# coincidence. So this is an explicit allowlist. Pairs are stored normalized.
+_CROSS_KEY_ALIAS_PAIRS = [
+    ("color", "color_family"),
+    ("color_classification", "color_family"),
+    ("color_classification", "sort by color"),
+    ("color_family", "warna"),  # 'warna' == color (id/ms)
+    ("plate_size", "size"),
+    ("cord_length", "length"),
+    ("cookware_material", "material"),
+    ("finish_lipstick", "lips makeup finish"),
+    ("colored_gem_type", "main_stone"),
+    ("model", "compatibility_by_model"),
+    ("compatibility", "compatibility_by_model"),
+    ("concern_oral_care", "oral care benefits"),
+    ("flavor", "scent"),
+    ("leather_material", "material"),
+    ("leather_material", "material_filter"),
+]
+_CROSS_KEY_ALIASES = frozenset(
+    frozenset((normalize_attr_key(a), normalize_attr_key(b)))
+    for a, b in _CROSS_KEY_ALIAS_PAIRS
+)
+
+
 def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool:
     """Does the product satisfy a single reward (key, value) constraint?
 
     1. Same-key exact match after value + key normalization.
     2. Same-key token-subset: the reward value's tokens are a whole-token
        subsequence of one of the product's values under that (normalized) key.
+    3. Cross-key alias: the same value (exact, after normalization) sits under a
+       curated sibling key that is semantically the same slot (`_CROSS_KEY_ALIASES`).
     """
     nk = normalize_attr_key(reward_key)
     nv = normalize_attr_value(reward_value)
@@ -102,6 +134,9 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
         for ptoks in key_tokens.get(nk, ()):
             if _is_token_subsequence(rt, ptoks):
                 return True
+    for pk in val_keys.get(nv, ()):
+        if pk != nk and frozenset((nk, pk)) in _CROSS_KEY_ALIASES:
+            return True
     return False
 
 
