@@ -1,9 +1,8 @@
 """Tests for the normalized attribute matcher in rewards/orm.py.
 
-Covers value/key normalization + same-key token-subset matching, and the
-invariants that keep it exact-after-normalize (distinct enums never collide).
-Semantic cross-key aliases (color↔color_family) are intentionally NOT matched
-here — that needs corpus co-occurrence stats and is a separate change.
+Covers value/key normalization + same-key token-subset matching, curated
+cross-key aliases, and the invariants that keep it exact-after-normalize
+(distinct enums never collide, non-allowlisted keys never cross-match).
 """
 
 from src.agent.rewards.orm import (
@@ -82,7 +81,28 @@ def test_product_underspecifies_does_not_match():
     assert not _hit("color", "yellow-24inch", [("color", "yellow")])
 
 
-def test_semantic_cross_key_not_matched_here():
-    # color vs color_family is a semantic alias handled by the (separate)
-    # corpus co-occurrence layer, not by this string-normalization matcher.
-    assert not _hit("color", "blue", [("color_family", "blue")])
+# ── curated cross-key aliases ────────────────────────────────────
+def test_cross_key_alias_positive():
+    # same value under a curated semantically-equivalent sibling key matches
+    assert _hit("color_family", "blue", [("color", "blue")])
+    assert _hit("color", "blue", [("color_family", "blue")])  # symmetric
+    # miner-reported cases
+    assert _hit("colored_gem_type", "no stones", [("main_stone", "no stones")])
+    assert _hit("model", "samsung galaxy a04e", [("compatibility_by_model", "samsung galaxy a04e")])
+    assert _hit("plate_size", "30x40cm", [("size", "30x40cm")])
+    assert _hit("concern_oral_care", "tooth decay", [("oral care benefits", "tooth decay")])
+
+
+def test_cross_key_alias_requires_exact_value():
+    # cross-key is exact-value only: a distinct value does not match even under
+    # an allowlisted sibling key
+    assert not _hit("color_family", "blue", [("color", "black")])
+    assert not _hit("model", "iphone 15", [("compatibility_by_model", "iphone 14")])
+
+
+def test_cross_key_non_allowlisted_pairs_never_match():
+    # unrelated keys sharing a value must NOT cross-match (the over-match the
+    # curated allowlist exists to prevent)
+    assert not _hit("voltage", "4 modes 12v", [("color", "4 modes 12v")])
+    assert not _hit("color_family", "washi tape", [("size", "washi tape")])
+    assert not _hit("size", "large", [("style", "large")])
