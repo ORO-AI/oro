@@ -1231,6 +1231,10 @@ class Validator:
                 if resp.status_code == 200:
                     return True, ""
                 if resp.status_code == 401:
+                    try:
+                        body = (resp.text or "")[:500]
+                    except Exception:
+                        body = ""
                     if attempt < max_401_retries:
                         sleep_for = (
                             backoff_base
@@ -1240,10 +1244,16 @@ class Validator:
                         logging.warning(
                             f"Inference token 401 (attempt {attempt + 1}/"
                             f"{max_401_retries + 1}) — likely provider "
-                            f"key-propagation lag, retrying in {sleep_for:.1f}s"
+                            f"key-propagation lag, retrying in {sleep_for:.1f}s "
+                            f"body={body!r}"
                         )
                         time.sleep(sleep_for)
                         continue
+                    logging.warning(
+                        f"Inference token 401 on final attempt "
+                        f"({max_401_retries + 1}/{max_401_retries + 1}), "
+                        f"giving up — body={body!r}"
+                    )
                     return False, "Inference token invalid or expired (HTTP 401)"
                 if resp.status_code == 402:
                     detail = resp.json().get("detail", {})
