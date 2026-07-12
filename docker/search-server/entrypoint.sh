@@ -16,12 +16,36 @@ if ! command -v java &> /dev/null; then
 fi
 echo "Java version: $(java -version 2>&1 | head -1)" >&2
 
-# JAVA_OPTS default is set in the Dockerfile ENV.
-# Override at runtime via docker-compose or -e JAVA_OPTS="..." if needed.
+# Worker processes. The per-request cost is Lucene search + per-doc raw fetch,
+# both via JNI, and pyjnius holds the GIL across JNI calls -- so a single
+# process serializes requests under concurrency once its GIL-bound throughput
+# ceiling is hit, leaving cores idle (badly on hosts with CPU steal). Multiple
+# worker PROCESSES each get their own GIL + JVM and use the idle cores.
+#
+# Benefit requires SPARE cores: if workers exceed available cores the extra
+# JVMs oversubscribe and it regresses. Default to half the cores (floor 2),
+# leaving headroom for the sandboxes sharing the box; override with
+# SEARCH_WORKERS. Set SEARCH_WORKERS=1 to fall back to a single process.
+CORES="$(nproc)"
+DEFAULT_WORKERS=$(( CORES / 2 ))
+[ "$DEFAULT_WORKERS" -lt 2 ] && DEFAULT_WORKERS=2
+WORKERS="${SEARCH_WORKERS:-$DEFAULT_WORKERS}"
+PORT="${PORT:-5632}"
+echo "Starting search-server: ${WORKERS} gunicorn worker process(es) on :${PORT} (cores=${CORES})" >&2
+echo "JVM options (per worker): ${_JAVA_OPTIONS}" >&2
 
-echo "JVM Options: $JAVA_OPTS" >&2
-
-# Start the server (Python will handle signals for graceful shutdown)
-exec python /app/src/search_engine/server.py
+# No --preload: the embedded JVM does not survive fork(); each worker must
+# initialize its own LuceneSearcher/JVM after forking. The mmap'd index is
+# shared across workers via the OS page cache (~1x index RAM).
+exec gunicorn \
+    --workers "${WORKERS}" \
+    --worker-class sync \
+    --bind "0.0.0.0:${PORT}" \
+    --chdir /app \
+    --timeout 120 \
+    --graceful-timeout 30 \
+    --access-logfile - \
+    --error-logfile - \
+    src.search_engine.server:app
 
 
