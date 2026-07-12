@@ -22,6 +22,11 @@ RUN set -eux; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
+# gunicorn is the production WSGI server (multi-process). Also in
+# requirements.txt for the base image; installed here too so the code-layer
+# image is self-contained even before the base is rebuilt.
+RUN pip install --no-cache-dir gunicorn==23.0.0
+
 # Only the code layer — changes on every release
 COPY src/search_engine /app/src/search_engine
 COPY src/__init__.py /app/src/
@@ -38,9 +43,11 @@ ENV HOST=0.0.0.0
 ENV PORT=5632
 # Pyserini embeds a JVM via JNI (Lucene). The JVM reads _JAVA_OPTIONS
 # directly at startup; JAVA_OPTS is non-standard and was being ignored.
-# 2g cap fits comfortably for the prod workload (sustained ≥17 rps at 60
-# concurrent) and saves ~2 GiB on memory-constrained hosts.
-ENV _JAVA_OPTIONS="-Xmx2g -Xms1g"
+# This is a PER-WORKER heap now (gunicorn runs SEARCH_WORKERS processes, each
+# with its own JVM). The Lucene index is off-heap (mmap, shared via the page
+# cache), so per-worker on-heap need is small; 1g cap keeps total heap modest
+# (e.g. 4 workers -> ~4 GiB). Override _JAVA_OPTIONS to tune.
+ENV _JAVA_OPTIONS="-Xmx1g -Xms256m"
 
 # Use entrypoint script
 ENTRYPOINT ["/app/entrypoint.sh"]
