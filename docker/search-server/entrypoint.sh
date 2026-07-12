@@ -30,21 +30,31 @@ CORES="$(nproc)"
 DEFAULT_WORKERS=$(( CORES / 2 ))
 [ "$DEFAULT_WORKERS" -lt 2 ] && DEFAULT_WORKERS=2
 WORKERS="${SEARCH_WORKERS:-$DEFAULT_WORKERS}"
+THREADS="${SEARCH_THREADS:-4}"
 PORT="${PORT:-5632}"
-echo "Starting search-server: ${WORKERS} gunicorn worker process(es) on :${PORT} (cores=${CORES})" >&2
+echo "Starting search-server: ${WORKERS} gunicorn worker(s) x ${THREADS} threads on :${PORT} (cores=${CORES})" >&2
 echo "JVM options (per worker): ${_JAVA_OPTIONS}" >&2
 
+# gthread (not sync): the WORKERS processes give the real parallelism (each its
+# own GIL + JVM, using otherwise-idle cores), while a few THREADS per worker
+# keep the worker from being single-request-blocked -- so trivial requests like
+# /health always find a slot even while searches are in flight (a sync worker
+# would queue /health behind a multi-second search and flap the healthcheck
+# unhealthy under the target burst). Threads also overlap the JNI Lucene work,
+# which releases the GIL.
+#
 # No --preload: the embedded JVM does not survive fork(); each worker must
 # initialize its own LuceneSearcher/JVM after forking. The mmap'd index is
-# shared across workers via the OS page cache (~1x index RAM).
+# shared across workers via the OS page cache (~1x index RAM). No access log on
+# the hot search path.
 exec gunicorn \
     --workers "${WORKERS}" \
-    --worker-class sync \
+    --worker-class gthread \
+    --threads "${THREADS}" \
     --bind "0.0.0.0:${PORT}" \
     --chdir /app \
     --timeout 120 \
     --graceful-timeout 30 \
-    --access-logfile - \
     --error-logfile - \
     src.search_engine.server:app
 
