@@ -40,6 +40,7 @@ from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
+from .inference_backoff import Inference401Backoff
 from .drain import handle_drain_tick
 from .models import CompletionRequest
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
@@ -90,6 +91,12 @@ class Validator:
 
         # Backoff for transient errors
         self.backoff = ExponentialBackoff()
+
+        # Claim-level backoff on inference-provider 401 bursts (ORO-1597).
+        # Separate from the smoke-test's per-run 401 retry: this delays the
+        # *next claim* when the fleet-wide propagation burst exhausts the
+        # per-run budget, so we stop marching honest miners into the storm.
+        self._inference_401_backoff = Inference401Backoff()
 
         # Collect Docker image digests for version tracking
         self.service_versions = collect_service_versions()
@@ -608,6 +615,21 @@ class Validator:
                             f"Still tracking eval run {self._current_eval_run_id} - this should not happen!"
                         )
 
+                    # ORO-1597: pause claim if we're in an inference-401
+                    # burst. Only the *claim* is gated — in-flight work
+                    # (there isn't any at this point in the loop) is never
+                    # touched, and drain/watchdog beats above this so this
+                    # cannot wedge those paths.
+                    inference_backoff = self._inference_401_backoff.should_delay_claim()
+                    if inference_backoff > 0:
+                        logging.info(
+                            "Inference-401 backoff active — sleeping %.1fs "
+                            "before next claim_work",
+                            inference_backoff,
+                        )
+                        time.sleep(inference_backoff)
+                        continue
+
                     # Claim work from Backend
                     logging.info("Claiming work from Backend...")
                     with CLAIM_WORK_SECONDS.time():
@@ -819,6 +841,14 @@ class Validator:
             inference_base_url,
             self._validation_model_for(inference_provider),
         )
+        # Feed the outcome into the claim-level 401 backoff (ORO-1597).
+        # A run-level 401 that survived every retry is what we want to
+        # count — a healthy first-try validation clears any active
+        # burst state.
+        if token_valid:
+            self._inference_401_backoff.record_success()
+        elif "HTTP 401" in token_reason:
+            self._inference_401_backoff.record_401()
         if not token_valid:
             self._complete_with_failure(
                 eval_run_id, TerminalStatus.FAILED, token_reason
