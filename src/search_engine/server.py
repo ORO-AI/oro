@@ -7,8 +7,15 @@ from pyserini.search.lucene import LuceneSearcher
 from flask import Flask, request, jsonify
 from waitress import serve
 
+from src.search_engine import sidecar as _sidecar
+
 searcher = LuceneSearcher("indexes")
 print("Load indexes done.", file=sys.stderr)
+
+# Optional columnar filter sidecar (see sidecar.py). When present it replaces
+# the per-candidate json.loads in the filter scan with a memmap lookup; when
+# absent (default) the search path is byte-for-byte the original decode path.
+_SIDECAR = _sidecar.load(os.environ.get("SIDECAR_DIR", "sidecar"))
 
 app = Flask(__name__)
 
@@ -157,6 +164,20 @@ def search(q, page, shop_id=None, price=None, sort=None, service=None):
     if not q:
         return products
 
+    # Sidecar fast path: when the sidecar is loaded (and the shop filter, if
+    # any, is numeric) we decide shop/price/service from the memmap columns and
+    # only decode the <=TARGET_HITS survivors. Yields identical results to the
+    # decode path (same fields, same order). A non-numeric shop_id disables it
+    # for that call so exact string-equality semantics are preserved.
+    use_sidecar = _SIDECAR is not None
+    shop_id_int = None
+    if shop_id:
+        try:
+            shop_id_int = int(shop_id)
+        except (TypeError, ValueError):
+            use_sidecar = False
+    reqmask = _SIDECAR.reqmask(service) if use_sidecar else 0
+
     def _collect(k):
         # Score the top-k BM25 candidates, apply post-filters, stop as soon
         # as we have enough surviving products for the paginated response.
@@ -165,6 +186,18 @@ def search(q, page, shop_id=None, price=None, sort=None, service=None):
         out = []
         hits = searcher.search(q=q, k=k, remove_dups=True)
         for hit in hits:
+            if use_sidecar:
+                i = _SIDECAR.lookup(hit.docid)
+                if i is not None:
+                    if _SIDECAR.rejects(i, shop_id_int, price, reqmask):
+                        continue
+                    # Survivor: decode the full product for sort + projection.
+                    out.append(json.loads(searcher.doc(hit.docid).raw())["product"])
+                    if len(out) >= TARGET_HITS:
+                        break
+                    continue
+                # Not in sidecar (should not happen for indexed docs): fall
+                # through to the decode path for this candidate.
             product = json.loads(searcher.doc(hit.docid).raw())["product"]
             if is_filter_by_shop_id(product, shop_id):
                 continue
