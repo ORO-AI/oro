@@ -7,8 +7,9 @@ import subprocess
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import NamedTuple, Optional, Dict, Any
 from uuid import UUID
 
 import requests
@@ -72,6 +73,35 @@ def _rewrite_localhost_url(url: str) -> str:
     if url.startswith("http://localhost:"):
         return url.replace("http://localhost:", "http://host.docker.internal:", 1)
     return url
+
+
+class SmokeTestOutcome(Enum):
+    """Categorised smoke-test outcome. Kept separate from ``valid`` so
+    the ORO-1597 401 backoff can distinguish confirmed-healthy (200)
+    from inconclusive-but-not-fatal (429 / 5xx / timeout / exception)
+    — routing off ``valid`` alone would let a rate-limit blip clear an
+    active backoff during a real 401 storm.
+    """
+
+    HEALTHY = "healthy"            # confirmed HTTP 200
+    TERMINAL_401 = "terminal_401"  # 401 retries exhausted
+    TERMINAL_402 = "terminal_402"  # zero balance
+    INCONCLUSIVE = "inconclusive"  # 429, 5xx, unknown, timeout, exception
+
+
+class SmokeTestResult(NamedTuple):
+    valid: bool
+    reason: str
+    outcome: SmokeTestOutcome
+
+
+# Shared return values for the common non-401 paths. Reduces churn
+# inside _validate_inference_token and makes intent scan-readable.
+_SMOKE_HEALTHY = SmokeTestResult(True, "", SmokeTestOutcome.HEALTHY)
+_SMOKE_INCONCLUSIVE = SmokeTestResult(True, "", SmokeTestOutcome.INCONCLUSIVE)
+_SMOKE_TERMINAL_401 = SmokeTestResult(
+    False, "Inference token invalid or expired (HTTP 401)", SmokeTestOutcome.TERMINAL_401
+)
 
 
 class Validator:
@@ -835,23 +865,23 @@ class Validator:
             )
             return
 
-        # Validate the token can actually make inference calls
-        token_valid, token_reason = self._validate_inference_token(
+        # Validate the token can actually make inference calls.
+        # ORO-1597: route the backoff on smoke.outcome, NOT smoke.valid
+        # — valid==True includes INCONCLUSIVE (429/5xx/timeout), and
+        # clearing the backoff on those would let a rate-limit blip
+        # wipe the escalation during a real 401 storm.
+        smoke = self._validate_inference_token(
             inference_access_token,
             inference_base_url,
             self._validation_model_for(inference_provider),
         )
-        # Feed the outcome into the claim-level 401 backoff (ORO-1597).
-        # A run-level 401 that survived every retry is what we want to
-        # count — a healthy first-try validation clears any active
-        # burst state.
-        if token_valid:
+        if smoke.outcome == SmokeTestOutcome.HEALTHY:
             self._inference_401_backoff.record_success()
-        elif "HTTP 401" in token_reason:
+        elif smoke.outcome == SmokeTestOutcome.TERMINAL_401:
             self._inference_401_backoff.record_401()
-        if not token_valid:
+        if not smoke.valid:
             self._complete_with_failure(
-                eval_run_id, TerminalStatus.FAILED, token_reason
+                eval_run_id, TerminalStatus.FAILED, smoke.reason
             )
             return
 
@@ -1209,7 +1239,7 @@ class Validator:
     @staticmethod
     def _validate_inference_token(
         access_token: str, base_url: str, model: str
-    ) -> tuple[bool, str]:
+    ) -> "SmokeTestResult":
         """Smoke-test a minted inference token by making a 1-token completion.
 
         Catches both invalid tokens (401) and zero-balance accounts (402)
@@ -1259,7 +1289,7 @@ class Validator:
                     timeout=15,
                 )
                 if resp.status_code == 200:
-                    return True, ""
+                    return _SMOKE_HEALTHY
                 if resp.status_code == 401:
                     try:
                         body = (resp.text or "")[:500]
@@ -1284,7 +1314,7 @@ class Validator:
                         f"({max_401_retries + 1}/{max_401_retries + 1}), "
                         f"giving up — body={body!r}"
                     )
-                    return False, "Inference token invalid or expired (HTTP 401)"
+                    return _SMOKE_TERMINAL_401
                 if resp.status_code == 402:
                     detail = resp.json().get("detail", {})
                     msg = (
@@ -1292,21 +1322,25 @@ class Validator:
                         if isinstance(detail, dict)
                         else str(detail)
                     )
-                    return False, f"Inference account has no credits ({msg})"
+                    return SmokeTestResult(
+                        False,
+                        f"Inference account has no credits ({msg})",
+                        SmokeTestOutcome.TERMINAL_402,
+                    )
                 if resp.status_code == 429:
-                    return True, ""
+                    return _SMOKE_INCONCLUSIVE
                 logging.warning(
                     "Inference token validation inconclusive: status=%s url=%s",
                     resp.status_code,
                     url,
                 )
-                return True, ""
+                return _SMOKE_INCONCLUSIVE
             except Exception as exc:
                 logging.warning("Inference token validation error against %s: %s", url, exc)
-                return True, ""
+                return _SMOKE_INCONCLUSIVE
 
         # Unreachable: the loop returns on every path, but keeps mypy happy.
-        return False, "Inference token invalid or expired (HTTP 401)"
+        return _SMOKE_TERMINAL_401
 
     def _complete_with_failure(
         self,

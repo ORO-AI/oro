@@ -21,7 +21,7 @@ def _stub_bittensor_core():
 
 _stub_bittensor_core()
 
-from validator.main import Validator  # noqa: E402
+from validator.main import SmokeTestOutcome, Validator  # noqa: E402
 
 
 class TestValidationModelFor:
@@ -46,11 +46,26 @@ class TestValidateInferenceToken:
 
     def test_200_returns_valid(self):
         with patch("validator.main.requests.post", return_value=self._mock_resp(200)):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is True
         assert reason == ""
+        # 200 is the ONLY outcome that clears the ORO-1597 401 backoff.
+        assert outcome == SmokeTestOutcome.HEALTHY
+
+    def test_402_outcome_is_terminal_402(self):
+        # 402 must NOT be routed as TERMINAL_401 into the burst backoff.
+        json_body = {"detail": {"message": "insufficient balance"}}
+        with patch(
+            "validator.main.requests.post",
+            return_value=self._mock_resp(402, json_body),
+        ):
+            ok, reason, outcome = Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        assert ok is False
+        assert outcome == SmokeTestOutcome.TERMINAL_402
 
     def test_401_persists_fails_after_retries(self):
         # A genuinely-bad key stays 401 through every attempt → fails fast.
@@ -61,11 +76,12 @@ class TestValidateInferenceToken:
                 "validator.main.requests.post", return_value=self._mock_resp(401)
             ) as mock_post,
         ):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is False
         assert "401" in reason
+        assert outcome == SmokeTestOutcome.TERMINAL_401
         assert mock_post.call_count == 6  # 1 initial + 5 retries
         assert mock_sleep.call_count == 5
 
@@ -78,11 +94,14 @@ class TestValidateInferenceToken:
                 side_effect=[self._mock_resp(401), self._mock_resp(200)],
             ) as mock_post,
         ):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is True
         assert reason == ""
+        # Retried 401 that ends in 200 IS confirmed healthy → clears
+        # the backoff (this is exactly the desired reset signal).
+        assert outcome == SmokeTestOutcome.HEALTHY
         assert mock_post.call_count == 2
         assert mock_sleep.call_count == 1
 
@@ -128,7 +147,7 @@ class TestValidateInferenceToken:
             "validator.main.requests.post",
             return_value=self._mock_resp(402, json_body),
         ):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is False
@@ -136,29 +155,35 @@ class TestValidateInferenceToken:
 
     def test_429_returns_valid(self):
         with patch("validator.main.requests.post", return_value=self._mock_resp(429)):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is True
         assert reason == ""
+        # ORO-1597 regression: 429 must NOT be reported as HEALTHY,
+        # else a rate-limit blip during a real 401 storm would wipe
+        # the active backoff.
+        assert outcome == SmokeTestOutcome.INCONCLUSIVE
 
     def test_5xx_returns_valid(self):
         with patch("validator.main.requests.post", return_value=self._mock_resp(503)):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is True
         assert reason == ""
+        assert outcome == SmokeTestOutcome.INCONCLUSIVE
 
     def test_exception_returns_valid(self):
         with patch(
             "validator.main.requests.post", side_effect=Exception("connection refused")
         ):
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert ok is True
         assert reason == ""
+        assert outcome == SmokeTestOutcome.INCONCLUSIVE
 
     def test_url_built_from_base_url(self):
         mock_resp = self._mock_resp(200)
@@ -182,7 +207,7 @@ class TestValidateInferenceToken:
         """Verify the validator can smoke-test an OR-style endpoint."""
         mock_resp = self._mock_resp(200)
         with patch("validator.main.requests.post", return_value=mock_resp) as mock_post:
-            ok, reason = Validator._validate_inference_token(
+            ok, reason, outcome = Validator._validate_inference_token(
                 "sk-or-test", "https://openrouter.ai/api/v1", "openai/gpt-oss-20b"
             )
 

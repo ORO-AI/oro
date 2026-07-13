@@ -103,6 +103,28 @@ def test_transient_burst_does_not_log_persistent(backoff, clock, caplog):
     )
 
 
+def test_persistent_flag_resets_between_episodes(backoff, clock, caplog):
+    """Regression: persistent-401 ERROR must re-arm after an episode
+    expires without a record_success (e.g. failures are 402/inconclusive)."""
+
+    def cross_threshold():
+        backoff.record_401()
+        for _ in range(35):
+            clock.advance(20.0)
+            backoff.record_401()
+            backoff.should_delay_claim()
+
+    with caplog.at_level(logging.ERROR):
+        cross_threshold()
+        clock.advance(1000.0)
+        assert backoff.should_delay_claim() == 0.0  # expire episode 1
+        cross_threshold()  # episode 2 — no record_success in between
+    persistent = [
+        r for r in caplog.records if "persistent auth misconfiguration" in r.message
+    ]
+    assert len(persistent) == 2
+
+
 def test_in_flight_work_never_touched(backoff):
     """Shape check: no cancellation surface. A future refactor adding
     one must consciously break this test."""
