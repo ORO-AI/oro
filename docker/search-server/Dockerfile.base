@@ -14,3 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-built indexes (~3GB) — this is why the base image exists.
 # Rebuild with: ./scripts/publish-search-server-base.sh
 COPY indexes /app/indexes
+
+# Columnar filter sidecar (~65MB), built from the same documents.jsonl as the
+# index (see src/search_engine/build_sidecar.py). The publish-base script MUST
+# run `python -m src.search_engine.build_sidecar <documents.jsonl> sidecar`
+# before this build — a missing source directory fails `COPY`. The runtime
+# fallback is separate: at container start the server drops to the decode path
+# if the directory is absent or its doc count does not match the index, so a
+# stale or unset SIDECAR_DIR never serves wrong results.
+COPY sidecar /app/sidecar

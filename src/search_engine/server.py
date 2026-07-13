@@ -7,8 +7,22 @@ from pyserini.search.lucene import LuceneSearcher
 from flask import Flask, request, jsonify
 from waitress import serve
 
+from src.search_engine import sidecar as _sidecar
+from src.search_engine.product_filters import (
+    is_filter_by_price,
+    is_filter_by_service,
+    is_filter_by_shop_id,
+    shop_id_is_canonical,
+)
+
 searcher = LuceneSearcher("indexes")
 print("Load indexes done.", file=sys.stderr)
+
+# Optional columnar filter sidecar (see sidecar.py). When present it replaces
+# the per-candidate json.loads in the filter scan with a memmap lookup; when
+# absent (or built from a different corpus) the search path is byte-for-byte
+# the original decode path.
+_SIDECAR = _sidecar.load(os.environ.get("SIDECAR_DIR", "sidecar"), expected_num_docs=searcher.num_docs)
 
 app = Flask(__name__)
 
@@ -118,28 +132,6 @@ def process_service(service):
     return results
 
 
-def is_filter_by_price(product, price):
-    low, high = price
-    if low is not None and product["price"] < low:
-        return True
-    if high is not None and product["price"] > high:
-        return True
-    return False
-
-
-def is_filter_by_service(product, service):
-    for serv in service:
-        if serv not in product.get("service", []):
-            return True
-    return False
-
-
-def is_filter_by_shop_id(product, shop_id):
-    if shop_id and shop_id != product.get("shop_id"):
-        return True
-    return False
-
-
 def search(q, page, shop_id=None, price=None, sort=None, service=None):
     page = process_page(page)
     price = process_price(price)
@@ -157,6 +149,31 @@ def search(q, page, shop_id=None, price=None, sort=None, service=None):
     if not q:
         return products
 
+    # Sidecar fast path: when the sidecar is loaded we decide shop/price/service
+    # from the memmap columns and only decode the <=TARGET_HITS survivors,
+    # yielding identical results to the decode path (same fields, same order).
+    # A shop_id that cannot be compared as an int with identical results (see
+    # shop_id_is_canonical) disables the fast path for that call.
+    use_sidecar = _SIDECAR is not None
+    shop_id_int = None
+    if shop_id:
+        if shop_id_is_canonical(shop_id):
+            shop_id_int = int(shop_id)
+        else:
+            use_sidecar = False
+    reqmask = _SIDECAR.reqmask(service) if use_sidecar else 0
+
+    def _decode_and_filter(hit, out):
+        # Original path: decode the full product and apply the predicates.
+        product = json.loads(searcher.doc(hit.docid).raw())["product"]
+        if is_filter_by_shop_id(product, shop_id):
+            return
+        if is_filter_by_price(product, price):
+            return
+        if is_filter_by_service(product, service):
+            return
+        out.append(product)
+
     def _collect(k):
         # Score the top-k BM25 candidates, apply post-filters, stop as soon
         # as we have enough surviving products for the paginated response.
@@ -165,14 +182,25 @@ def search(q, page, shop_id=None, price=None, sort=None, service=None):
         out = []
         hits = searcher.search(q=q, k=k, remove_dups=True)
         for hit in hits:
-            product = json.loads(searcher.doc(hit.docid).raw())["product"]
-            if is_filter_by_shop_id(product, shop_id):
-                continue
-            if is_filter_by_price(product, price):
-                continue
-            if is_filter_by_service(product, service):
-                continue
-            out.append(product)
+            if use_sidecar:
+                i = _SIDECAR.lookup(hit.docid)
+                if i is not None:
+                    verdict = _SIDECAR.rejects(i, shop_id_int, price, reqmask)
+                    if verdict is True:
+                        continue
+                    if verdict is False:
+                        # Survivor: decode the full product for sort + projection.
+                        out.append(json.loads(searcher.doc(hit.docid).raw())["product"])
+                    else:
+                        # Undecided (e.g. null price under a price filter):
+                        # defer to the decode path so behavior is identical.
+                        _decode_and_filter(hit, out)
+                    if len(out) >= TARGET_HITS:
+                        break
+                    continue
+                # Not in sidecar (should not happen for indexed docs): fall
+                # through to the decode path for this candidate.
+            _decode_and_filter(hit, out)
             if len(out) >= TARGET_HITS:
                 break
         return out, len(hits)
