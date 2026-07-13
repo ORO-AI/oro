@@ -14,7 +14,7 @@ The search server provides product search functionality via a REST API.
 ### Prerequisites
 
 - Docker and Docker Compose installed
-- **Pre-built indexes**: The `indexes/` directory must exist and be built before building the Docker image
+- **Pre-built indexes and sidecar**: The `indexes/` and `sidecar/` directories must exist before building the base Docker image
 
 ### Building the Indexes (One-time Setup)
 
@@ -52,8 +52,8 @@ docker build -f docker/search-server/Dockerfile -t shoppingbench-search-server .
 ```
 
 **Note**: 
-- The build process copies the pre-built `indexes/` directory into the image
-- No `documents.jsonl` is needed at build time (all data is in the index)
+- The build process copies the pre-built `indexes/` and `sidecar/` directories into the base image
+- No `documents.jsonl` is needed at code-layer build time (all data is in the base image's index and sidecar)
 - Build is fast since it skips index building (~3.1GB copy vs minutes of indexing)
 - Docker automatically caches image layers - subsequent builds will be much faster if only code or indexes change
 - Images built locally persist and are automatically reused by `docker-compose` (no need to rebuild if images already exist)
@@ -90,6 +90,7 @@ Configure via `.env` file or environment variables:
 
 - `HOST`: Server host (default: `0.0.0.0`)
 - `PORT`: Server port (default: `5632`)
+- `SIDECAR_DIR`: Directory for the columnar filter sidecar (default: `sidecar`; falls back to decode path if absent)
 
 Example `.env` file:
 
