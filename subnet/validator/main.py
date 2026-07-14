@@ -1202,14 +1202,18 @@ class Validator:
         """
         # Only the 401 path loops; every other outcome returns on first attempt.
         # Sleeps between retries: base * (attempt + 1) * random(0.5, 1.5).
-        # attempt 0 → 1.5s ± 50% ≈ 0.75–2.25s
-        # attempt 1 → 3.0s ± 50% ≈ 1.50–4.50s
-        # attempt 2 → 4.5s ± 50% ≈ 2.25–6.75s
-        # attempt 3 → 6.0s ± 50% ≈ 3.00–9.00s
-        # attempt 4 → 7.5s ± 50% ≈ 3.75–11.25s
-        # Total worst-case: ~34s; typical (early success): 2–6s.
+        # attempt 0 → 5.0s ± 50% ≈ 2.5–7.5s
+        # attempt 1 → 10.0s ± 50% ≈ 5.0–15.0s
+        # attempt 2 → 15.0s ± 50% ≈ 7.5–22.5s
+        # attempt 3 → 20.0s ± 50% ≈ 10.0–30.0s
+        # attempt 4 → 25.0s ± 50% ≈ 12.5–37.5s
+        # Total worst-case: ~113s; typical (early success): 5–20s.
+        # Base bumped 1.5s → 5.0s to widen the retry budget past the
+        # observed OpenRouter mint-propagation tail; the consecutive-
+        # failures alarm was firing on runs whose 401 storm outlasted
+        # the prior ~34s ceiling.
         max_401_retries = 5
-        backoff_base = 1.5
+        backoff_base = 5.0
         jitter_low, jitter_high = 0.5, 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"

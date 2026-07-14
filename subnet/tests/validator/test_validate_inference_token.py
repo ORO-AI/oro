@@ -101,8 +101,8 @@ class TestValidateInferenceToken:
             Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
-        # base=1.5, jitter=1.0 → sleeps are 1.5, 3.0, 4.5, 6.0, 7.5
-        assert sleeps == [1.5, 3.0, 4.5, 6.0, 7.5]
+        # base=5.0, jitter=1.0 → sleeps are 5.0, 10.0, 15.0, 20.0, 25.0
+        assert sleeps == [5.0, 10.0, 15.0, 20.0, 25.0]
 
     def test_401_retry_jitter_bounds(self):
         # Verify jitter multiplier is drawn from [0.5, 1.5]. A
