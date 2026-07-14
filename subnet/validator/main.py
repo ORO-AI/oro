@@ -1207,13 +1207,26 @@ class Validator:
         # attempt 2 → 15.0s ± 50% ≈ 7.5–22.5s
         # attempt 3 → 20.0s ± 50% ≈ 10.0–30.0s
         # attempt 4 → 25.0s ± 50% ≈ 12.5–37.5s
-        # Total worst-case: ~113s; typical (early success): 5–20s.
-        # Base bumped 1.5s → 5.0s to widen the retry budget past the
-        # observed OpenRouter mint-propagation tail; the consecutive-
-        # failures alarm was firing on runs whose 401 storm outlasted
-        # the prior ~34s ceiling.
+        # Sleep budget worst-case: ~113s. Absolute ceiling if every
+        # HTTP attempt also hits the 15s timeout: 6 × 15 + 113 = ~203s.
+        # Fits comfortably under the 600s Backend lease. Typical bad-key
+        # early-exit stays sub-second (401 comes back fast, next sleep
+        # is 2.5–7.5s before attempt 1). Typical propagation-blip resolve:
+        # 5–30s across attempts 1–3.
+        #
+        # Base bumped 1.5s → 5.0s (default) to widen the retry budget
+        # past the observed OpenRouter mint-propagation tail — the
+        # consecutive-failures alarm was firing on runs whose 401 storm
+        # outlasted the prior ~34s ceiling. `ORO_TOKEN_401_BACKOFF_BASE`
+        # env override lets on-call retune during a live incident
+        # without a code change + image roll.
+        #
+        # Distinguishing a fresh-mint propagation blip from a revoked
+        # key is out of scope here — that attribution work is the real
+        # ORO-1597 redesign. This bump is the operational lever until
+        # that lands.
         max_401_retries = 5
-        backoff_base = 5.0
+        backoff_base = float(os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "5.0"))
         jitter_low, jitter_high = 0.5, 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"

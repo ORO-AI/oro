@@ -1,5 +1,6 @@
 """Tests for Validator._validate_inference_token and _validation_model_for."""
 
+import os
 import sys
 import types
 from unittest.mock import MagicMock, patch
@@ -87,9 +88,10 @@ class TestValidateInferenceToken:
         assert mock_sleep.call_count == 1
 
     def test_401_retry_uses_exponential_backoff_with_jitter(self):
-        # Verify per-attempt sleep grows with attempt number and
-        # is drawn from the jittered exponential curve. Pin random.uniform
-        # to a constant so the test asserts the deterministic sleep math.
+        # Verify per-attempt sleep grows linearly with attempt number
+        # under the jittered exponential curve. Assert the invariant
+        # (sleep[i] == base * (i + 1) at jitter=1.0) rather than the
+        # literal values, so retunes only touch the source constant.
         sleeps: list[float] = []
         with (
             patch("validator.main.time.sleep", side_effect=sleeps.append),
@@ -101,8 +103,26 @@ class TestValidateInferenceToken:
             Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
-        # base=5.0, jitter=1.0 → sleeps are 5.0, 10.0, 15.0, 20.0, 25.0
-        assert sleeps == [5.0, 10.0, 15.0, 20.0, 25.0]
+        base = float(os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "5.0"))
+        assert sleeps == [base * (i + 1) for i in range(5)]
+
+    def test_401_backoff_base_env_override(self):
+        # Verify ORO_TOKEN_401_BACKOFF_BASE lets on-call retune without
+        # a code change. Pin jitter to 1.0 so sleeps map 1:1 onto the
+        # base * (i + 1) curve for whatever base the env sets.
+        sleeps: list[float] = []
+        with (
+            patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "2.0"}),
+            patch("validator.main.time.sleep", side_effect=sleeps.append),
+            patch("validator.main.random.uniform", return_value=1.0),
+            patch(
+                "validator.main.requests.post", return_value=self._mock_resp(401)
+            ),
+        ):
+            Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        assert sleeps == [2.0, 4.0, 6.0, 8.0, 10.0]
 
     def test_401_retry_jitter_bounds(self):
         # Verify jitter multiplier is drawn from [0.5, 1.5]. A
