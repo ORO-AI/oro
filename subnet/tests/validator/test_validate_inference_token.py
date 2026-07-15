@@ -88,12 +88,13 @@ class TestValidateInferenceToken:
         assert mock_sleep.call_count == 1
 
     def test_401_retry_uses_exponential_backoff_with_jitter(self):
-        # Verify per-attempt sleep grows linearly with attempt number
-        # under the jittered exponential curve. Assert the invariant
-        # (sleep[i] == base * (i + 1) at jitter=1.0) rather than the
-        # literal values, so retunes only touch the source constant.
+        # Verify per-attempt sleep matches the shipped default at
+        # jitter=1.0. Pin the literal sequence — env is explicitly
+        # cleared so any runner with ORO_TOKEN_401_BACKOFF_BASE
+        # exported still asserts the default constant.
         sleeps: list[float] = []
         with (
+            patch("validator.main.TOKEN_401_BACKOFF_BASE", 5.0),
             patch("validator.main.time.sleep", side_effect=sleeps.append),
             patch("validator.main.random.uniform", return_value=1.0),
             patch(
@@ -103,16 +104,14 @@ class TestValidateInferenceToken:
             Validator._validate_inference_token(
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
-        base = float(os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "5.0"))
-        assert sleeps == [base * (i + 1) for i in range(5)]
+        assert sleeps == [5.0, 10.0, 15.0, 20.0, 25.0]
 
     def test_401_backoff_base_env_override(self):
-        # Verify ORO_TOKEN_401_BACKOFF_BASE lets on-call retune without
-        # a code change. Pin jitter to 1.0 so sleeps map 1:1 onto the
-        # base * (i + 1) curve for whatever base the env sets.
+        # Verify a valid override reaches the retry math. Pin jitter to
+        # 1.0 so sleeps map 1:1 onto base * (i + 1).
         sleeps: list[float] = []
         with (
-            patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "2.0"}),
+            patch("validator.main.TOKEN_401_BACKOFF_BASE", 2.0),
             patch("validator.main.time.sleep", side_effect=sleeps.append),
             patch("validator.main.random.uniform", return_value=1.0),
             patch(
@@ -123,6 +122,47 @@ class TestValidateInferenceToken:
                 "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
             )
         assert sleeps == [2.0, 4.0, 6.0, 8.0, 10.0]
+
+    def test_backoff_base_parse_defaults_when_unset(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ORO_TOKEN_401_BACKOFF_BASE", None)
+            assert _parse_token_401_backoff_base() == 5.0
+
+    def test_backoff_base_parse_accepts_valid(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "3.5"}):
+            assert _parse_token_401_backoff_base() == 3.5
+
+    def test_backoff_base_parse_rejects_non_numeric(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "5s"}):
+            with pytest.raises(SystemExit, match="must be numeric"):
+                _parse_token_401_backoff_base()
+
+    def test_backoff_base_parse_rejects_negative(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "-5"}):
+            with pytest.raises(SystemExit, match="out of range"):
+                _parse_token_401_backoff_base()
+
+    def test_backoff_base_parse_rejects_zero(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "0"}):
+            with pytest.raises(SystemExit, match="out of range"):
+                _parse_token_401_backoff_base()
+
+    def test_backoff_base_parse_rejects_above_cap(self):
+        from validator.main import _parse_token_401_backoff_base
+
+        with patch.dict(os.environ, {"ORO_TOKEN_401_BACKOFF_BASE": "50"}):
+            with pytest.raises(SystemExit, match="out of range"):
+                _parse_token_401_backoff_base()
 
     def test_401_retry_jitter_bounds(self):
         # Verify jitter multiplier is drawn from [0.5, 1.5]. A

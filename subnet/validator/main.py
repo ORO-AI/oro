@@ -66,6 +66,50 @@ METRICS_PORT = 9100
 _UPLOAD_LOGS_WORKERS = 20
 
 
+# Inference-token 401 retry backoff base (seconds). Multiplied by
+# (attempt + 1) * random.uniform(0.5, 1.5) per sleep. Widening the base
+# extends the total retry budget past a longer OpenRouter mint-propagation
+# tail; narrowing it fast-fails bad keys sooner.
+#
+# Validated at process start rather than per-call: a malformed override
+# should fail the container fast, not silently unwind out of the
+# per-run try/except and leave a CLAIMED run to go STALE.
+#
+# Clamped to [0.1, 30.0] to bound the max sleep budget under the 600s
+# Backend lease even at the ceiling:
+#   base=30, 5 retries → 30*(1+2+3+4+5)*1.5 = 675s worst-case sleep,
+#   +6×15s HTTP timeouts = ~765s — over lease.
+# The cap keeps the operator lever bounded to a lease-safe window:
+#   base=10 → sleep worst-case 450s, +90s timeouts = 540s. Under 600s.
+#   base=15 → sleep worst-case 675s → OVER lease. So max is 10-ish.
+# Cap 30 leaves headroom for a future lease bump or attribution
+# redesign that eliminates the bounded-by-lease requirement.
+_TOKEN_401_BACKOFF_BASE_DEFAULT = 5.0
+_TOKEN_401_BACKOFF_BASE_MIN = 0.1
+_TOKEN_401_BACKOFF_BASE_MAX = 30.0
+
+
+def _parse_token_401_backoff_base() -> float:
+    raw = os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "").strip()
+    if not raw:
+        return _TOKEN_401_BACKOFF_BASE_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"ORO_TOKEN_401_BACKOFF_BASE must be numeric (seconds), got {raw!r}"
+        ) from exc
+    if not (_TOKEN_401_BACKOFF_BASE_MIN <= val <= _TOKEN_401_BACKOFF_BASE_MAX):
+        raise SystemExit(
+            f"ORO_TOKEN_401_BACKOFF_BASE={val} out of range "
+            f"[{_TOKEN_401_BACKOFF_BASE_MIN}, {_TOKEN_401_BACKOFF_BASE_MAX}]"
+        )
+    return val
+
+
+TOKEN_401_BACKOFF_BASE = _parse_token_401_backoff_base()
+
+
 def _rewrite_localhost_url(url: str) -> str:
     """Rewrite localhost URLs to host.docker.internal for Docker connectivity."""
     if url.startswith("http://localhost:"):
@@ -1219,14 +1263,17 @@ class Validator:
         # consecutive-failures alarm was firing on runs whose 401 storm
         # outlasted the prior ~34s ceiling. `ORO_TOKEN_401_BACKOFF_BASE`
         # env override lets on-call retune during a live incident
-        # without a code change + image roll.
+        # without a code change + image roll — validated at process
+        # start (see `_parse_token_401_backoff_base`), so a malformed
+        # value fails the container fast rather than silently unwinding
+        # a claimed run into STALE.
         #
         # Distinguishing a fresh-mint propagation blip from a revoked
         # key is out of scope here — that attribution work is the real
         # ORO-1597 redesign. This bump is the operational lever until
         # that lands.
         max_401_retries = 5
-        backoff_base = float(os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "5.0"))
+        backoff_base = TOKEN_401_BACKOFF_BASE
         jitter_low, jitter_high = 0.5, 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"

@@ -143,6 +143,12 @@ services:
       # second cosine sim per (product, gt) title pair with the named model
       # and logs both sims for offline comparison. Unset = no behaviour change.
       - SHADOW_SCORE_MODEL=${SHADOW_SCORE_MODEL:-}
+      # Base multiplier for the inference-token 401 retry backoff.
+      # On-call knob for widening the retry budget during a fresh-mint
+      # propagation storm without a code change + image roll. Validated
+      # at process start (numeric, 0.1 ≤ v ≤ 30.0) — invalid values fail
+      # the container fast rather than silently poisoning eval runs.
+      - ORO_TOKEN_401_BACKOFF_BASE=${ORO_TOKEN_401_BACKOFF_BASE:-}
     command:
       - "--wallet.name"
       - "${WALLET_NAME:-default}"
