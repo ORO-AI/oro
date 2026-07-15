@@ -22,8 +22,9 @@ from typing import Callable
 
 # The loop beats once per iteration, so the default must exceed the longest
 # legitimate single iteration. Worst case is a hung update check (~900s) plus a
-# full eval (sandbox_timeout 1800s + scoring/reasoning ~900s+) in the same pass,
-# ~3600-3900s; 5400s leaves margin so a healthy busy validator never trips it,
+# full eval (token-smoke ~203s worst-case at ORO_TOKEN_401_BACKOFF_BASE=5.0 +
+# sandbox_timeout 1800s + scoring/reasoning ~900s+) in the same pass,
+# ~3800-4100s; 5400s leaves margin so a healthy busy validator never trips it,
 # while a truly wedged loop is still recycled within ~90 min. Tighter recovery
 # would require beating from the heartbeat thread (fires every 30s during an
 # eval) — see ORO-1414 follow-up.

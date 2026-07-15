@@ -66,6 +66,50 @@ METRICS_PORT = 9100
 _UPLOAD_LOGS_WORKERS = 20
 
 
+# Inference-token 401 retry backoff base (seconds). Multiplied by
+# (attempt + 1) * random.uniform(0.5, 1.5) per sleep. Widening the base
+# extends the total retry budget past a longer OpenRouter mint-propagation
+# tail; narrowing it fast-fails bad keys sooner.
+#
+# Validated at process start rather than per-call: a malformed override
+# should fail the container fast, not silently unwind out of the
+# per-run try/except and leave a CLAIMED run to go STALE.
+#
+# Clamped to [0.1, 30.0] to bound the max sleep budget under the 600s
+# Backend lease even at the ceiling:
+#   base=30, 5 retries → 30*(1+2+3+4+5)*1.5 = 675s worst-case sleep,
+#   +6×15s HTTP timeouts = ~765s — over lease.
+# The cap keeps the operator lever bounded to a lease-safe window:
+#   base=10 → sleep worst-case 450s, +90s timeouts = 540s. Under 600s.
+#   base=15 → sleep worst-case 675s → OVER lease. So max is 10-ish.
+# Cap 30 leaves headroom for a future lease bump or attribution
+# redesign that eliminates the bounded-by-lease requirement.
+_TOKEN_401_BACKOFF_BASE_DEFAULT = 5.0
+_TOKEN_401_BACKOFF_BASE_MIN = 0.1
+_TOKEN_401_BACKOFF_BASE_MAX = 30.0
+
+
+def _parse_token_401_backoff_base() -> float:
+    raw = os.environ.get("ORO_TOKEN_401_BACKOFF_BASE", "").strip()
+    if not raw:
+        return _TOKEN_401_BACKOFF_BASE_DEFAULT
+    try:
+        val = float(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"ORO_TOKEN_401_BACKOFF_BASE must be numeric (seconds), got {raw!r}"
+        ) from exc
+    if not (_TOKEN_401_BACKOFF_BASE_MIN <= val <= _TOKEN_401_BACKOFF_BASE_MAX):
+        raise SystemExit(
+            f"ORO_TOKEN_401_BACKOFF_BASE={val} out of range "
+            f"[{_TOKEN_401_BACKOFF_BASE_MIN}, {_TOKEN_401_BACKOFF_BASE_MAX}]"
+        )
+    return val
+
+
+TOKEN_401_BACKOFF_BASE = _parse_token_401_backoff_base()
+
+
 def _rewrite_localhost_url(url: str) -> str:
     """Rewrite localhost URLs to host.docker.internal for Docker connectivity."""
     if url.startswith("http://localhost:"):
@@ -1202,14 +1246,34 @@ class Validator:
         """
         # Only the 401 path loops; every other outcome returns on first attempt.
         # Sleeps between retries: base * (attempt + 1) * random(0.5, 1.5).
-        # attempt 0 → 1.5s ± 50% ≈ 0.75–2.25s
-        # attempt 1 → 3.0s ± 50% ≈ 1.50–4.50s
-        # attempt 2 → 4.5s ± 50% ≈ 2.25–6.75s
-        # attempt 3 → 6.0s ± 50% ≈ 3.00–9.00s
-        # attempt 4 → 7.5s ± 50% ≈ 3.75–11.25s
-        # Total worst-case: ~34s; typical (early success): 2–6s.
+        # attempt 0 → 5.0s ± 50% ≈ 2.5–7.5s
+        # attempt 1 → 10.0s ± 50% ≈ 5.0–15.0s
+        # attempt 2 → 15.0s ± 50% ≈ 7.5–22.5s
+        # attempt 3 → 20.0s ± 50% ≈ 10.0–30.0s
+        # attempt 4 → 25.0s ± 50% ≈ 12.5–37.5s
+        # Sleep budget worst-case: ~113s. Absolute ceiling if every
+        # HTTP attempt also hits the 15s timeout: 6 × 15 + 113 = ~203s.
+        # Fits comfortably under the 600s Backend lease. Typical bad-key
+        # early-exit stays sub-second (401 comes back fast, next sleep
+        # is 2.5–7.5s before attempt 1). Typical propagation-blip resolve:
+        # 5–30s across attempts 1–3.
+        #
+        # Base bumped 1.5s → 5.0s (default) to widen the retry budget
+        # past the observed OpenRouter mint-propagation tail — the
+        # consecutive-failures alarm was firing on runs whose 401 storm
+        # outlasted the prior ~34s ceiling. `ORO_TOKEN_401_BACKOFF_BASE`
+        # env override lets on-call retune during a live incident
+        # without a code change + image roll — validated at process
+        # start (see `_parse_token_401_backoff_base`), so a malformed
+        # value fails the container fast rather than silently unwinding
+        # a claimed run into STALE.
+        #
+        # Distinguishing a fresh-mint propagation blip from a revoked
+        # key is out of scope here — that attribution work is the real
+        # ORO-1597 redesign. This bump is the operational lever until
+        # that lands.
         max_401_retries = 5
-        backoff_base = 1.5
+        backoff_base = TOKEN_401_BACKOFF_BASE
         jitter_low, jitter_high = 0.5, 1.5
 
         url = f"{base_url.rstrip('/')}/chat/completions"
