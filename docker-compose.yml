@@ -139,6 +139,15 @@ services:
       - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
+      # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
+      # defaults to "true" in `bittensor.core.config.no_parse_cli`), so
+      # `Config(parser)` early-returns without applying `--wallet.name`,
+      # `--wallet.hotkey`, `--netuid`, `--subtensor.network`. We DO drive the
+      # validator from those flags in the `command:` block below, so flip it
+      # back on. Without this the container silently falls to
+      # `netuid=None, network=finney, wallet=default` and crashes in
+      # `metagraph()` before the run loop starts.
+      - BT_NO_PARSE_CLI_ARGS=false
       # Opt-in shadow scoring. When set, the validator computes a
       # second cosine sim per (product, gt) title pair with the named model
       # and logs both sims for offline comparison. Unset = no behaviour change.
