@@ -40,4 +40,18 @@ COPY data/ /app/data/
 
 ENV PYTHONPATH=/app
 
+# bittensor 10.3+ ships CLI parsing OFF by default
+# (`bittensor.core.config.no_parse_cli` reads `BT_NO_PARSE_CLI_ARGS` and
+# defaults it to "true"), which makes `Config(parser)` early-return
+# without applying our `--wallet.name`/`--wallet.hotkey`/`--netuid`/
+# `--subtensor.network` command-line arguments. Without those the
+# validator falls back to class defaults `netuid=None, wallet=default,
+# network=finney` and crashes at metagraph sync inside the runtime
+# panic `NeuronInfoRuntimeApi::get_neurons_lite(None)`.
+#
+# Baked into the image (not just docker-compose.yml) so operators
+# whose compose file hasn't been re-pulled since PR #229 don't crash
+# on Watchtower auto-update.
+ENV BT_NO_PARSE_CLI_ARGS=false
+
 ENTRYPOINT [".venv/bin/python", "-m", "subnet.validator.main"]
