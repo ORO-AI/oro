@@ -86,6 +86,8 @@ def test_cross_key_alias_positive():
     # same value under a curated semantically-equivalent sibling key matches
     assert _hit("color_family", "blue", [("color", "blue")])
     assert _hit("color", "blue", [("color_family", "blue")])  # symmetric
+    # British spelling: product carries the colour under `colour`, reward `color_family`
+    assert _hit("color_family", "black", [("colour", "black")])
     # miner-reported cases
     assert _hit("colored_gem_type", "no stones", [("main_stone", "no stones")])
     assert _hit("model", "samsung galaxy a04e", [("compatibility_by_model", "samsung galaxy a04e")])

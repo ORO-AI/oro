@@ -95,6 +95,7 @@ def _build_attr_index(kv_pairs):
 # coincidence. So this is an explicit allowlist. Pairs are stored normalized.
 _CROSS_KEY_ALIAS_PAIRS = [
     ("color", "color_family"),
+    ("colour", "color_family"),  # British spelling
     ("color_classification", "color_family"),
     ("color_classification", "sort by color"),
     ("color_family", "warna"),  # 'warna' == color (id/ms)
