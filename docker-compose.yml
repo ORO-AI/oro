@@ -16,8 +16,14 @@ services:
       # overrides the image ENV). Index is off-heap/mmap, so 1g/worker is plenty;
       # keeps total heap modest across N workers on memory-constrained hosts.
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
+    # Loopback-only publish. Validator + proxy reach search-server over the
+    # `main` docker network (`http://search-server:5632`), so no host publish
+    # is required for normal operation. Keeping a loopback publish lets an
+    # operator `curl 127.0.0.1:5632/health` from an EC2 shell without
+    # exposing the port on any external interface — docker binds to the wildcard
+    # address by default, and Docker's iptables rules bypass UFW.
     ports:
-      - "${PORT:-5632}:${PORT:-5632}"
+      - "127.0.0.1:${PORT:-5632}:${PORT:-5632}"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os; import urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('PORT', '5632') + '/health').read()\""]
       interval: 10s
@@ -53,8 +59,14 @@ services:
       # production; staging/dev override via BACKEND_URL env var.
       - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
+    # Loopback-only publish. Sandbox agents reach the proxy over the `main`
+    # docker network (`SANDBOX_PROXY_URL=http://proxy:80`), so no host publish
+    # is required for normal operation. Keeping a loopback publish preserves
+    # `docker/README.md`'s operator debugging path (`curl localhost:8080/health`)
+    # and integration-test wait-for-healthy in `tests/integration/conftest.py`
+    # without exposing the port on any external interface.
     ports:
-      - "${PROXY_PORT:-8080}:80"
+      - "127.0.0.1:${PROXY_PORT:-8080}:80"
     networks:
       - main
       - sandbox
