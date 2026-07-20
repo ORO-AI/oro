@@ -10,6 +10,7 @@ Error Handling:
 """
 
 import logging
+import math
 import time
 from typing import Any, Callable, Optional
 from uuid import UUID
@@ -23,6 +24,7 @@ from oro_sdk.api.validator import (
     claim_work,
     complete_run,
     get_run_problems,
+    get_weight_salt,
     heartbeat,
     presign_upload,
     update_progress,
@@ -180,6 +182,11 @@ class BackendError(Exception):
 # per problem. Default urllib3 pool size (10) is enough to keep the
 # parallel uploader in _upload_logs cache-warm.
 _S3_SESSION = requests.Session()
+
+# Upper bound on the total supplementary-assignment share accepted from the
+# Backend. Real assignments reserve a small slice; a larger total signals a bad
+# payload, so the whole overlay is rejected (fail safe to the base vector).
+_MAX_OVERLAY_SHARE = 0.5
 
 
 class BackendClient:
@@ -564,6 +571,52 @@ class BackendClient:
             "get_top_miner",
             client=self._public_client,
         )
+
+    def get_weight_overlay(self) -> dict[int, float]:
+        """Fetch the Backend's supplementary weight assignments for this epoch.
+
+        Returns a mapping of miner uid → weight fraction to assign this epoch, or
+        an empty dict when the Backend provides none (the default). Uses the
+        signed client — the endpoint is participation-gated.
+
+        This is the trust boundary for the assignments: every share must be
+        finite and in [0, 1], and the total must be sane (<= MAX_OVERLAY_SHARE).
+        On ANY fetch/parse error OR any out-of-range value the whole overlay is
+        rejected and an empty dict is returned, so the caller submits its base
+        vector — a negative/inf/nan or oversized share would otherwise produce an
+        invalid u16 weight or wedge weight-setting. Rejecting the *whole* overlay
+        (rather than per-uid clamping) keeps every honest validator on the same
+        fallback, preserving consensus.
+        """
+        try:
+            resp = self._call_api(
+                get_weight_salt.sync_detailed,
+                "get_weight_overlay",
+                client=self._auth_client,
+            )
+            overlay = getattr(resp, "weight_overlay", None)
+            if overlay is None or overlay is UNSET:
+                return {}
+            parsed = {
+                int(uid): float(share) for uid, share in overlay.to_dict().items()
+            }
+        except (BackendError, ValueError, TypeError, AttributeError) as e:
+            # Fail safe: any fetch OR parse failure → no assignments, so the
+            # caller submits its base vector. A malformed payload must not raise
+            # past here (a wrong or missing vector would break Yuma consensus).
+            logging.warning(f"Weight overlay unavailable, using base vector: {e}")
+            return {}
+
+        if not all(
+            math.isfinite(s) and 0.0 <= s <= 1.0 for s in parsed.values()
+        ) or sum(parsed.values()) > _MAX_OVERLAY_SHARE:
+            logging.warning(
+                "Weight overlay had out-of-range shares (total=%s); using base "
+                "vector",
+                sum(parsed.values()),
+            )
+            return {}
+        return parsed
 
     def get_race_history(self, limit: int = 1) -> RaceHistoryResponse:
         """Fetch the most recent races (ordered newest-first).

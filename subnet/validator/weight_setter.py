@@ -20,6 +20,7 @@ from .backend_client import BackendClient, BackendError
 from .weight_distribution import (
     RankedFinisher,
     _validate_burn,
+    apply_weight_overlay,
     build_metagraph_weight_vector,
     compute_pinned_weights,
 )
@@ -292,6 +293,18 @@ class WeightSetterThread:
 
         top_hotkey, t_burn = self._fetch_top_state()
         uids, weights = self._build_weights_from_race(finishers, top_hotkey, t_burn)
+
+        # Apply any Backend-provided supplementary weight assignments for this
+        # epoch. An empty overlay — or a fetch failure (get_weight_overlay
+        # returns {} on error) — leaves the base vector unchanged, the safe
+        # default that every validator in the same state also produces.
+        overlay = self.backend_client.get_weight_overlay()
+        if overlay:
+            weights = apply_weight_overlay(weights, overlay)
+            logging.info(
+                f"Applied {len(overlay)} supplementary weight assignment(s)"
+            )
+
         non_zero = sum(1 for w in weights if w > 0)
         logging.info(
             f"Race-based weight vector: N={len(finishers)} finishers, "

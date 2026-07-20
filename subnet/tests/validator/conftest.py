@@ -71,7 +71,11 @@ def mock_backend_client():
 
     Test files can configure specific method return values as needed.
     """
-    return MagicMock(spec=BackendClient)
+    client = MagicMock(spec=BackendClient)
+    # Default: no supplementary weight assignments (matches a dark Backend). Set
+    # explicitly so tests don't depend on MagicMock's empty-iteration behaviour.
+    client.get_weight_overlay.return_value = {}
+    return client
 
 
 @pytest.fixture

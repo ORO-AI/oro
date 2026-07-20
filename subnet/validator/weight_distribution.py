@@ -266,3 +266,57 @@ def build_metagraph_weight_vector(
         weights[hotkey_to_idx[top_hotkey]] += top_u16
 
     return list(range(n_meta)), weights
+
+
+def apply_weight_overlay(
+    weights_u16: list[int], overlay: dict[int, float]
+) -> list[int]:
+    """Apply backend-provided supplementary weight assignments to a vector.
+
+    The Backend may direct a validator to assign a fixed fraction of its weight
+    to specific miner uids for the current epoch (``overlay`` maps uid → fraction,
+    the fractions summing to the reserved share). The base vector keeps its
+    internal proportions but collectively occupies ``1 - sum(shares)`` of the
+    final vector; each overlay uid is set to its share of the total. Chain-side
+    normalisation makes the absolute scale irrelevant — only proportions matter —
+    so the result is deterministic and byte-identical across validators that
+    receive the same overlay and base vector.
+
+    An empty overlay returns the base vector unchanged (the default). Overlay
+    uids outside the metagraph range are dropped *before* the reserved share is
+    computed, so each in-range uid lands at exactly its share — an out-of-range
+    assignment is not redistributed onto the survivors. Shares are assumed finite
+    and in [0, 1] (validated at the client boundary, ``get_weight_overlay``);
+    outputs are clamped to [0, U16_MAX] defensively.
+    """
+    if not overlay:
+        return weights_u16
+
+    out = list(weights_u16)
+    n = len(out)
+
+    # Drop out-of-range uids FIRST — only assignments that land on the vector
+    # count toward the reserved share; otherwise the surviving uids would inflate.
+    overlay = {uid: share for uid, share in overlay.items() if 0 <= uid < n}
+    if not overlay:
+        return weights_u16
+
+    share_total = sum(overlay.values())
+    if share_total <= 0:
+        return weights_u16
+    # Defensive clamp — the reserved share is a small fraction in practice.
+    share_total = min(share_total, 0.999)
+
+    # Base weight on uids NOT in the overlay — this is the (1 - share_total)
+    # portion of the final vector. Overlay uids' base weight (if any) is replaced.
+    base = sum(w for i, w in enumerate(out) if i not in overlay)
+    if base <= 0:
+        # Degenerate base (empty/zero vector): size the overlay against the u16
+        # ceiling so the assignments still carry meaningful relative weight.
+        total = float(U16_MAX)
+    else:
+        total = base / (1.0 - share_total)
+
+    for uid, share in overlay.items():
+        out[uid] = max(0, min(round(share * total), U16_MAX))
+    return out
