@@ -584,33 +584,33 @@ class TestApplyWeightOverlay:
         assert apply_weight_overlay(base, {}) == base
 
     def test_overlay_uids_get_their_share_of_the_total(self):
-        # base: one top at U16_MAX, small tail; overlay reserves 10% across 3 uids
         base = [0, 65535, 3, 2, 1, 0, 0]
-        overlay = {5: 0.09, 6: 0.005}  # 4 is untouched base tail
+        overlay = {5: 0.09, 6: 0.005}  # reserve 9.5% across 2 uids
         out = apply_weight_overlay(base, overlay)
         total = sum(out)
-        # overlay uids land at ~their share of the final total
-        assert abs(out[5] / total - 0.09) < 0.01
-        assert abs(out[6] / total - 0.005) < 0.005
-        # base proportions preserved among non-overlay uids (top still dominant)
-        assert out[1] == 65535
-        # final base share ~ (1 - 0.095)
+        # overlay uids land at exactly their share of the final total
+        assert abs(out[5] / total - 0.09) < 1e-3
+        assert abs(out[6] / total - 0.005) < 1e-3
+        # base collectively occupies (1 - share_total), proportions preserved
         base_share = (out[1] + out[2] + out[3] + out[4]) / total
-        assert abs(base_share - (1 - 0.095)) < 0.01
+        assert abs(base_share - (1 - 0.095)) < 1e-3
 
-    def test_exact_output_vector(self):
-        # Pin the precise integer vector, not just the shares. Base mass on the
-        # non-overlay uids = 0+65535+3+2+1 = 65541. share_total = 0.095, so
-        # total = 65541 / 0.905 = 72420.99; out[5] = round(0.09*total) = 6518,
-        # out[6] = round(0.005*total) = 362. Base bytes are left untouched.
-        base = [0, 65535, 3, 2, 1, 0, 0]
-        overlay = {5: 0.09, 6: 0.005}
-        assert apply_weight_overlay(base, overlay) == [0, 65535, 3, 2, 1, 6518, 362]
-        # And the resulting shares match the reserved fractions to ~1e-4.
+    def test_shares_exact_even_when_base_is_tiny(self):
+        # Regression: a short survivor taper (no admin top) gives a tiny base
+        # like 4,3,2,1. Working at that native scale rounds a 0.1% keep-alive to
+        # 0 and collapses the ~10% share into an adjacent bucket (10% -> 11.1%).
+        # Scaling to u16 first must give each assigned uid EXACTLY its share.
+        base = [0] * 15
+        base[3], base[9], base[13], base[11] = 4, 3, 2, 1  # taper; uid13 also decoy
+        overlay = {14: 0.098, 12: 0.001, 13: 0.001}  # 9.8% + 0.1% + 0.1% = 10%
         out = apply_weight_overlay(base, overlay)
         total = sum(out)
-        assert abs(out[5] / total - 0.09) < 1e-4
-        assert abs(out[6] / total - 0.005) < 1e-4
+        assert abs(out[14] / total - 0.098) < 1e-3
+        assert abs(out[12] / total - 0.001) < 1e-3  # keep-alive survives, not 0
+        assert abs(out[13] / total - 0.001) < 1e-3
+        assert out[12] > 0 and out[13] > 0
+        combined = (out[12] + out[13] + out[14]) / total
+        assert abs(combined - 0.10) < 1e-3  # exactly 10%, not 11.1%
 
     def test_deterministic_byte_identical(self):
         base = [0, 65535, 3, 2, 1, 0, 0, 0]
@@ -643,8 +643,10 @@ class TestApplyWeightOverlay:
         # not added on top (assigned uids shouldn't accumulate competitive weight)
         base = [0, 65535, 500, 1]
         out = apply_weight_overlay(base, {2: 0.10})
-        assert out[2] != 500  # replaced, sized against the base total
-        assert out[1] == 65535
+        total = sum(out)
+        assert abs(out[2] / total - 0.10) < 1e-3  # its share, not its base 500
+        # uid1 stays the dominant base slot (proportions preserved after rescale)
+        assert out[1] == max(out)
 
     def test_never_exceeds_u16_ceiling(self):
         # Safety net only: an out-of-contract oversized share (rejected upstream

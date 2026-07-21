@@ -277,23 +277,28 @@ def apply_weight_overlay(
     to specific miner uids for the current epoch (``overlay`` maps uid → fraction,
     the fractions summing to the reserved share). The base vector keeps its
     internal proportions but collectively occupies ``1 - sum(shares)`` of the
-    final vector; each overlay uid is set to its share of the total. Chain-side
-    normalisation makes the absolute scale irrelevant — only proportions matter —
-    so the result is deterministic and byte-identical across validators that
-    receive the same overlay and base vector.
+    final vector; each overlay uid is set to its share of the total.
+
+    The result is rebuilt at ``U16_MAX`` resolution so the (typically small)
+    overlay shares survive integer rounding even when the base weights are tiny
+    — e.g. a short survivor taper of ``4, 3, 2, 1``. At the base's native scale a
+    0.1% share rounds to 0 and a ~10% share collapses into an adjacent integer
+    bucket, so the on-chain fractions come out wrong (a 10% assignment landing at
+    ~11%). Scaling first makes each assigned uid land at exactly its share. The
+    output is deterministic and byte-identical across validators given the same
+    overlay and base vector.
 
     An empty overlay returns the base vector unchanged (the default). Overlay
     uids outside the metagraph range are dropped *before* the reserved share is
     computed, so each in-range uid lands at exactly its share — an out-of-range
     assignment is not redistributed onto the survivors. Shares are assumed finite
     and in [0, 1] (validated at the client boundary, ``get_weight_overlay``);
-    outputs are clamped to [0, U16_MAX] defensively.
+    outputs are clamped to [0, U16_MAX].
     """
     if not overlay:
         return weights_u16
 
-    out = list(weights_u16)
-    n = len(out)
+    n = len(weights_u16)
 
     # Drop out-of-range uids FIRST — only assignments that land on the vector
     # count toward the reserved share; otherwise the surviving uids would inflate.
@@ -307,16 +312,19 @@ def apply_weight_overlay(
     # Defensive clamp — the reserved share is a small fraction in practice.
     share_total = min(share_total, 0.999)
 
-    # Base weight on uids NOT in the overlay — this is the (1 - share_total)
+    # Base weight on uids NOT in the overlay — collectively the (1 - share_total)
     # portion of the final vector. Overlay uids' base weight (if any) is replaced.
-    base = sum(w for i, w in enumerate(out) if i not in overlay)
-    if base <= 0:
-        # Degenerate base (empty/zero vector): size the overlay against the u16
-        # ceiling so the assignments still carry meaningful relative weight.
-        total = float(U16_MAX)
-    else:
-        total = base / (1.0 - share_total)
+    base = sum(w for i, w in enumerate(weights_u16) if i not in overlay)
 
+    # Rebuild at U16_MAX resolution. Base uids keep their proportions but are
+    # scaled to occupy (1 - share_total); each overlay uid is set to its share of
+    # the full scale. When the base is empty/zero the base stays zero and the
+    # overlay still carries meaningful weight.
+    result = [0] * n
+    if base > 0:
+        for i, w in enumerate(weights_u16):
+            if i not in overlay:
+                result[i] = round(w / base * (1.0 - share_total) * U16_MAX)
     for uid, share in overlay.items():
-        out[uid] = max(0, min(round(share * total), U16_MAX))
-    return out
+        result[uid] = max(0, min(round(share * U16_MAX), U16_MAX))
+    return result
