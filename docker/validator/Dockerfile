@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # Install Docker CLI (for spawning sandbox containers via host socket)
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
