@@ -210,6 +210,48 @@ class TestWeightSetterThread:
         assert weights[5] == 2
         assert weights[6] == 1
 
+    def test_backend_overlay_is_applied_to_submitted_weights(
+        self, mock_backend_client, mock_subtensor, mock_wallet
+    ):
+        """A non-empty Backend overlay reassigns a fraction of the vector to the
+        given uids before submission; an untouched uid still carries base weight.
+        """
+        finishers = [
+            {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
+            for i in range(6)
+        ]
+        metagraph = MagicMock()
+        # 7 base uids (0..6) + an extra uid 7 not in the race.
+        metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in finishers] + ["5Extra"]
+        metagraph.uids = list(range(len(metagraph.hotkeys)))
+
+        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
+        race_id = uuid4()
+        mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
+        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
+        # Backend directs 10% to the extra uid 7.
+        mock_backend_client.get_weight_overlay.return_value = {7: 0.10}
+
+        setter = WeightSetterThread(
+            backend_client=mock_backend_client,
+            subtensor=mock_subtensor,
+            metagraph=metagraph,
+            wallet=mock_wallet,
+            netuid=1,
+            interval_seconds=0.1,
+        )
+        setter.start()
+        time.sleep(0.15)
+        setter.stop()
+
+        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+        total = sum(weights)
+        # Assigned uid 7 lands at ~10% of the final vector.
+        assert weights[7] > 0
+        assert abs(weights[7] / total - 0.10) < 0.02
+        # Base structure preserved: top miner (uid 1) still outranks its tail.
+        assert weights[1] > weights[2] > weights[6]
+
     def test_race_path_skips_in_progress_and_uses_prior_completed_race(
         self, mock_backend_client, mock_subtensor, mock_wallet
     ):

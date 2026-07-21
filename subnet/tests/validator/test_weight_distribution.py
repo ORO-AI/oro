@@ -20,6 +20,7 @@ import pytest
 from subnet.validator.weight_distribution import (
     RankedFinisher,
     U16_MAX,
+    apply_weight_overlay,
     build_metagraph_weight_vector,
     compute_hotkey_weights,
     compute_pinned_weights,
@@ -573,3 +574,89 @@ def test_build_metagraph_vector_burn_zero_emits_top_dominant_vector():
     assert weights[0] == 0  # burn slot empty
     total = sum(weights)
     assert weights[rank1_idx] / total == pytest.approx(0.9882, abs=1e-3)
+
+
+class TestApplyWeightOverlay:
+    """Supplementary backend weight assignments merged into the base vector."""
+
+    def test_empty_overlay_returns_base_unchanged(self):
+        base = [0, 65535, 5, 4, 3, 2, 1]
+        assert apply_weight_overlay(base, {}) == base
+
+    def test_overlay_uids_get_their_share_of_the_total(self):
+        # base: one top at U16_MAX, small tail; overlay reserves 10% across 3 uids
+        base = [0, 65535, 3, 2, 1, 0, 0]
+        overlay = {5: 0.09, 6: 0.005}  # 4 is untouched base tail
+        out = apply_weight_overlay(base, overlay)
+        total = sum(out)
+        # overlay uids land at ~their share of the final total
+        assert abs(out[5] / total - 0.09) < 0.01
+        assert abs(out[6] / total - 0.005) < 0.005
+        # base proportions preserved among non-overlay uids (top still dominant)
+        assert out[1] == 65535
+        # final base share ~ (1 - 0.095)
+        base_share = (out[1] + out[2] + out[3] + out[4]) / total
+        assert abs(base_share - (1 - 0.095)) < 0.01
+
+    def test_exact_output_vector(self):
+        # Pin the precise integer vector, not just the shares. Base mass on the
+        # non-overlay uids = 0+65535+3+2+1 = 65541. share_total = 0.095, so
+        # total = 65541 / 0.905 = 72420.99; out[5] = round(0.09*total) = 6518,
+        # out[6] = round(0.005*total) = 362. Base bytes are left untouched.
+        base = [0, 65535, 3, 2, 1, 0, 0]
+        overlay = {5: 0.09, 6: 0.005}
+        assert apply_weight_overlay(base, overlay) == [0, 65535, 3, 2, 1, 6518, 362]
+        # And the resulting shares match the reserved fractions to ~1e-4.
+        out = apply_weight_overlay(base, overlay)
+        total = sum(out)
+        assert abs(out[5] / total - 0.09) < 1e-4
+        assert abs(out[6] / total - 0.005) < 1e-4
+
+    def test_deterministic_byte_identical(self):
+        base = [0, 65535, 3, 2, 1, 0, 0, 0]
+        overlay = {5: 0.09, 6: 0.005, 7: 0.005}
+        assert apply_weight_overlay(base, overlay) == apply_weight_overlay(base, overlay)
+
+    def test_out_of_range_overlay_uid_skipped(self):
+        base = [0, 65535, 2, 1]
+        # uid 99 not in the metagraph → skipped, base untouched otherwise
+        out = apply_weight_overlay(base, {99: 0.1})
+        assert out == base
+
+    def test_out_of_range_share_not_redistributed_to_in_range(self):
+        # An out-of-range uid's share must NOT inflate the in-range uid: uid 5
+        # should land at exactly its own 0.10, not 0.10/(1-0.40).
+        base = [0, 100, 0, 0, 0, 0, 0, 0, 0, 0]  # n=10
+        out = apply_weight_overlay(base, {5: 0.10, 999: 0.40})
+        total = sum(out)
+        assert abs(out[5] / total - 0.10) < 0.01  # exact share, not ~16.7%
+
+    def test_negative_share_clamped_to_zero(self):
+        # Defensive: apply_weight_overlay never emits a negative u16 even if a
+        # negative share slips past the client-boundary validation.
+        base = [0, 65535, 1, 0]
+        out = apply_weight_overlay(base, {3: -0.1, 2: 0.3})
+        assert all(w >= 0 for w in out)
+
+    def test_overlay_replaces_any_base_weight_on_its_uid(self):
+        # a uid that already carried base weight is set to its overlay share,
+        # not added on top (assigned uids shouldn't accumulate competitive weight)
+        base = [0, 65535, 500, 1]
+        out = apply_weight_overlay(base, {2: 0.10})
+        assert out[2] != 500  # replaced, sized against the base total
+        assert out[1] == 65535
+
+    def test_never_exceeds_u16_ceiling(self):
+        # Safety net only: an out-of-contract oversized share (rejected upstream
+        # by get_weight_overlay's MAX_OVERLAY_SHARE guard) must still never emit a
+        # value above the u16 ceiling. Proportion fidelity is NOT asserted here —
+        # it holds for the small in-contract shares (see test_exact_output_vector).
+        base = [0, 65535, 1]
+        out = apply_weight_overlay(base, {2: 0.99})
+        assert all(0 <= w <= U16_MAX for w in out)
+
+    def test_zero_base_sizes_against_u16(self):
+        base = [0, 0, 0, 0]
+        out = apply_weight_overlay(base, {2: 0.5, 3: 0.5})
+        assert out[2] == round(0.5 * U16_MAX)
+        assert out[3] == round(0.5 * U16_MAX)

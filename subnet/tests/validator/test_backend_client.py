@@ -296,6 +296,84 @@ class TestBackendClientTopMiner:
         assert result.top_score == 0.92
 
 
+class TestBackendClientWeightOverlay:
+    def _client(self, mock_wallet):
+        return BackendClient("https://api.example.com", mock_wallet)
+
+    def _resp(self, overlay):
+        from oro_sdk.models.weight_salt_response import WeightSaltResponse
+
+        parsed = WeightSaltResponse.from_dict(
+            {
+                "active": True,
+                "eligible": True,
+                "epoch_index": 1,
+                "weight_overlay": overlay,
+            }
+        )
+        return _create_response(200, parsed)
+
+    def test_parses_overlay_to_int_float_dict(self, mock_wallet):
+        client = self._client(mock_wallet)
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            return_value=self._resp({"114": 0.09, "201": 0.005}),
+        ):
+            assert client.get_weight_overlay() == {114: 0.09, 201: 0.005}
+
+    def test_empty_overlay_returns_empty(self, mock_wallet):
+        client = self._client(mock_wallet)
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            return_value=self._resp({}),
+        ):
+            assert client.get_weight_overlay() == {}
+
+    def test_backend_error_returns_empty_not_raises(self, mock_wallet):
+        # Fetch failure must fail safe to {} (never raise → the caller submits
+        # its base vector rather than skipping the whole tick).
+        client = self._client(mock_wallet)
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            side_effect=httpx.TimeoutException("timeout"),
+        ):
+            assert client.get_weight_overlay() == {}
+
+    def test_malformed_payload_returns_empty_not_raises(self, mock_wallet):
+        # A non-numeric overlay value would raise on parse — the guard must catch
+        # it and fail safe to {}, not propagate past the client boundary.
+        client = self._client(mock_wallet)
+        bad = MagicMock()
+        bad.weight_overlay.to_dict.return_value = {"5": "not-a-number"}
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            return_value=_create_response(200, bad),
+        ):
+            assert client.get_weight_overlay() == {}
+
+    @pytest.mark.parametrize(
+        "overlay",
+        [
+            {"5": -0.1, "6": 0.2},  # negative share
+            {"5": float("inf")},  # non-finite
+            {"5": float("nan")},  # non-finite
+            {"5": 1.5},  # > 1
+            {"5": 0.4, "6": 0.4},  # total 0.8 > MAX_OVERLAY_SHARE
+        ],
+    )
+    def test_out_of_range_shares_rejected_to_empty(self, mock_wallet, overlay):
+        # The client boundary rejects the WHOLE overlay to {} on any invalid
+        # share, so every validator falls back to the same base vector.
+        client = self._client(mock_wallet)
+        bad = MagicMock()
+        bad.weight_overlay.to_dict.return_value = overlay
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            return_value=_create_response(200, bad),
+        ):
+            assert client.get_weight_overlay() == {}
+
+
 class TestBackendClientUploadToS3:
     def test_upload_to_s3_success(self, mock_wallet):
         from oro_sdk.models import PresignUploadResponse
