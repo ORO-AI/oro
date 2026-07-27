@@ -11,6 +11,7 @@
     { "chutes": "google/gemma-4-31B-turbo-TEE",             "openrouter": "google/gemma-4-31b-it" },
     { "chutes": "zai-org/GLM-5-TEE",                         "openrouter": "z-ai/glm-5" },
     { "chutes": "zai-org/GLM-5.1-TEE",                       "openrouter": "z-ai/glm-5.1" },
+    { "chutes": "zai-org/GLM-5.2-TEE",                       "openrouter": "z-ai/glm-5.2" },
     { "chutes": "moonshotai/Kimi-K2.5-TEE",                  "openrouter": "moonshotai/kimi-k2.5" },
     { "chutes": "moonshotai/Kimi-K2.6-TEE",                  "openrouter": "moonshotai/kimi-k2.6" },
     { "chutes": "MiniMaxAI/MiniMax-M2.5-TEE",               "openrouter": "minimax/minimax-m2.5" },
