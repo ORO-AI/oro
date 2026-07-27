@@ -13,7 +13,6 @@ from uuid import uuid4
 import pytest
 from oro_sdk.models.epoch_standings import EpochStandings
 from oro_sdk.models.pinned_finisher import PinnedFinisher
-
 from validator.backend_client import WeightSalt
 from validator.weight_setter import WeightSetterThread, _standings_to_inputs
 
