@@ -292,7 +292,7 @@ def apply_weight_overlay(
     uids outside the metagraph range are dropped *before* the reserved share is
     computed, so each in-range uid lands at exactly its share — an out-of-range
     assignment is not redistributed onto the survivors. Shares are assumed finite
-    and in [0, 1] (validated at the client boundary, ``get_weight_overlay``);
+    and in [0, 1] (validated at the client boundary, ``_parse_overlay``);
     outputs are clamped to [0, U16_MAX].
     """
     if not overlay:

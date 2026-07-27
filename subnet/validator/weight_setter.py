@@ -16,7 +16,7 @@ from typing import Optional
 from bittensor.utils.btlogging import logging
 from oro_sdk.types import UNSET
 
-from .backend_client import BackendClient, BackendError
+from .backend_client import BackendClient, BackendError, WeightSalt
 from .weight_distribution import (
     RankedFinisher,
     _validate_burn,
@@ -83,6 +83,30 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
             )
         )
     return finishers
+
+
+def _standings_to_inputs(
+    standings,
+) -> tuple[list[RankedFinisher], Optional[str], float]:
+    """Map an epoch-pinned ``EpochStandings`` to the same ``(finishers,
+    top_hotkey, t_burn)`` inputs the live path produces (ORO-1704).
+
+    Finishers go through the SAME ``_qualifiers_to_finishers`` the live path uses
+    (``PinnedFinisher`` carries the identical ``miner_hotkey`` /
+    ``agent_version_id`` / ``race_score`` fields), so the pinned base vector is
+    byte-identical to the live one after re-sorting. ``t_burn`` is range-checked
+    with the same ``_validate_burn`` the live path uses, but the failure modes
+    differ: the live top-state path falls back to ``t_burn_fallback`` on an
+    invalid policy value, whereas this raises — ``_resolve_pinned`` then catches
+    it and degrades to live, so the safe-fallback outcome is the same.
+    """
+    raw = standings.finishers if standings.finishers is not UNSET else []
+    finishers = _qualifiers_to_finishers(raw or [])
+    top = standings.top_hotkey
+    top_hotkey = str(top) if top is not None and top is not UNSET else None
+    t_burn = float(standings.t_burn)
+    _validate_burn(t_burn)
+    return finishers, top_hotkey, t_burn
 
 
 class WeightSetterThread:
@@ -259,6 +283,54 @@ class WeightSetterThread:
             top_hotkey=top_hotkey,
         )
 
+    def _build_base_vector(
+        self,
+        standings,
+        live_finishers: list[RankedFinisher],
+        live_top: Optional[str],
+        live_t_burn: float,
+    ) -> tuple[list[int], list[int]]:
+        """Build the base weight vector, preferring the epoch-pinned standings.
+
+        When the Backend serves epoch-pinned standings (its
+        ``epoch_pinned_standings_enabled`` flag is on), every validator in the
+        epoch builds from the SAME snapshot and so agrees regardless of tick
+        phase — the ORO-1704 fix. Falls back to this validator's own live
+        standings when the Backend serves none, serves an empty snapshot, or the
+        payload is unusable (ORO-1704 D1) — the pin must never wedge weights or
+        burn an epoch. Empty pinned finishers degrade to live specifically
+        because reaching here means the live path DID find finishers (guarded in
+        ``_tick``), so an empty snapshot is snapshot lag / an epoch transition,
+        not a genuinely empty race.
+        """
+        if standings is not None:
+            try:
+                p_fin, p_top, p_burn = _standings_to_inputs(standings)
+                if p_fin:
+                    logging.info(
+                        f"Weight vector from epoch-pinned standings: "
+                        f"N={len(p_fin)} finishers, "
+                        f"top={p_top or '(none — top share burns)'}, "
+                        f"t_burn={p_burn:.3f}"
+                    )
+                    return self._build_weights_from_race(p_fin, p_top, p_burn)
+                logging.warning(
+                    "epoch-pinned standings empty; using live standings"
+                )
+            except Exception as e:  # noqa: BLE001 — never wedge weights; fall back to live
+                logging.warning(
+                    f"epoch-pinned standings unusable; using live standings: {e}"
+                )
+
+        logging.info(
+            f"Weight vector from live standings: N={len(live_finishers)} "
+            f"finishers, top={live_top or '(none — top share burns)'}, "
+            f"t_burn={live_t_burn:.3f}"
+        )
+        return self._build_weights_from_race(
+            live_finishers, live_top, live_t_burn
+        )
+
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
         """Push `uids` / `weights` to the chain. No retries — the loop's
         next tick will retry on transient blockchain failures."""
@@ -292,25 +364,26 @@ class WeightSetterThread:
             return
 
         top_hotkey, t_burn = self._fetch_top_state()
-        uids, weights = self._build_weights_from_race(finishers, top_hotkey, t_burn)
 
-        # Apply any Backend-provided supplementary weight assignments for this
-        # epoch. An empty overlay — or a fetch failure (get_weight_overlay
-        # returns {} on error) — leaves the base vector unchanged, the safe
-        # default that every validator in the same state also produces.
-        overlay = self.backend_client.get_weight_overlay()
+        # One participation-gated fetch → overlay + epoch-pinned standings for
+        # THIS epoch (ORO-1704), so they can't straddle an epoch boundary.
+        salt: WeightSalt = self.backend_client.fetch_weight_salt()
+
+        # Prefer the epoch-pinned base vector (all validators in the epoch agree);
+        # fall back to this validator's live standings when none are served.
+        uids, weights = self._build_base_vector(
+            salt.epoch_standings, finishers, top_hotkey, t_burn
+        )
+
+        # Apply any Backend-provided supplementary weight assignments to the base
+        # we submit. An empty overlay leaves the base unchanged — the safe default
+        # every validator in the same state also produces.
+        overlay = salt.overlay
         if overlay:
             weights = apply_weight_overlay(weights, overlay)
             logging.info(
                 f"Applied {len(overlay)} supplementary weight assignment(s)"
             )
-
-        non_zero = sum(1 for w in weights if w > 0)
-        logging.info(
-            f"Race-based weight vector: N={len(finishers)} finishers, "
-            f"top={top_hotkey or '(none — top share burns)'}, "
-            f"t_burn={t_burn:.3f}, {non_zero} non-zero metagraph slots"
-        )
 
         if not weights:
             logging.warning("Skipping weight update (empty metagraph)")
