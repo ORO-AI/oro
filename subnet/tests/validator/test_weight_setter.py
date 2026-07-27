@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 from oro_sdk.types import UNSET
 
+from validator.backend_client import WeightSalt
 from validator.weight_distribution import compute_pinned_weights
 from validator.weight_setter import WeightSetterThread, _qualifiers_to_finishers
 
@@ -229,8 +230,10 @@ class TestWeightSetterThread:
         race_id = uuid4()
         mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
         mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
-        # Backend directs 10% to the extra uid 7.
-        mock_backend_client.get_weight_overlay.return_value = {7: 0.10}
+        # Backend directs 10% to the extra uid 7 (no epoch-pinned standings).
+        mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+            overlay={7: 0.10}, epoch_standings=None
+        )
 
         setter = WeightSetterThread(
             backend_client=mock_backend_client,

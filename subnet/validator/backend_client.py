@@ -12,6 +12,7 @@ Error Handling:
 import logging
 import math
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from uuid import UUID
 
@@ -29,6 +30,7 @@ from oro_sdk.api.validator import (
     presign_upload,
     update_progress,
 )
+from oro_sdk.models.epoch_standings import EpochStandings
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.complete_run_request import CompleteRunRequest
 from oro_sdk.models.complete_run_response import CompleteRunResponse
@@ -187,6 +189,21 @@ _S3_SESSION = requests.Session()
 # Backend. Real assignments reserve a small slice; a larger total signals a bad
 # payload, so the whole overlay is rejected (fail safe to the base vector).
 _MAX_OVERLAY_SHARE = 0.5
+
+
+@dataclass(frozen=True)
+class WeightSalt:
+    """One epoch's weight guidance from the Backend, fetched in a single call.
+
+    ``overlay`` — validated supplementary uid→share assignments (empty on any
+    error). ``epoch_standings`` — the epoch-pinned base standings (ORO-1704), or
+    None when the pin is disabled/absent, in which case the caller builds its
+    base vector from live standings. Both come from the SAME response so they
+    can't straddle an epoch boundary.
+    """
+
+    overlay: dict[int, float]
+    epoch_standings: EpochStandings | None
 
 
 class BackendClient:
@@ -572,39 +589,53 @@ class BackendClient:
             client=self._public_client,
         )
 
-    def get_weight_overlay(self) -> dict[int, float]:
-        """Fetch the Backend's supplementary weight assignments for this epoch.
+    def fetch_weight_salt(self) -> WeightSalt:
+        """Fetch this epoch's overlay + epoch-pinned standings in ONE call.
 
-        Returns a mapping of miner uid → weight fraction to assign this epoch, or
-        an empty dict when the Backend provides none (the default). Uses the
-        signed client — the endpoint is participation-gated.
+        Participation-gated (signed client). One request so both fields come
+        from the same epoch. On ANY fetch/parse error → empty overlay + None
+        standings, so the caller submits its live base vector (ORO-1704 D1) — a
+        malformed payload must never raise past here or it would break Yuma
+        consensus.
 
-        This is the trust boundary for the assignments: every share must be
-        finite and in [0, 1], and the total must be sane (<= MAX_OVERLAY_SHARE).
-        On ANY fetch/parse error OR any out-of-range value the whole overlay is
-        rejected and an empty dict is returned, so the caller submits its base
-        vector — a negative/inf/nan or oversized share would otherwise produce an
-        invalid u16 weight or wedge weight-setting. Rejecting the *whole* overlay
-        (rather than per-uid clamping) keeps every honest validator on the same
-        fallback, preserving consensus.
+        The overlay is the trust boundary: every share must be finite and in
+        [0, 1] and the total <= MAX_OVERLAY_SHARE, else the *whole* overlay is
+        rejected (keeps every honest validator on the same fallback). The pinned
+        standings feed ``build_metagraph_weight_vector``, which already tolerates
+        arbitrary finisher input; an unusable value degrades to None (live).
         """
         try:
             resp = self._call_api(
                 get_weight_salt.sync_detailed,
-                "get_weight_overlay",
+                "fetch_weight_salt",
                 client=self._auth_client,
             )
+        except (BackendError, ValueError, TypeError, AttributeError) as e:
+            logging.warning(f"Weight salt unavailable, using base vector: {e}")
+            return WeightSalt(overlay={}, epoch_standings=None)
+
+        overlay = self._parse_overlay(resp)
+        standings = getattr(resp, "epoch_standings", None)
+        if standings is UNSET:
+            standings = None
+        return WeightSalt(overlay=overlay, epoch_standings=standings)
+
+    def get_weight_overlay(self) -> dict[int, float]:
+        """Back-compat accessor: just the overlay from :meth:`fetch_weight_salt`."""
+        return self.fetch_weight_salt().overlay
+
+    @staticmethod
+    def _parse_overlay(resp: Any) -> dict[int, float]:
+        """Validate + parse the response's ``weight_overlay`` → uid→share, or {}."""
+        try:
             overlay = getattr(resp, "weight_overlay", None)
             if overlay is None or overlay is UNSET:
                 return {}
             parsed = {
                 int(uid): float(share) for uid, share in overlay.to_dict().items()
             }
-        except (BackendError, ValueError, TypeError, AttributeError) as e:
-            # Fail safe: any fetch OR parse failure → no assignments, so the
-            # caller submits its base vector. A malformed payload must not raise
-            # past here (a wrong or missing vector would break Yuma consensus).
-            logging.warning(f"Weight overlay unavailable, using base vector: {e}")
+        except (ValueError, TypeError, AttributeError) as e:
+            logging.warning(f"Weight overlay unparseable, using base vector: {e}")
             return {}
 
         if not all(

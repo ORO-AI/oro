@@ -223,6 +223,17 @@ class Validator:
             default=int(os.environ.get("ORO_WEIGHT_UPDATE_INTERVAL", "300")),
             help="Seconds between weight updates from leaderboard (env: ORO_WEIGHT_UPDATE_INTERVAL)",
         )
+        parser.add_argument(
+            "--epoch-pin-mode",
+            type=str,
+            choices=["off", "shadow", "live"],
+            default=os.environ.get("ORO_EPOCH_PIN_MODE", "off"),
+            help=(
+                "ORO-1704 epoch-pinned standings: off=live only; shadow=log "
+                "pinned-vs-live, submit live; live=submit pinned "
+                "(env: ORO_EPOCH_PIN_MODE)"
+            ),
+        )
         # Adds override arguments for network and netuid.
         parser.add_argument(
             "--netuid", type=int, default=15, help="The chain subnet uid."
@@ -608,10 +619,12 @@ class Validator:
             wallet=self.wallet,
             netuid=self.config.netuid,
             interval_seconds=self.config.weight_update_interval,
+            epoch_pin_mode=self.config.epoch_pin_mode,
         )
         weight_setter.start()
         logging.info(
-            f"Weight setter started (interval: {self.config.weight_update_interval}s)"
+            f"Weight setter started (interval: {self.config.weight_update_interval}s, "
+            f"epoch_pin_mode={self.config.epoch_pin_mode})"
         )
 
         # Recover a wedged validator: if the loop stops making progress (e.g. the

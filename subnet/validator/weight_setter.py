@@ -16,7 +16,7 @@ from typing import Optional
 from bittensor.utils.btlogging import logging
 from oro_sdk.types import UNSET
 
-from .backend_client import BackendClient, BackendError
+from .backend_client import BackendClient, BackendError, WeightSalt
 from .weight_distribution import (
     RankedFinisher,
     _validate_burn,
@@ -85,6 +85,32 @@ def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
     return finishers
 
 
+def _standings_to_inputs(
+    standings,
+) -> tuple[list[RankedFinisher], Optional[str], float]:
+    """Map an epoch-pinned ``EpochStandings`` to the same ``(finishers,
+    top_hotkey, t_burn)`` inputs the live path produces (ORO-1704).
+
+    The finisher fields mirror ``_qualifiers_to_finishers`` so the pinned base
+    vector is byte-identical to the live one after ``rank_finishers`` re-sorts.
+    ``t_burn`` is validated exactly as the live top-state path validates it.
+    """
+    raw = standings.finishers if standings.finishers is not UNSET else []
+    finishers = [
+        RankedFinisher(
+            miner_hotkey=str(f.miner_hotkey),
+            agent_version_id=str(f.agent_version_id),
+            race_score=float(f.race_score),
+        )
+        for f in (raw or [])
+    ]
+    top = standings.top_hotkey
+    top_hotkey = str(top) if top is not None and top is not UNSET else None
+    t_burn = float(standings.t_burn)
+    _validate_burn(t_burn)
+    return finishers, top_hotkey, t_burn
+
+
 class WeightSetterThread:
     """Periodically computes the survivor-set weight vector and submits it on-chain.
 
@@ -112,6 +138,7 @@ class WeightSetterThread:
         netuid: int,
         interval_seconds: int = 300,
         t_burn_fallback: float = _DEFAULT_BURN_RATE,
+        epoch_pin_mode: str = "off",
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -120,6 +147,13 @@ class WeightSetterThread:
         self.netuid = netuid
         self.interval_seconds = interval_seconds
         self.t_burn_fallback = t_burn_fallback
+        # ORO-1704 epoch-pinned standings: "off" = live only (today's behavior);
+        # "shadow" = build both pinned + live, log whether identical, submit LIVE;
+        # "live" = submit the pinned vector when standings are present. Roll out
+        # off → shadow (verify identical on staging) → live.
+        if epoch_pin_mode not in ("off", "shadow", "live"):
+            raise ValueError(f"invalid epoch_pin_mode: {epoch_pin_mode!r}")
+        self.epoch_pin_mode = epoch_pin_mode
 
         # Fail fast on misconfiguration of the fallback value. The live
         # value pulled from Backend is validated each tick by
@@ -259,6 +293,43 @@ class WeightSetterThread:
             top_hotkey=top_hotkey,
         )
 
+    def _resolve_pinned(
+        self,
+        standings,
+        live_uids: list[int],
+        live_weights: list[int],
+        live_finishers: list[RankedFinisher],
+    ) -> tuple[list[int], list[int]]:
+        """Build the epoch-pinned base vector, log how it compares to live, and
+        return whichever the mode selects to submit.
+
+        ``shadow`` always returns the live vector (submit live, just observe);
+        ``live`` returns the pinned vector. Any failure building the pinned
+        vector degrades to live (ORO-1704 D1) — the pin must never wedge weights.
+        """
+        try:
+            p_fin, p_top, p_burn = _standings_to_inputs(standings)
+            pin_uids, pin_weights = self._build_weights_from_race(
+                p_fin, p_top, p_burn
+            )
+        except (ValueError, TypeError, AttributeError) as e:
+            logging.warning(
+                f"epoch-pinned standings unusable, using live vector: {e}"
+            )
+            return live_uids, live_weights
+
+        identical = pin_uids == live_uids and pin_weights == live_weights
+        logging.info(
+            "AUDIT epoch_pin mode=%s identical=%s live_N=%d pin_N=%d",
+            self.epoch_pin_mode,
+            identical,
+            len(live_finishers),
+            len(p_fin),
+        )
+        if self.epoch_pin_mode == "live":
+            return pin_uids, pin_weights
+        return live_uids, live_weights  # shadow: observe only
+
     def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
         """Push `uids` / `weights` to the chain. No retries — the loop's
         next tick will retry on transient blockchain failures."""
@@ -292,13 +363,28 @@ class WeightSetterThread:
             return
 
         top_hotkey, t_burn = self._fetch_top_state()
-        uids, weights = self._build_weights_from_race(finishers, top_hotkey, t_burn)
 
-        # Apply any Backend-provided supplementary weight assignments for this
-        # epoch. An empty overlay — or a fetch failure (get_weight_overlay
-        # returns {} on error) — leaves the base vector unchanged, the safe
-        # default that every validator in the same state also produces.
-        overlay = self.backend_client.get_weight_overlay()
+        # One participation-gated fetch → overlay + epoch-pinned standings for
+        # THIS epoch (ORO-1704), so they can't straddle an epoch boundary.
+        salt: WeightSalt = self.backend_client.fetch_weight_salt()
+
+        # Live base vector (today's behavior, and the fallback / shadow baseline).
+        live_uids, live_weights = self._build_weights_from_race(
+            finishers, top_hotkey, t_burn
+        )
+        uids, weights = live_uids, live_weights
+
+        # Epoch-pinned base vector: build it whenever standings are present and
+        # the pin is enabled, compare to live, and (in "live" mode) submit it.
+        if self.epoch_pin_mode != "off" and salt.epoch_standings is not None:
+            uids, weights = self._resolve_pinned(
+                salt.epoch_standings, live_uids, live_weights, finishers
+            )
+
+        # Apply any Backend-provided supplementary weight assignments to the base
+        # we submit. An empty overlay leaves the base unchanged — the safe default
+        # every validator in the same state also produces.
+        overlay = salt.overlay
         if overlay:
             weights = apply_weight_overlay(weights, overlay)
             logging.info(
