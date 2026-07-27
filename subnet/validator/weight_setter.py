@@ -100,8 +100,11 @@ def _standings_to_inputs(
     Finishers go through the SAME ``_qualifiers_to_finishers`` the live path uses
     (``PinnedFinisher`` carries the identical ``miner_hotkey`` /
     ``agent_version_id`` / ``race_score`` fields), so the pinned base vector is
-    byte-identical to the live one after re-sorting. ``t_burn`` is validated
-    exactly as the live top-state path validates it.
+    byte-identical to the live one after re-sorting. ``t_burn`` is range-checked
+    with the same ``_validate_burn`` the live path uses, but the failure modes
+    differ: the live top-state path falls back to ``t_burn_fallback`` on an
+    invalid policy value, whereas this raises — ``_resolve_pinned`` then catches
+    it and degrades to live, so the safe-fallback outcome is the same.
     """
     raw = standings.finishers if standings.finishers is not UNSET else []
     finishers = _qualifiers_to_finishers(raw or [])
@@ -302,16 +305,29 @@ class WeightSetterThread:
         live_uids: list[int],
         live_weights: list[int],
         live_finishers: list[RankedFinisher],
+        live_top: Optional[str],
+        live_t_burn: float,
     ) -> tuple[list[int], list[int]]:
         """Build the epoch-pinned base vector, log how it compares to live, and
         return whichever the mode selects to submit.
 
         ``shadow`` always returns the live vector (submit live, just observe);
-        ``live`` returns the pinned vector. Any failure building the pinned
-        vector degrades to live (ORO-1704 D1) — the pin must never wedge weights.
+        ``live`` returns the pinned vector. Empty pinned finishers OR any failure
+        building the pinned vector degrades to live (ORO-1704 D1) — the pin must
+        never wedge weights or burn a whole epoch.
         """
         try:
             p_fin, p_top, p_burn = _standings_to_inputs(standings)
+            # Reaching here means the live path DID find finishers (guarded in
+            # _tick). An empty pinned snapshot (flag just enabled, snapshot lag,
+            # epoch transition) would still build a valid all-burn(+top) vector —
+            # in "live" mode that burns the whole epoch's emissions where the live
+            # path would just skip. Degrade to live instead.
+            if not p_fin:
+                logging.warning(
+                    "epoch-pinned standings have no finishers; using live vector"
+                )
+                return live_uids, live_weights
             pin_uids, pin_weights = self._build_weights_from_race(
                 p_fin, p_top, p_burn
             )
@@ -321,11 +337,18 @@ class WeightSetterThread:
             )
             return live_uids, live_weights
 
-        identical = pin_uids == live_uids and pin_weights == live_weights
+        # Component-level audit: separate a mechanism-corrupting divergence
+        # (finisher set / vector differs) from an expected mid-epoch source change
+        # the pin is meant to freeze (top designation or t_burn moved since the
+        # snapshot). A bare `identical` bool conflates the two and would falsely
+        # read non-identical on a benign top/burn change before enabling `live`.
         logging.info(
-            "AUDIT epoch_pin mode=%s identical=%s live_N=%d pin_N=%d",
+            "AUDIT epoch_pin mode=%s vector_identical=%s top_match=%s "
+            "burn_match=%s live_N=%d pin_N=%d",
             self.epoch_pin_mode,
-            identical,
+            pin_uids == live_uids and pin_weights == live_weights,
+            p_top == live_top,
+            p_burn == live_t_burn,
             len(live_finishers),
             len(p_fin),
         )
@@ -382,7 +405,12 @@ class WeightSetterThread:
         # to live, and (in "live" mode) submit it.
         if salt.epoch_standings is not None:
             uids, weights = self._resolve_pinned(
-                salt.epoch_standings, live_uids, live_weights, finishers
+                salt.epoch_standings,
+                live_uids,
+                live_weights,
+                finishers,
+                top_hotkey,
+                t_burn,
             )
 
         # Apply any Backend-provided supplementary weight assignments to the base

@@ -153,6 +153,32 @@ def test_live_mode_submits_pinned(
     assert weights[2] > weights[1]  # submitted the PINNED vector
 
 
+def test_live_mode_empty_pinned_finishers_falls_back_to_live(
+    mock_backend_client, mock_subtensor, mock_wallet
+):
+    """An empty pinned snapshot (flag just enabled / snapshot lag) must NOT submit
+    an all-burn vector in live mode — it degrades to the live vector, which still
+    carries the survivor tail."""
+    fins = _finishers(6)
+    mg = _metagraph(fins)
+    mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
+    mock_backend_client.get_top_miner.return_value.policy = None
+    mock_backend_client.get_race_history.return_value = _race_complete_history(uuid4())
+    mock_backend_client.get_race_detail.return_value = _race_detail(fins)
+    mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+        overlay={},
+        epoch_standings=EpochStandings(top_hotkey="5HK1", t_burn=0.75, finishers=[]),
+    )
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet, mode="live")
+    _run_tick_once(setter)
+
+    weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+    # Degraded to live: survivor tail present (uid 6 > 0). An all-burn pinned
+    # vector — the bug — would zero the tail and hand the top slot to 5HK1 (uid 2).
+    assert weights[6] > 0
+    assert weights[1] > weights[2]  # live top 5HK0 (uid 1), not pinned 5HK1 (uid 2)
+
+
 def test_no_standings_falls_back_to_live(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
