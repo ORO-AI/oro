@@ -319,7 +319,7 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             return_value=self._resp({"114": 0.09, "201": 0.005}),
         ):
-            assert client.get_weight_overlay() == {114: 0.09, 201: 0.005}
+            assert client.fetch_weight_salt().overlay == {114: 0.09, 201: 0.005}
 
     def test_empty_overlay_returns_empty(self, mock_wallet):
         client = self._client(mock_wallet)
@@ -327,7 +327,7 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             return_value=self._resp({}),
         ):
-            assert client.get_weight_overlay() == {}
+            assert client.fetch_weight_salt().overlay == {}
 
     def test_backend_error_returns_empty_not_raises(self, mock_wallet):
         # Fetch failure must fail safe to {} (never raise → the caller submits
@@ -337,7 +337,7 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             side_effect=httpx.TimeoutException("timeout"),
         ):
-            assert client.get_weight_overlay() == {}
+            assert client.fetch_weight_salt().overlay == {}
 
     def test_malformed_payload_returns_empty_not_raises(self, mock_wallet):
         # A non-numeric overlay value would raise on parse — the guard must catch
@@ -349,7 +349,7 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             return_value=_create_response(200, bad),
         ):
-            assert client.get_weight_overlay() == {}
+            assert client.fetch_weight_salt().overlay == {}
 
     @pytest.mark.parametrize(
         "overlay",
@@ -371,7 +371,7 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             return_value=_create_response(200, bad),
         ):
-            assert client.get_weight_overlay() == {}
+            assert client.fetch_weight_salt().overlay == {}
 
 
 class TestBackendClientUploadToS3:

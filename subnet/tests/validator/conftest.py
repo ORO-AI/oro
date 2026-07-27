@@ -30,7 +30,7 @@ if "bittensor.utils.btlogging" not in sys.modules:
         )
         sys.modules["bittensor.utils.btlogging"] = _btlogging
 
-from validator.backend_client import BackendClient
+from validator.backend_client import BackendClient, WeightSalt
 
 
 # =============================================================================
@@ -72,9 +72,9 @@ def mock_backend_client():
     Test files can configure specific method return values as needed.
     """
     client = MagicMock(spec=BackendClient)
-    # Default: no supplementary weight assignments (matches a dark Backend). Set
-    # explicitly so tests don't depend on MagicMock's empty-iteration behaviour.
-    client.get_weight_overlay.return_value = {}
+    # Default: no overlay, no epoch-pinned standings (matches a dark Backend).
+    # Set explicitly so tests don't depend on MagicMock's default behaviour.
+    client.fetch_weight_salt.return_value = WeightSalt(overlay={}, epoch_standings=None)
     return client
 
 
