@@ -43,11 +43,13 @@ PROXY_URL = "http://proxy:80"
 # across all of them.
 JUDGE_MODELS_BY_PROVIDER: dict[str, list[str]] = {
     "chutes": [
+        "zai-org/GLM-5.2-TEE",
         "zai-org/GLM-5.1-TEE",
         "google/gemma-4-31B-turbo-TEE",
         "zai-org/GLM-5-TEE",
     ],
     "openrouter": [
+        "z-ai/glm-5.2",
         "z-ai/glm-5.1",
         "google/gemma-4-31b-it",
         "z-ai/glm-5",
