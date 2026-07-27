@@ -25,6 +25,12 @@ from .weight_distribution import (
     compute_pinned_weights,
 )
 
+# ORO-1704 epoch-pinned standings modes. "shadow" (default) builds the pinned
+# vector, logs pinned-vs-live, but submits LIVE; "live" submits the pinned
+# vector. The Backend's epoch_pinned_standings_enabled flag is the master
+# on/off — with it off no standings are served and both modes are inert.
+EPOCH_PIN_MODES = ("shadow", "live")
+
 
 def _qualifiers_to_finishers(qualifiers) -> list[RankedFinisher]:
     """Reduce SDK `RaceQualifierPublic` records to ranked finishers.
@@ -91,19 +97,14 @@ def _standings_to_inputs(
     """Map an epoch-pinned ``EpochStandings`` to the same ``(finishers,
     top_hotkey, t_burn)`` inputs the live path produces (ORO-1704).
 
-    The finisher fields mirror ``_qualifiers_to_finishers`` so the pinned base
-    vector is byte-identical to the live one after ``rank_finishers`` re-sorts.
-    ``t_burn`` is validated exactly as the live top-state path validates it.
+    Finishers go through the SAME ``_qualifiers_to_finishers`` the live path uses
+    (``PinnedFinisher`` carries the identical ``miner_hotkey`` /
+    ``agent_version_id`` / ``race_score`` fields), so the pinned base vector is
+    byte-identical to the live one after re-sorting. ``t_burn`` is validated
+    exactly as the live top-state path validates it.
     """
     raw = standings.finishers if standings.finishers is not UNSET else []
-    finishers = [
-        RankedFinisher(
-            miner_hotkey=str(f.miner_hotkey),
-            agent_version_id=str(f.agent_version_id),
-            race_score=float(f.race_score),
-        )
-        for f in (raw or [])
-    ]
+    finishers = _qualifiers_to_finishers(raw or [])
     top = standings.top_hotkey
     top_hotkey = str(top) if top is not None and top is not UNSET else None
     t_burn = float(standings.t_burn)
@@ -138,7 +139,7 @@ class WeightSetterThread:
         netuid: int,
         interval_seconds: int = 300,
         t_burn_fallback: float = _DEFAULT_BURN_RATE,
-        epoch_pin_mode: str = "off",
+        epoch_pin_mode: str = "shadow",
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -147,11 +148,13 @@ class WeightSetterThread:
         self.netuid = netuid
         self.interval_seconds = interval_seconds
         self.t_burn_fallback = t_burn_fallback
-        # ORO-1704 epoch-pinned standings: "off" = live only (today's behavior);
-        # "shadow" = build both pinned + live, log whether identical, submit LIVE;
-        # "live" = submit the pinned vector when standings are present. Roll out
-        # off → shadow (verify identical on staging) → live.
-        if epoch_pin_mode not in ("off", "shadow", "live"):
+        # ORO-1704 epoch-pinned standings: "shadow" (default) = build both pinned
+        # + live, log whether identical, submit LIVE; "live" = submit the pinned
+        # vector when standings are present. The Backend's
+        # epoch_pinned_standings_enabled flag is the real on/off — when off it
+        # serves no standings and this is inert regardless of mode. Roll out
+        # shadow (verify identical) → live.
+        if epoch_pin_mode not in EPOCH_PIN_MODES:
             raise ValueError(f"invalid epoch_pin_mode: {epoch_pin_mode!r}")
         self.epoch_pin_mode = epoch_pin_mode
 
@@ -312,7 +315,7 @@ class WeightSetterThread:
             pin_uids, pin_weights = self._build_weights_from_race(
                 p_fin, p_top, p_burn
             )
-        except (ValueError, TypeError, AttributeError) as e:
+        except Exception as e:  # noqa: BLE001 — pin must never wedge weights; fail to live
             logging.warning(
                 f"epoch-pinned standings unusable, using live vector: {e}"
             )
@@ -374,9 +377,10 @@ class WeightSetterThread:
         )
         uids, weights = live_uids, live_weights
 
-        # Epoch-pinned base vector: build it whenever standings are present and
-        # the pin is enabled, compare to live, and (in "live" mode) submit it.
-        if self.epoch_pin_mode != "off" and salt.epoch_standings is not None:
+        # Epoch-pinned base vector: build it whenever the Backend serves standings
+        # (its epoch_pinned_standings_enabled flag is the master switch), compare
+        # to live, and (in "live" mode) submit it.
+        if salt.epoch_standings is not None:
             uids, weights = self._resolve_pinned(
                 salt.epoch_standings, live_uids, live_weights, finishers
             )

@@ -41,7 +41,7 @@ def _standings(finishers, top_hotkey, t_burn=0.75):
     )
 
 
-def _setter(metagraph, mock_backend_client, mock_subtensor, mock_wallet, mode="off"):
+def _setter(metagraph, mock_backend_client, mock_subtensor, mock_wallet, mode="shadow"):
     return WeightSetterThread(
         backend_client=mock_backend_client,
         subtensor=mock_subtensor,

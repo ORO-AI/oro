@@ -36,7 +36,7 @@ from .metrics import (
 )
 from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
-from .weight_setter import WeightSetterThread
+from .weight_setter import EPOCH_PIN_MODES, WeightSetterThread
 from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
@@ -223,14 +223,25 @@ class Validator:
             default=int(os.environ.get("ORO_WEIGHT_UPDATE_INTERVAL", "300")),
             help="Seconds between weight updates from leaderboard (env: ORO_WEIGHT_UPDATE_INTERVAL)",
         )
+        # Validate the env default here: argparse enforces `choices` only on
+        # CLI-supplied values, not on the default (F3), so a typo'd
+        # ORO_EPOCH_PIN_MODE would otherwise reach WeightSetterThread and crash
+        # startup instead of degrading cleanly.
+        pin_mode_default = os.environ.get("ORO_EPOCH_PIN_MODE", "shadow")
+        if pin_mode_default not in EPOCH_PIN_MODES:
+            logging.warning(
+                "invalid ORO_EPOCH_PIN_MODE=%r, defaulting to shadow",
+                pin_mode_default,
+            )
+            pin_mode_default = "shadow"
         parser.add_argument(
             "--epoch-pin-mode",
             type=str,
-            choices=["off", "shadow", "live"],
-            default=os.environ.get("ORO_EPOCH_PIN_MODE", "off"),
+            choices=list(EPOCH_PIN_MODES),
+            default=pin_mode_default,
             help=(
-                "ORO-1704 epoch-pinned standings: off=live only; shadow=log "
-                "pinned-vs-live, submit live; live=submit pinned "
+                "ORO-1704 epoch-pinned standings: shadow=log pinned-vs-live, "
+                "submit live (default); live=submit pinned "
                 "(env: ORO_EPOCH_PIN_MODE)"
             ),
         )

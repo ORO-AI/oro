@@ -620,10 +620,6 @@ class BackendClient:
             standings = None
         return WeightSalt(overlay=overlay, epoch_standings=standings)
 
-    def get_weight_overlay(self) -> dict[int, float]:
-        """Back-compat accessor: just the overlay from :meth:`fetch_weight_salt`."""
-        return self.fetch_weight_salt().overlay
-
     @staticmethod
     def _parse_overlay(resp: Any) -> dict[int, float]:
         """Validate + parse the response's ``weight_overlay`` → uid→share, or {}."""

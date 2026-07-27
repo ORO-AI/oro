@@ -650,7 +650,7 @@ class TestApplyWeightOverlay:
 
     def test_never_exceeds_u16_ceiling(self):
         # Safety net only: an out-of-contract oversized share (rejected upstream
-        # by get_weight_overlay's MAX_OVERLAY_SHARE guard) must still never emit a
+        # by _parse_overlay's MAX_OVERLAY_SHARE guard) must still never emit a
         # value above the u16 ceiling. Proportion fidelity is NOT asserted here —
         # it holds for the small in-contract shares (see test_exact_output_vector).
         base = [0, 65535, 1]
