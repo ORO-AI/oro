@@ -34,6 +34,7 @@ from .metrics import (
     SANDBOX_ACTIVE,
     SANDBOX_DURATION_SECONDS,
 )
+from .host_specs import check_host_min_specs
 from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
@@ -121,6 +122,7 @@ class Validator:
     def __init__(self):
         self.config = self.get_config()
         self.setup_logging()
+        check_host_min_specs()
         self.setup_bittensor_objects()
 
         # Backend API client
