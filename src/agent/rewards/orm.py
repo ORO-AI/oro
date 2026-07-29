@@ -36,9 +36,12 @@ _logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
-# Leading compatibility phrases that carry no discriminating information for the
-# match — reward `compatibility_by_model: "for vivo y02a"` should hit a product
-# with `variation: "vivo y02a"`. Stripped once, only when they lead the string.
+# Leading compatibility phrases that carry no discriminating information when a
+# value is compared under a compat-family key (e.g. reward
+# `compatibility_by_model: "for vivo y02a"` vs product
+# `compatibility_by_model: "vivo y02a"`). Stripped inside `_attr_constraint_hit`
+# only for keys that pass `_is_compat_key`, so unrelated slots like
+# `feature: "for indoor use"` are not silently truncated.
 _LEADING_COMPAT_PREFIXES = (
     "compatible with ",
     "compatible for ",
@@ -47,11 +50,17 @@ _LEADING_COMPAT_PREFIXES = (
     "for ",
 )
 
+# Keys where the values carry compatibility statements and the leading phrase
+# is boilerplate rather than semantic content. Narrow allowlist — expand only
+# when a concrete miner case demonstrates the drift on a new key.
+_COMPAT_KEYS = frozenset({"compatibility", "compatibilitybymodel", "compatiblewith", "compatiblefor"})
+
+
 # Clothing size abbreviations expanded to their canonical long form so that
 # reward `size: "int: medium"` can hit product `size: "int:m"` via same-key
-# token-subsequence. Only applied when the value's key is size-family
-# (see `_is_size_key`) — avoids `s`/`m`/`l` collisions in unrelated slots
-# (e.g. flavor codes, hex colors) where these letters carry no size meaning.
+# token-subsequence. Only applied when the value's key is EXACTLY the `size`
+# slot (see `_is_size_key`) — avoids collisions on `ring_size` (letter codes
+# denote ring letters), `screen_size` (inches), `package_size`, etc.
 _SIZE_TOKEN_EXPANSION = {
     "s": "small",
     "m": "medium",
@@ -73,13 +82,13 @@ def _strip_compat_prefix(s: str) -> str:
 
 
 def normalize_attr_value(value) -> str:
-    """NFKC + lowercase, strip bracket chars (full-width incl.), collapse
-    whitespace, and strip a leading compatibility prefix (`for `/`fits `/etc.).
-    Values are still compared for *exact equality* after this."""
+    """NFKC + lowercase, strip bracket chars (full-width incl.) and collapse
+    whitespace. Values are still compared for *exact equality* after this.
+    Key-gated normalizations (compat-prefix strip, size expansion) run inside
+    `_attr_constraint_hit`, not here — see those helpers."""
     s = unicodedata.normalize("NFKC", str(value)).lower()
     s = re.sub(r"[【】\[\]\(\)（）]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return _strip_compat_prefix(s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def normalize_attr_key(key) -> str:
@@ -98,10 +107,16 @@ def _value_tokens(value) -> list:
 
 
 def _is_size_key(nk: str) -> bool:
-    """Key names where clothing-size letter codes (m/l/xl) should expand to
-    their long forms before comparison. Matches `size`, `intsize`, `usize`,
-    `size1`, etc. — anything containing `size` as a substring."""
-    return "size" in nk
+    """Only the canonical clothing/apparel size slot. Keys like `ring_size`,
+    `screen_size`, `package_size` intentionally excluded — letter codes there
+    mean ring letters / inches / package classes, not garment sizes."""
+    return nk == "size"
+
+
+def _is_compat_key(nk: str) -> bool:
+    """Compatibility-family keys — where a leading `for `/`fits ` phrase is
+    boilerplate rather than semantic content."""
+    return nk in _COMPAT_KEYS
 
 
 def _expand_size_tokens(tokens: list) -> list:
@@ -117,18 +132,6 @@ def _is_token_subsequence(sub: list, seq: list) -> bool:
         return False
     it = iter(seq)
     return all(tok in it for tok in sub)
-
-
-def _is_token_subset(sub: list, seq: list) -> bool:
-    """Unordered variant of `_is_token_subsequence`: every token in `sub`
-    appears somewhere in `seq`, order-agnostic. Requires `len(sub) >= 2` so
-    single-token compound matches like `black` ⊂ `black steel wheel` do NOT
-    trigger. Catches word-order drift on compound SKU values (e.g. reward
-    `pedal blue 50l` vs product `50l blue pedal`)."""
-    if len(sub) < 2:
-        return False
-    seq_set = set(seq)
-    return all(tok in seq_set for tok in sub)
 
 
 def _build_attr_index(kv_pairs):
@@ -183,32 +186,45 @@ _CROSS_KEY_ALIASES = frozenset(
 def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool:
     """Does the product satisfy a single reward (key, value) constraint?
 
-    1. Same-key exact match after value + key normalization.
+    1. Same-key exact match after value + key normalization. For compat-family
+       keys the leading `for `/`fits `/etc. prefix is stripped on both sides
+       before equality.
     2. Same-key token-subsequence: reward value's tokens appear in one of the
-       product's values under that (normalized) key, in order. For size-family
-       keys, letter codes (m/l/xl) expand to long forms before comparison.
-    3. Same-key token-subset (unordered): reward value's tokens (≥2) all appear
-       in one of the product's values under that key, order-agnostic. Catches
-       compound-value word-order drift (`pedal blue 50l` ⊂ `50l blue pedal`).
-    4. Cross-key alias: the same value (exact, after normalization) sits under a
+       product's values under that (normalized) key, in order. For the `size`
+       key, letter codes (m/l/xl) expand to long forms before comparison.
+    3. Cross-key alias: the same value (exact, after normalization) sits under a
        curated sibling key that is semantically the same slot (`_CROSS_KEY_ALIASES`).
     """
     nk = normalize_attr_key(reward_key)
+    is_compat = _is_compat_key(nk)
+    is_size = _is_size_key(nk)
+
     nv = normalize_attr_value(reward_value)
-    if nk in val_keys.get(nv, ()):
+    if is_compat:
+        nv = _strip_compat_prefix(nv)
+    # Exact-match check must compare against compat-stripped product values too.
+    # Fast path uses the pre-built val_keys index; for compat we fall through to
+    # the per-value loop below.
+    if not is_compat and nk in val_keys.get(nv, ()):
         return True
+
     rt = _value_tokens(reward_value)
-    if _is_size_key(nk):
-        rt_matched = _expand_size_tokens(rt)
-    else:
-        rt_matched = rt
-    if rt_matched:
-        for ptoks in key_tokens.get(nk, ()):
-            ptoks_matched = _expand_size_tokens(ptoks) if _is_size_key(nk) else ptoks
-            if _is_token_subsequence(rt_matched, ptoks_matched):
+    if is_compat:
+        rt = _WORD_RE.findall(nv)  # tokens over the prefix-stripped value
+    if is_size:
+        rt = _expand_size_tokens(rt)
+
+    for ptoks in key_tokens.get(nk, ()):
+        pt = ptoks
+        if is_compat:
+            pt = _WORD_RE.findall(_strip_compat_prefix(" ".join(ptoks)))
+            if pt == rt:
                 return True
-            if _is_token_subset(rt_matched, ptoks_matched):
-                return True
+        if is_size:
+            pt = _expand_size_tokens(pt)
+        if rt and _is_token_subsequence(rt, pt):
+            return True
+
     for pk in val_keys.get(nv, ()):
         if pk != nk and frozenset((nk, pk)) in _CROSS_KEY_ALIASES:
             return True
