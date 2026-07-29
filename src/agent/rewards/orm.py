@@ -36,13 +36,50 @@ _logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 
+# Leading compatibility phrases that carry no discriminating information for the
+# match — reward `compatibility_by_model: "for vivo y02a"` should hit a product
+# with `variation: "vivo y02a"`. Stripped once, only when they lead the string.
+_LEADING_COMPAT_PREFIXES = (
+    "compatible with ",
+    "compatible for ",
+    "suitable for ",
+    "fits ",
+    "for ",
+)
+
+# Clothing size abbreviations expanded to their canonical long form so that
+# reward `size: "int: medium"` can hit product `size: "int:m"` via same-key
+# token-subsequence. Only applied when the value's key is size-family
+# (see `_is_size_key`) — avoids `s`/`m`/`l` collisions in unrelated slots
+# (e.g. flavor codes, hex colors) where these letters carry no size meaning.
+_SIZE_TOKEN_EXPANSION = {
+    "s": "small",
+    "m": "medium",
+    "l": "large",
+    "xl": "xlarge",
+    "xxl": "2xlarge",
+    "xxxl": "3xlarge",
+    "2xl": "2xlarge",
+    "3xl": "3xlarge",
+    "4xl": "4xlarge",
+}
+
+
+def _strip_compat_prefix(s: str) -> str:
+    for prefix in _LEADING_COMPAT_PREFIXES:
+        if s.startswith(prefix):
+            return s[len(prefix):]
+    return s
+
 
 def normalize_attr_value(value) -> str:
-    """NFKC + lowercase, strip bracket chars (full-width incl.) and collapse
-    whitespace. Values are still compared for *exact equality* after this."""
+    """NFKC + lowercase, strip bracket chars (full-width incl.), collapse
+    whitespace, and strip a leading compatibility prefix (`for `/`fits `/etc.).
+    Values are still compared for *exact equality* after this."""
     s = unicodedata.normalize("NFKC", str(value)).lower()
     s = re.sub(r"[【】\[\]\(\)（）]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    return _strip_compat_prefix(s)
 
 
 def normalize_attr_key(key) -> str:
@@ -60,6 +97,17 @@ def _value_tokens(value) -> list:
     return _WORD_RE.findall(normalize_attr_value(value))
 
 
+def _is_size_key(nk: str) -> bool:
+    """Key names where clothing-size letter codes (m/l/xl) should expand to
+    their long forms before comparison. Matches `size`, `intsize`, `usize`,
+    `size1`, etc. — anything containing `size` as a substring."""
+    return "size" in nk
+
+
+def _expand_size_tokens(tokens: list) -> list:
+    return [_SIZE_TOKEN_EXPANSION.get(t, t) for t in tokens]
+
+
 def _is_token_subsequence(sub: list, seq: list) -> bool:
     """True if every token in `sub` appears in `seq` as a whole token, in
     order. Whole-token boundaries mean `8gb` is NOT a subsequence of the
@@ -69,6 +117,18 @@ def _is_token_subsequence(sub: list, seq: list) -> bool:
         return False
     it = iter(seq)
     return all(tok in it for tok in sub)
+
+
+def _is_token_subset(sub: list, seq: list) -> bool:
+    """Unordered variant of `_is_token_subsequence`: every token in `sub`
+    appears somewhere in `seq`, order-agnostic. Requires `len(sub) >= 2` so
+    single-token compound matches like `black` ⊂ `black steel wheel` do NOT
+    trigger. Catches word-order drift on compound SKU values (e.g. reward
+    `pedal blue 50l` vs product `50l blue pedal`)."""
+    if len(sub) < 2:
+        return False
+    seq_set = set(seq)
+    return all(tok in seq_set for tok in sub)
 
 
 def _build_attr_index(kv_pairs):
@@ -110,6 +170,9 @@ _CROSS_KEY_ALIAS_PAIRS = [
     ("flavor", "scent"),
     ("leather_material", "material"),
     ("leather_material", "material_filter"),
+    # Category-specific key spelling drift observed in miner-audit cases.
+    # Values overlap only in-category; distinctiveness stays intact.
+    ("curtain_type", "type_curtain"),
 ]
 _CROSS_KEY_ALIASES = frozenset(
     frozenset((normalize_attr_key(a), normalize_attr_key(b)))
@@ -121,9 +184,13 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
     """Does the product satisfy a single reward (key, value) constraint?
 
     1. Same-key exact match after value + key normalization.
-    2. Same-key token-subset: the reward value's tokens are a whole-token
-       subsequence of one of the product's values under that (normalized) key.
-    3. Cross-key alias: the same value (exact, after normalization) sits under a
+    2. Same-key token-subsequence: reward value's tokens appear in one of the
+       product's values under that (normalized) key, in order. For size-family
+       keys, letter codes (m/l/xl) expand to long forms before comparison.
+    3. Same-key token-subset (unordered): reward value's tokens (≥2) all appear
+       in one of the product's values under that key, order-agnostic. Catches
+       compound-value word-order drift (`pedal blue 50l` ⊂ `50l blue pedal`).
+    4. Cross-key alias: the same value (exact, after normalization) sits under a
        curated sibling key that is semantically the same slot (`_CROSS_KEY_ALIASES`).
     """
     nk = normalize_attr_key(reward_key)
@@ -131,9 +198,16 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
     if nk in val_keys.get(nv, ()):
         return True
     rt = _value_tokens(reward_value)
-    if rt:
+    if _is_size_key(nk):
+        rt_matched = _expand_size_tokens(rt)
+    else:
+        rt_matched = rt
+    if rt_matched:
         for ptoks in key_tokens.get(nk, ()):
-            if _is_token_subsequence(rt, ptoks):
+            ptoks_matched = _expand_size_tokens(ptoks) if _is_size_key(nk) else ptoks
+            if _is_token_subsequence(rt_matched, ptoks_matched):
+                return True
+            if _is_token_subset(rt_matched, ptoks_matched):
                 return True
     for pk in val_keys.get(nv, ()):
         if pk != nk and frozenset((nk, pk)) in _CROSS_KEY_ALIASES:
