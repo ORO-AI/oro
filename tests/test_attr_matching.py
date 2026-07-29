@@ -173,10 +173,51 @@ def test_curtain_type_alias():
     assert _hit("curtain_type", "curtains", [("type_curtain", "curtains")])
 
 
-# ── word-order guarantee preserved (regression test for review finding #1) ──
+# ── word-order guarantee preserved (regression test) ─────────────
 def test_order_preserved_for_multi_token_values():
     # If we admitted an unordered subset match, permuted dimensional values
     # would false-hit (reward "10 20" vs product "20 10"). Same-key check
     # is strictly ordered.
     assert not _hit("size", "10 20", [("size", "20 10")])
     assert not _hit("dimensions", "3 5", [("dimensions", "5 3")])
+
+
+# ── size expansion does NOT fire on dimensional / unit values (regression) ──
+def test_size_expansion_skipped_on_dimensional_values():
+    # `l` is a common dimension abbreviation (length, liters). It must not
+    # expand to `large` when the surrounding tokens indicate dimensions or
+    # units rather than a clothing size.
+    assert not _hit("size", "large", [("size", "l x w x h")])
+    assert not _hit("size", "large", [("size", "l: 30cm w: 20cm")])
+    assert not _hit("size", "large", [("size", "5 l")])
+    assert not _hit("size", "small", [("size", "s hook 10pcs")])
+
+
+def test_size_expansion_fires_only_on_clothing_shape():
+    # Bare size letter/word: expands
+    assert _hit("size", "large", [("size", "l")])
+    assert _hit("size", "l", [("size", "large")])
+    # Region-prefixed size (int/us/eu/uk/jp/asia/cn) + size: expands
+    assert _hit("size", "us large", [("size", "us l")])
+    assert _hit("size", "eu xlarge", [("size", "eu xl")])
+    # Multi-token value with no clothing-size shape: does not expand
+    assert not _hit("size", "l", [("size", "5 l")])
+
+
+# ── compat prefix — single-token subseq broadening (reviewer note) ──
+def test_compat_single_token_subseq_after_strip():
+    # After the leading `for ` is stripped from the reward side, `[iphone]`
+    # becomes a valid single-token subsequence of any product value that
+    # contains `iphone` under the same compat key. This IS intended — same
+    # semantics as the pre-1695 single-token subseq path — but the widening
+    # from compat-strip warrants an explicit test.
+    assert _hit("compatibility", "for iphone", [("compatibility", "iphone 15 pro max")])
+
+
+def test_compat_cross_key_alias_symmetric_with_prefix():
+    # Compat cross-key alias must work regardless of which side carries the
+    # `for ` prefix. Both raw and stripped variants are indexed for compat
+    # keys, so a reward under `compatibility` matches a product under its
+    # curated sibling `compatibility_by_model` with the prefix on either side.
+    assert _hit("compatibility", "for vivo y02a", [("compatibility_by_model", "vivo y02a")])
+    assert _hit("compatibility", "vivo y02a", [("compatibility_by_model", "for vivo y02a")])

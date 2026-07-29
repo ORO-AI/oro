@@ -73,12 +73,45 @@ _SIZE_TOKEN_EXPANSION = {
     "4xl": "4xlarge",
 }
 
+# Regional size prefixes that legitimately precede a size letter/word
+# (e.g. `int: medium`, `us s`, `eu xl`). Any other 2+-token size value is
+# treated as dimensional / unit content (`l x w x h`, `5 l`, `s hook 10pcs`)
+# and does NOT trigger expansion.
+_SIZE_PREFIX_TOKENS = frozenset({"int", "us", "eu", "uk", "jp", "asia", "cn"})
+_SIZE_WORDS = frozenset(_SIZE_TOKEN_EXPANSION.values())
+
+
+def _looks_like_clothing_size(tokens: list) -> bool:
+    """True when tokens match a clothing-size shape — either a bare size
+    letter/word, or a region prefix followed by one. Rejects dimensional /
+    unit values (e.g. `["l","x","w","h"]`, `["5","l"]`, `["s","hook","10pcs"]`)
+    so `_expand_size_tokens` never fires on those."""
+    if len(tokens) == 1:
+        t = tokens[0]
+        return t in _SIZE_TOKEN_EXPANSION or t in _SIZE_WORDS
+    if len(tokens) == 2:
+        prefix, sz = tokens
+        return prefix in _SIZE_PREFIX_TOKENS and (sz in _SIZE_TOKEN_EXPANSION or sz in _SIZE_WORDS)
+    return False
+
 
 def _strip_compat_prefix(s: str) -> str:
     for prefix in _LEADING_COMPAT_PREFIXES:
         if s.startswith(prefix):
             return s[len(prefix):]
     return s
+
+
+def _strip_compat_prefix_tokens(toks: list) -> list:
+    """Token-list variant — drops the leading prefix tokens if the first N
+    tokens match any prefix in `_LEADING_COMPAT_PREFIXES`. Avoids the
+    `" ".join(toks)` → re-tokenize round-trip in the hot loop."""
+    for prefix in _LEADING_COMPAT_PREFIXES:
+        pt = prefix.strip().split()
+        n = len(pt)
+        if len(toks) >= n and toks[:n] == pt:
+            return toks[n:]
+    return toks
 
 
 def normalize_attr_value(value) -> str:
@@ -138,14 +171,27 @@ def _build_attr_index(kv_pairs):
     """From an iterable of (key, value) product tuples build:
     - val_keys: normalized value -> set of normalized keys holding it
     - key_tokens: normalized key -> list of token-lists of its values
+
+    For compat-family keys, both the raw and compat-prefix-stripped variants
+    are indexed under the same key. This keeps the reward-vs-product match
+    symmetric on prefix — a reward carrying `for X` matches a product `X`
+    (and vice versa) without special-casing at the call site.
     """
     val_keys = {}
     key_tokens = {}
     for k, v in kv_pairs:
         nk = normalize_attr_key(k)
         nv = normalize_attr_value(v)
+        toks = _value_tokens(v)
         val_keys.setdefault(nv, set()).add(nk)
-        key_tokens.setdefault(nk, []).append(_value_tokens(v))
+        key_tokens.setdefault(nk, []).append(toks)
+        if _is_compat_key(nk):
+            stripped_nv = _strip_compat_prefix(nv)
+            if stripped_nv != nv:
+                val_keys.setdefault(stripped_nv, set()).add(nk)
+            stripped_toks = _strip_compat_prefix_tokens(toks)
+            if stripped_toks != toks:
+                key_tokens[nk].append(stripped_toks)
     return val_keys, key_tokens
 
 
@@ -186,12 +232,14 @@ _CROSS_KEY_ALIASES = frozenset(
 def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool:
     """Does the product satisfy a single reward (key, value) constraint?
 
-    1. Same-key exact match after value + key normalization. For compat-family
-       keys the leading `for `/`fits `/etc. prefix is stripped on both sides
-       before equality.
+    1. Same-key exact match after value + key normalization. Compat-family
+       keys have both raw and prefix-stripped variants indexed (see
+       `_build_attr_index`), so `for X` on either side matches plain `X`.
     2. Same-key token-subsequence: reward value's tokens appear in one of the
-       product's values under that (normalized) key, in order. For the `size`
-       key, letter codes (m/l/xl) expand to long forms before comparison.
+       product's values under that (normalized) key, in order. For the exact
+       `size` key, size letter codes (m/l/xl) expand to long forms — but only
+       when both sides look like clothing-size values (`_looks_like_clothing_size`),
+       so dimensional / unit content (`l x w h`, `5 l`, `s hook`) never expands.
     3. Cross-key alias: the same value (exact, after normalization) sits under a
        curated sibling key that is semantically the same slot (`_CROSS_KEY_ALIASES`).
     """
@@ -202,28 +250,24 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
     nv = normalize_attr_value(reward_value)
     if is_compat:
         nv = _strip_compat_prefix(nv)
-    # Exact-match check must compare against compat-stripped product values too.
-    # Fast path uses the pre-built val_keys index; for compat we fall through to
-    # the per-value loop below.
-    if not is_compat and nk in val_keys.get(nv, ()):
+    if nk in val_keys.get(nv, ()):
         return True
 
-    rt = _value_tokens(reward_value)
-    if is_compat:
-        rt = _WORD_RE.findall(nv)  # tokens over the prefix-stripped value
-    if is_size:
-        rt = _expand_size_tokens(rt)
+    rt = _WORD_RE.findall(nv) if is_compat else _value_tokens(reward_value)
+    rt_size_expandable = is_size and _looks_like_clothing_size(rt)
+    if rt_size_expandable:
+        rt_matched = _expand_size_tokens(rt)
+    else:
+        rt_matched = rt
 
-    for ptoks in key_tokens.get(nk, ()):
-        pt = ptoks
-        if is_compat:
-            pt = _WORD_RE.findall(_strip_compat_prefix(" ".join(ptoks)))
-            if pt == rt:
+    if rt_matched:
+        for ptoks in key_tokens.get(nk, ()):
+            if rt_size_expandable and _looks_like_clothing_size(ptoks):
+                pt = _expand_size_tokens(ptoks)
+            else:
+                pt = ptoks
+            if _is_token_subsequence(rt_matched, pt):
                 return True
-        if is_size:
-            pt = _expand_size_tokens(pt)
-        if rt and _is_token_subsequence(rt, pt):
-            return True
 
     for pk in val_keys.get(nv, ()):
         if pk != nk and frozenset((nk, pk)) in _CROSS_KEY_ALIASES:
