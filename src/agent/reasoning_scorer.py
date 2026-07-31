@@ -21,7 +21,7 @@ from src.agent.types import Dialogue, JudgeResult
 RATE_LIMIT_RETRY_DELAY = 5
 
 # Per-call timeout for the judge HTTP request. 235B-class models
-# (MiniMax-M2.5, Qwen3-32B) generate the judge JSON in ~10–30s under light
+# (GLM-5.2, Qwen3-32B) generate the judge JSON in ~10–30s under light
 # load but tail out to 60s+ under race-time contention from multiple validators
 # hitting the same Chutes instance. Setting this too tight causes the call to
 # time out on the validator side and rotate to the busier fallback models,
@@ -46,13 +46,11 @@ JUDGE_MODELS_BY_PROVIDER: dict[str, list[str]] = {
         "zai-org/GLM-5.2-TEE",
         "zai-org/GLM-5.1-TEE",
         "google/gemma-4-31B-turbo-TEE",
-        "zai-org/GLM-5-TEE",
     ],
     "openrouter": [
         "z-ai/glm-5.2",
         "z-ai/glm-5.1",
         "google/gemma-4-31b-it",
-        "z-ai/glm-5",
     ],
 }
 
