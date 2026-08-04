@@ -21,19 +21,30 @@ def _hit(reward_key, reward_value, product_pairs):
 
 # ── normalization ────────────────────────────────────────────────
 def test_value_normalization_brackets_and_case():
-    assert normalize_attr_value("7*9cm【10pcs】") == "7*9 cm 10 pcs"
-    assert normalize_attr_value("（1pcs）2#- 48mm") == "1 pcs 2#- 48 mm"
+    assert normalize_attr_value("7*9cm【10pcs】") == "7*9cm 10pcs"
+    assert normalize_attr_value("（1pcs）2#- 48mm") == "1pcs 2#- 48mm"
     assert normalize_attr_value("MEDIUM") == "medium"
 
 
 def test_value_normalization_numeric_unit_spacing():
-    # digit→letter boundary split: spaced and unspaced number+unit forms agree
-    assert normalize_attr_value("1200ml") == normalize_attr_value("1200 ml")
-    assert normalize_attr_value("2pcs") == normalize_attr_value("2 pcs")
-    assert normalize_attr_value("3.0w") == normalize_attr_value("3.0 w")
-    # letter→digit stays intact — model/format codes are not number+unit pairs
+    # spaced number+unit fuses to the unspaced atom: both spellings agree
+    assert normalize_attr_value("1200 ml") == normalize_attr_value("1200ml") == "1200ml"
+    assert normalize_attr_value("2 pcs") == normalize_attr_value("2pcs") == "2pcs"
+    assert normalize_attr_value("3.0 w") == normalize_attr_value("3.0w") == "3.0w"
+    # model/format codes and size words stay intact
     assert normalize_attr_value("samsung s22 plus") == "samsung s22 plus"
+    assert normalize_attr_value("pixel 4a") == "pixel 4a"
     assert normalize_attr_value("a4") == "a4"
+    assert normalize_attr_value("int: 2xlarge") == "int:2xlarge"
+
+
+def test_numeric_unit_fuse_never_over_matches():
+    # a bare-number reward must NOT match a unit-bearing product value —
+    # the fuse direction keeps `42w` a single atom (reviewer regression set)
+    assert not _hit("size", "42", [("size", "42w")])
+    assert not _hit("capacity", "3000", [("capacity", "3000mah")])
+    assert not _hit("size", "5", [("size", "5w")])
+    assert not _hit("model", "pixel 4", [("model", "pixel 4a")])
 
 
 def test_value_normalization_colon_spacing():

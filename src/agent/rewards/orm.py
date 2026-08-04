@@ -114,12 +114,14 @@ def _strip_compat_prefix_tokens(toks: list) -> list:
     return toks
 
 
-# Number+unit spacing: `1200ml` ≡ `1200 ml` (ORO-1797 / ex-ORO-1702 class).
-# Token-leading number + known unit suffix only — longest-first so `mm` wins
-# over `m`, `pcs` over `pc`. `\b` on both ends keeps `y02a`, `2xlarge`,
-# `1200mlx` untouched.
+# Number+unit spacing: `1200 ml` ≡ `1200ml` (ORO-1797 / ex-ORO-1702 class).
+# FUSES a spaced number + known unit suffix into one token (never splits) —
+# a fused `1200ml` atom can only match another `1200ml` atom, so a bare-number
+# reward (`42`) can never subsequence-match a unit-bearing product value
+# (`42w`), and digit-first model codes (`pixel 4a`, `5g`) stay intact.
+# Longest-first so `mm` wins over `m`, `pcs` over `pc`.
 _NUM_UNIT_RE = re.compile(
-    r"\b(\d+(?:\.\d+)?)"
+    r"\b(\d+(?:\.\d+)?)\s+"
     r"(mah|inch|pcs|mm|cm|km|ml|kg|kw|gb|mb|tb|oz|ft|pc|in|g|l|m|w|v|a)\b"
 )
 
@@ -131,16 +133,16 @@ def normalize_attr_value(value) -> str:
     normalizations (compat-prefix strip, size expansion) run inside
     `_attr_constraint_hit`, not here — see those helpers.
 
-    The number+unit split makes `1200ml` ≡ `1200 ml` and `2pcs` ≡ `2 pcs`
-    (sellers space number/unit inconsistently across listings). It fires only
-    for a token-leading number followed by a known unit suffix — so model
-    codes (`y02a`, `s22`), size words (`2xlarge`), and other alphanumerics
-    stay intact. Colon spacing (`eu: 38` ≡ `eu:38`) is structural, not
-    semantic.
+    The number+unit fuse makes `1200 ml` ≡ `1200ml` and `2 pcs` ≡ `2pcs`
+    (sellers space number/unit inconsistently across listings). Both spellings
+    canonicalize to the FUSED atom, so token-subsequence semantics only get
+    stricter — a bare number never gains a match against a unit-bearing
+    value. Colon spacing (`eu: 38` ≡ `eu:38`) likewise joins; neither
+    transform ever increases token count.
     """
     s = unicodedata.normalize("NFKC", str(value)).lower()
     s = re.sub(r"[【】\[\]\(\)（）]", " ", s)
-    s = _NUM_UNIT_RE.sub(r"\1 \2", s)
+    s = _NUM_UNIT_RE.sub(r"\1\2", s)
     s = re.sub(r"\s*:\s*", ":", s)
     return re.sub(r"\s+", " ", s).strip()
 
