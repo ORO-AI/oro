@@ -26,6 +26,32 @@ def test_value_normalization_brackets_and_case():
     assert normalize_attr_value("MEDIUM") == "medium"
 
 
+def test_value_normalization_numeric_unit_spacing():
+    # spaced number+unit fuses to the unspaced atom: both spellings agree
+    assert normalize_attr_value("1200 ml") == normalize_attr_value("1200ml") == "1200ml"
+    assert normalize_attr_value("2 pcs") == normalize_attr_value("2pcs") == "2pcs"
+    assert normalize_attr_value("3.0 w") == normalize_attr_value("3.0w") == "3.0w"
+    # model/format codes and size words stay intact
+    assert normalize_attr_value("samsung s22 plus") == "samsung s22 plus"
+    assert normalize_attr_value("pixel 4a") == "pixel 4a"
+    assert normalize_attr_value("a4") == "a4"
+    assert normalize_attr_value("int: 2xlarge") == "int:2xlarge"
+
+
+def test_numeric_unit_fuse_never_over_matches():
+    # a bare-number reward must NOT match a unit-bearing product value —
+    # the fuse direction keeps `42w` a single atom (reviewer regression set)
+    assert not _hit("size", "42", [("size", "42w")])
+    assert not _hit("capacity", "3000", [("capacity", "3000mah")])
+    assert not _hit("size", "5", [("size", "5w")])
+    assert not _hit("model", "pixel 4", [("model", "pixel 4a")])
+
+
+def test_value_normalization_colon_spacing():
+    assert normalize_attr_value("xs: 30x24x15cm") == normalize_attr_value("xs:30x24x15cm")
+    assert normalize_attr_value("eu: 38") == normalize_attr_value("eu:38")
+
+
 def test_key_normalization_space_underscore_plural():
     assert normalize_attr_key("color family") == normalize_attr_key("color_family")
     assert normalize_attr_key("Color_Family") == normalize_attr_key("color family")
@@ -57,6 +83,13 @@ def test_value_bracket_normalization_match():
 def test_token_subset_match_same_key():
     assert _hit("size", "48mm", [("size", "1pcs 2#- 48mm")])
     assert _hit("material", "suede", [("material", "genuine suede leather")])
+
+
+def test_numeric_unit_spacing_match():
+    # ORO-1797 class 2: identical value, number/unit spacing drift across listings
+    assert _hit("capacity", "1200 ml", [("capacity", "1200ml")])
+    assert _hit("color_family", "2 pcs", [("color_family", "2pcs")])
+    assert _hit("size", "xs:30x24x15cm", [("size", "xs: 30x24x15cm")])
 
 
 def test_exact_match_still_passes():
