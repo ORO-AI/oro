@@ -21,9 +21,24 @@ def _hit(reward_key, reward_value, product_pairs):
 
 # ── normalization ────────────────────────────────────────────────
 def test_value_normalization_brackets_and_case():
-    assert normalize_attr_value("7*9cm【10pcs】") == "7*9cm 10pcs"
-    assert normalize_attr_value("（1pcs）2#- 48mm") == "1pcs 2#- 48mm"
+    assert normalize_attr_value("7*9cm【10pcs】") == "7*9 cm 10 pcs"
+    assert normalize_attr_value("（1pcs）2#- 48mm") == "1 pcs 2#- 48 mm"
     assert normalize_attr_value("MEDIUM") == "medium"
+
+
+def test_value_normalization_numeric_unit_spacing():
+    # digit→letter boundary split: spaced and unspaced number+unit forms agree
+    assert normalize_attr_value("1200ml") == normalize_attr_value("1200 ml")
+    assert normalize_attr_value("2pcs") == normalize_attr_value("2 pcs")
+    assert normalize_attr_value("3.0w") == normalize_attr_value("3.0 w")
+    # letter→digit stays intact — model/format codes are not number+unit pairs
+    assert normalize_attr_value("samsung s22 plus") == "samsung s22 plus"
+    assert normalize_attr_value("a4") == "a4"
+
+
+def test_value_normalization_colon_spacing():
+    assert normalize_attr_value("xs: 30x24x15cm") == normalize_attr_value("xs:30x24x15cm")
+    assert normalize_attr_value("eu: 38") == normalize_attr_value("eu:38")
 
 
 def test_key_normalization_space_underscore_plural():
@@ -57,6 +72,13 @@ def test_value_bracket_normalization_match():
 def test_token_subset_match_same_key():
     assert _hit("size", "48mm", [("size", "1pcs 2#- 48mm")])
     assert _hit("material", "suede", [("material", "genuine suede leather")])
+
+
+def test_numeric_unit_spacing_match():
+    # ORO-1797 class 2: identical value, number/unit spacing drift across listings
+    assert _hit("capacity", "1200 ml", [("capacity", "1200ml")])
+    assert _hit("color_family", "2 pcs", [("color_family", "2pcs")])
+    assert _hit("size", "xs:30x24x15cm", [("size", "xs: 30x24x15cm")])
 
 
 def test_exact_match_still_passes():

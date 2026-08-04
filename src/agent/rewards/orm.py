@@ -114,13 +114,34 @@ def _strip_compat_prefix_tokens(toks: list) -> list:
     return toks
 
 
+# Number+unit spacing: `1200ml` ≡ `1200 ml` (ORO-1797 / ex-ORO-1702 class).
+# Token-leading number + known unit suffix only — longest-first so `mm` wins
+# over `m`, `pcs` over `pc`. `\b` on both ends keeps `y02a`, `2xlarge`,
+# `1200mlx` untouched.
+_NUM_UNIT_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)"
+    r"(mah|inch|pcs|mm|cm|km|ml|kg|kw|gb|mb|tb|oz|ft|pc|in|g|l|m|w|v|a)\b"
+)
+
+
 def normalize_attr_value(value) -> str:
-    """NFKC + lowercase, strip bracket chars (full-width incl.) and collapse
-    whitespace. Values are still compared for *exact equality* after this.
-    Key-gated normalizations (compat-prefix strip, size expansion) run inside
-    `_attr_constraint_hit`, not here — see those helpers."""
+    """NFKC + lowercase, strip bracket chars (full-width incl.), split
+    digit→letter boundaries, join colon spacing, and collapse whitespace.
+    Values are still compared for *exact equality* after this. Key-gated
+    normalizations (compat-prefix strip, size expansion) run inside
+    `_attr_constraint_hit`, not here — see those helpers.
+
+    The number+unit split makes `1200ml` ≡ `1200 ml` and `2pcs` ≡ `2 pcs`
+    (sellers space number/unit inconsistently across listings). It fires only
+    for a token-leading number followed by a known unit suffix — so model
+    codes (`y02a`, `s22`), size words (`2xlarge`), and other alphanumerics
+    stay intact. Colon spacing (`eu: 38` ≡ `eu:38`) is structural, not
+    semantic.
+    """
     s = unicodedata.normalize("NFKC", str(value)).lower()
     s = re.sub(r"[【】\[\]\(\)（）]", " ", s)
+    s = _NUM_UNIT_RE.sub(r"\1 \2", s)
+    s = re.sub(r"\s*:\s*", ":", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
