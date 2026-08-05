@@ -114,9 +114,10 @@ class WeightSetterThread:
     Runs in a background thread, independent of the evaluation loop.
     """
 
-    # Fallback burn rate when Backend policy is unreachable. Matches the
-    # historical default; ops can flip the live value via Backend env
-    # without a validator release.
+    # Construction-time validation only: `t_burn_fallback` is fed to
+    # `compute_pinned_weights` in __init__ to fail fast on a misconfigured value.
+    # It is NOT a runtime fallback anymore — with the public /top path removed,
+    # an unusable standings payload is a miss (retain/burn), not a fallback.
     _DEFAULT_BURN_RATE = 0.75
 
     # Default tick cadence. 22 min sits just above the on-chain
@@ -152,7 +153,6 @@ class WeightSetterThread:
         # on the chain epoch index (block // (tempo * reveal_period)) so it is
         # independent of tick cadence.
         self._last_success_epoch: Optional[int] = None
-        self._tempo_cache: Optional[int] = None
 
         # Fail fast on misconfiguration of the fallback value. The live
         # value pulled from Backend is validated each tick by
@@ -190,14 +190,14 @@ class WeightSetterThread:
 
         `epoch = block // (tempo * reveal_period_epochs)` — identical to the
         Backend's `epoch_index_for_block`, so the validator's burn anchor lines
-        up with the epoch the pinned standings were snapshotted for. Uses the
-        block from the just-synced metagraph; tempo is cached after first read.
+        up with the epoch the pinned standings were snapshotted for. Reads tempo
+        from chain each call (not cached) so a tempo change on-chain can't drift
+        the anchor away from the Backend's.
         """
         try:
             block = int(self.metagraph.block)
-            if self._tempo_cache is None:
-                self._tempo_cache = int(self.subtensor.tempo(self.netuid))
-            period = max(self._tempo_cache, 1) * max(self.reveal_period_epochs, 1)
+            tempo = int(self.subtensor.tempo(self.netuid))
+            period = max(tempo, 1) * max(self.reveal_period_epochs, 1)
             return block // period
         except Exception as e:  # noqa: BLE001 — unreadable chain → no anchor
             logging.warning(f"Could not derive current epoch: {e}")
@@ -289,10 +289,14 @@ class WeightSetterThread:
             weights=weights,
             wait_for_inclusion=True,
         )
-        # bittensor returns (success, message); tolerate a bare bool / None from
-        # older shims. Only an explicit truthy success counts as accepted.
+        # Read the actual success signal. bittensor 10.x returns an
+        # `ExtrinsicResponse` (has `.success`; its `__len__` is a constant 2 so a
+        # bare `bool(result)` is ALWAYS True — the bug this guards against). Older
+        # paths return a (success, message) tuple or a bare bool.
         if isinstance(result, tuple):
             return bool(result[0])
+        if hasattr(result, "success"):
+            return bool(result.success)
         return bool(result)
 
     def _tick(self) -> None:

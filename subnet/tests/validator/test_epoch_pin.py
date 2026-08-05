@@ -8,6 +8,7 @@ Backend serves them, otherwise fall back to this validator's live standings.
 """
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -175,6 +176,28 @@ def test_malformed_standings_retains(mock_backend_client, mock_subtensor, mock_w
     _run_tick_once(setter)
 
     mock_subtensor.set_weights.assert_not_called()
+
+
+def test_rejected_set_does_not_advance_burn_anchor(
+    mock_backend_client, mock_subtensor, mock_wallet
+):
+    """A rejected set (ExtrinsicResponse-like `success=False`) must NOT count as
+    a successful set — the burn anchor stays put. Regression for the bug where
+    `bool(result)` was always True (ExtrinsicResponse.__len__ == 2)."""
+    fins = _finishers(6)
+    mg = _metagraph(fins)
+    mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+        overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK0")
+    )
+    # An object that is truthy under bool() but reports success=False — exactly
+    # the ExtrinsicResponse trap.
+    mock_subtensor.set_weights.return_value = SimpleNamespace(success=False)
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
+
+    _run_tick_once(setter)
+
+    mock_subtensor.set_weights.assert_called()  # it attempts the set
+    assert setter._last_success_epoch is None  # but does not record success
 
 
 def test_sustained_miss_burns_to_uid0(
