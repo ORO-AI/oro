@@ -2,41 +2,45 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from oro_sdk.types import UNSET
 
-from validator.backend_client import WeightSalt
+from oro_sdk.models.epoch_standings import EpochStandings
+from oro_sdk.models.pinned_finisher import PinnedFinisher
+
+from validator.backend_client import BackendError, WeightSalt
 from validator.weight_distribution import compute_pinned_weights
 from validator.weight_setter import WeightSetterThread, _qualifiers_to_finishers
+
+
+def _standings(finishers: list[dict], top_hotkey, t_burn=0.75):
+    """EpochStandings payload from finisher dicts — the authed weight source."""
+    return EpochStandings(
+        top_hotkey=top_hotkey,
+        t_burn=t_burn,
+        finishers=[
+            PinnedFinisher(
+                miner_hotkey=f["miner_hotkey"],
+                agent_version_id=f["agent_version_id"],
+                race_score=f["race_score"],
+            )
+            for f in finishers
+        ],
+    )
+
+
+def _salt(finishers, top_hotkey, overlay=None):
+    return WeightSalt(
+        overlay=overlay or {},
+        epoch_standings=_standings(finishers, top_hotkey),
+    )
 
 
 def _empty_history():
     history = MagicMock()
     history.races = []
-    return history
-
-
-def _race_complete_history(race_id: UUID):
-    history = MagicMock()
-    race = MagicMock()
-    race.race_id = race_id
-    race.status = "RACE_COMPLETE"
-    history.races = [race]
-    return history
-
-
-def _race_with_status(race_id: UUID, status: str):
-    race = MagicMock()
-    race.race_id = race_id
-    race.status = status
-    return race
-
-
-def _history_with_races(races: list):
-    history = MagicMock()
-    history.races = races
     return history
 
 
@@ -146,10 +150,11 @@ class TestWeightSetterThread:
     def test_continues_on_backend_error(
         self, mock_backend_client, mock_subtensor, mock_metagraph, mock_wallet
     ):
-        """Transient race fetch error skips the tick but doesn't crash the loop."""
-        mock_backend_client.get_race_history.side_effect = [
-            Exception("Network error"),
-            _empty_history(),
+        """A raise inside the tick is caught and the loop keeps ticking."""
+        mock_backend_client.fetch_weight_salt.side_effect = [
+            BackendError("Network error"),  # no status/sdk_error → transient
+            WeightSalt(overlay={}, epoch_standings=None),
+            WeightSalt(overlay={}, epoch_standings=None),
         ]
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -163,7 +168,7 @@ class TestWeightSetterThread:
         time.sleep(0.25)
         setter.stop()
 
-        assert mock_backend_client.get_race_history.call_count >= 2
+        assert mock_backend_client.fetch_weight_salt.call_count >= 2
 
     def test_race_path_distributes_to_survivors(
         self, mock_backend_client, mock_subtensor, mock_wallet
@@ -171,7 +176,8 @@ class TestWeightSetterThread:
         """6 survivors, all in metagraph: the top slot goes to 5HK0 and the
         other 5 survivors all get a taper entry (5,4,3,2,1) — no bottom cut.
         With every survivor present, no drift correction needed — top_u16
-        lands at 25% of the submitted vector exactly.
+        lands at 25% of the submitted vector exactly. Driven by the authed
+        epoch-pinned standings (ORO-1802: the only source).
         """
         finishers = [
             {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
@@ -181,12 +187,9 @@ class TestWeightSetterThread:
         metagraph = MagicMock()
         metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in finishers]
         metagraph.uids = list(range(len(metagraph.hotkeys)))
+        metagraph.block = 100
 
-        # Admin-designated top is rank-1 of this race (and is in the metagraph).
-        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
-        race_id = uuid4()
-        mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
-        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
+        mock_backend_client.fetch_weight_salt.return_value = _salt(finishers, "5HK0")
 
         setter = WeightSetterThread(
             backend_client=mock_backend_client,
@@ -211,97 +214,6 @@ class TestWeightSetterThread:
         assert weights[5] == 2
         assert weights[6] == 1
 
-    def test_backend_overlay_is_applied_to_submitted_weights(
-        self, mock_backend_client, mock_subtensor, mock_wallet
-    ):
-        """A non-empty Backend overlay reassigns a fraction of the vector to the
-        given uids before submission; an untouched uid still carries base weight.
-        """
-        finishers = [
-            {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
-            for i in range(6)
-        ]
-        metagraph = MagicMock()
-        # 7 base uids (0..6) + an extra uid 7 not in the race.
-        metagraph.hotkeys = ["5BurnUid"] + [e["miner_hotkey"] for e in finishers] + ["5Extra"]
-        metagraph.uids = list(range(len(metagraph.hotkeys)))
-
-        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
-        race_id = uuid4()
-        mock_backend_client.get_race_history.return_value = _race_complete_history(race_id)
-        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
-        # Backend directs 10% to the extra uid 7 (no epoch-pinned standings).
-        mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-            overlay={7: 0.10}, epoch_standings=None
-        )
-
-        setter = WeightSetterThread(
-            backend_client=mock_backend_client,
-            subtensor=mock_subtensor,
-            metagraph=metagraph,
-            wallet=mock_wallet,
-            netuid=1,
-            interval_seconds=0.1,
-        )
-        setter.start()
-        time.sleep(0.15)
-        setter.stop()
-
-        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        total = sum(weights)
-        # Assigned uid 7 lands at ~10% of the final vector.
-        assert weights[7] > 0
-        assert abs(weights[7] / total - 0.10) < 0.02
-        # Base structure preserved: top miner (uid 1) still outranks its tail.
-        assert weights[1] > weights[2] > weights[6]
-
-    def test_race_path_skips_in_progress_and_uses_prior_completed_race(
-        self, mock_backend_client, mock_subtensor, mock_wallet
-    ):
-        """Newest race is in-progress — walk history and use the most recent
-        RACE_COMPLETE so the prior race's finishers stay protected during
-        the current cycle.
-        """
-        finishers = [
-            {"miner_hotkey": f"5HK{i}", "agent_version_id": str(uuid4()), "race_score": 0.9 - i * 0.05}
-            for i in range(6)
-        ]
-
-        metagraph = MagicMock()
-        metagraph.hotkeys = ["5BurnUid"] + [f["miner_hotkey"] for f in finishers]
-        metagraph.uids = list(range(len(metagraph.hotkeys)))
-
-        # Admin-designated top is rank-1 of the completed race.
-        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
-        in_progress_id = uuid4()
-        completed_id = uuid4()
-        mock_backend_client.get_race_history.return_value = _history_with_races(
-            [
-                _race_with_status(in_progress_id, "QUALIFYING_OPEN"),
-                _race_with_status(completed_id, "RACE_COMPLETE"),
-            ]
-        )
-        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
-
-        setter = WeightSetterThread(
-            backend_client=mock_backend_client,
-            subtensor=mock_subtensor,
-            metagraph=metagraph,
-            wallet=mock_wallet,
-            netuid=1,
-            interval_seconds=0.1,
-        )
-        setter.start()
-        time.sleep(0.15)
-        setter.stop()
-
-        assert mock_backend_client.get_race_detail.call_count >= 1
-        for call in mock_backend_client.get_race_detail.call_args_list:
-            assert call.args == (completed_id,) or call.kwargs == {"race_id": completed_id}
-        weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-        top_u16, _ = compute_pinned_weights(0.75, tail_sum=15)
-        assert weights[1] == top_u16
-
     def test_drift_correction_when_protected_finishers_deregistered(
         self, mock_backend_client, mock_subtensor, mock_wallet
     ):
@@ -318,11 +230,9 @@ class TestWeightSetterThread:
         metagraph = MagicMock()
         metagraph.hotkeys = ["5BurnUid", "5HK0"]  # only burn + rank 1
         metagraph.uids = list(range(len(metagraph.hotkeys)))
+        metagraph.block = 100
 
-        # Admin-designated top is rank-1 (5HK0), which is in the metagraph.
-        mock_backend_client.get_top_miner.return_value.top_miner_hotkey = "5HK0"
-        mock_backend_client.get_race_history.return_value = _race_complete_history(uuid4())
-        mock_backend_client.get_race_detail.return_value = _race_detail(finishers)
+        mock_backend_client.fetch_weight_salt.return_value = _salt(finishers, "5HK0")
 
         setter = WeightSetterThread(
             backend_client=mock_backend_client,

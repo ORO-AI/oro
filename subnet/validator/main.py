@@ -222,8 +222,22 @@ class Validator:
         parser.add_argument(
             "--weight-update-interval",
             type=int,
-            default=int(os.environ.get("ORO_WEIGHT_UPDATE_INTERVAL", "300")),
-            help="Seconds between weight updates from leaderboard (env: ORO_WEIGHT_UPDATE_INTERVAL)",
+            default=int(os.environ.get("ORO_WEIGHT_UPDATE_INTERVAL", "1320")),
+            help=(
+                "Seconds between weight-set attempts (env: ORO_WEIGHT_UPDATE_INTERVAL). "
+                "Default 1320 (22 min) sits just above the on-chain 20-min "
+                "WeightsSetRateLimit so every attempt lands."
+            ),
+        )
+        parser.add_argument(
+            "--reveal-period-epochs",
+            type=int,
+            default=int(os.environ.get("ORO_REVEAL_PERIOD_EPOCHS", "1")),
+            help=(
+                "Commit-reveal period in epochs, mirroring the on-chain "
+                "commit_reveal_period (SN15 = 1). Used to derive the epoch index "
+                "for the burn anchor (env: ORO_REVEAL_PERIOD_EPOCHS)."
+            ),
         )
         # Adds override arguments for network and netuid.
         parser.add_argument(
@@ -610,6 +624,7 @@ class Validator:
             wallet=self.wallet,
             netuid=self.config.netuid,
             interval_seconds=self.config.weight_update_interval,
+            reveal_period_epochs=self.config.reveal_period_epochs,
         )
         weight_setter.start()
         logging.info(

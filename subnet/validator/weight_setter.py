@@ -20,7 +20,6 @@ from .backend_client import BackendClient, BackendError, WeightSalt
 from .weight_distribution import (
     RankedFinisher,
     _validate_burn,
-    apply_weight_overlay,
     build_metagraph_weight_vector,
     compute_pinned_weights,
 )
@@ -115,17 +114,17 @@ class WeightSetterThread:
     Runs in a background thread, independent of the evaluation loop.
     """
 
-    # How far back to scan `get_race_history` for the most recent
-    # `RACE_COMPLETE`. The newest race may be `QUALIFYING_OPEN` or
-    # `RACE_RUNNING` for ~24h of every cycle; we still want to protect
-    # last race's finishers during that window. 5 covers typical race
-    # cadence (one in-progress + a handful of completed) without paging.
-    _RACE_HISTORY_SCAN_LIMIT = 5
-
-    # Fallback burn rate when Backend policy is unreachable. Matches the
-    # historical default; ops can flip the live value via Backend env
-    # without a validator release.
+    # Construction-time validation only: `t_burn_fallback` is fed to
+    # `compute_pinned_weights` in __init__ to fail fast on a misconfigured value.
+    # It is NOT a runtime fallback anymore — with the public /top path removed,
+    # an unusable standings payload is a miss (retain/burn), not a fallback.
     _DEFAULT_BURN_RATE = 0.75
+
+    # Default tick cadence. 22 min sits just above the on-chain
+    # WeightsSetRateLimit (100 blocks * 12s = 20 min), so every attempt
+    # actually lands instead of being rejected — ~3 real weight-sets per
+    # 72-min epoch. Ops can override via ORO_WEIGHT_UPDATE_INTERVAL.
+    _DEFAULT_INTERVAL_SECONDS = 1320
 
     def __init__(
         self,
@@ -134,8 +133,9 @@ class WeightSetterThread:
         metagraph,
         wallet,
         netuid: int,
-        interval_seconds: int = 300,
+        interval_seconds: int = _DEFAULT_INTERVAL_SECONDS,
         t_burn_fallback: float = _DEFAULT_BURN_RATE,
+        reveal_period_epochs: int = 1,
     ):
         self.backend_client = backend_client
         self.subtensor = subtensor
@@ -144,6 +144,15 @@ class WeightSetterThread:
         self.netuid = netuid
         self.interval_seconds = interval_seconds
         self.t_burn_fallback = t_burn_fallback
+        self.reveal_period_epochs = reveal_period_epochs
+
+        # Epoch-anchored burn state (ORO-1802). We build weights only from the
+        # authed epoch-pinned standings; there is NO public /top fallback. On a
+        # transient miss we retain last-good (skip submit); only when a FULL
+        # epoch has elapsed with no successful set do we burn to UID 0. Anchored
+        # on the chain epoch index (block // (tempo * reveal_period)) so it is
+        # independent of tick cadence.
+        self._last_success_epoch: Optional[int] = None
 
         # Fail fast on misconfiguration of the fallback value. The live
         # value pulled from Backend is validated each tick by
@@ -176,75 +185,23 @@ class WeightSetterThread:
                     f"Weight setter thread did not stop within {join_timeout}s"
                 )
 
-    def _fetch_race_finishers(self) -> Optional[list[RankedFinisher]]:
-        """Return finishers from the most recent completed race, or None.
+    def _current_epoch(self) -> Optional[int]:
+        """Chain commit-reveal epoch index, or None if the chain is unreadable.
 
-        Walks `get_race_history` newest-first and returns finishers from
-        the first race in `RACE_COMPLETE` status. When the newest race is
-        in progress (`QUALIFYING_OPEN`, `RACE_RUNNING`, etc.) we still
-        want to protect last race's finishers between races — using only
-        `limit=1` would skip the prior completed race and lose the
-        protection for the entire current cycle.
-
-        Returns None only when there is no completed race in the recent
-        history (fresh subnet, recovery from race-system rollback). The
-        caller skips weight submission for this tick rather than falling
-        back to a stale vector.
-        """
-        history = self.backend_client.get_race_history(
-            limit=self._RACE_HISTORY_SCAN_LIMIT
-        )
-        races = history.races if history.races is not UNSET else []
-        for race in races:
-            if str(race.status) == "RACE_COMPLETE":
-                detail = self.backend_client.get_race_detail(race.race_id)
-                qualifiers = (
-                    detail.qualifiers if detail.qualifiers is not UNSET else []
-                )
-                return _qualifiers_to_finishers(qualifiers)
-        return None
-
-    def _fetch_top_state(self) -> tuple[Optional[str], float]:
-        """Return `(top_hotkey, t_burn)` from `GET /v1/public/top`.
-
-        `top_hotkey` is the canonical "current top miner" for emissions.
-        None when no admin-designated top exists (fresh subnet, suite
-        switch, or designated top was discarded) — in those cases the
-        top share folds into the burn slot.
-
-        `t_burn` is the live `emission_baseline_burn_rate` from the
-        Backend policy block. Lets ops flip burn (CDK env var) without
-        a validator release. On any Backend error OR a missing/invalid
-        policy value, falls back to `self.t_burn_fallback`.
+        `epoch = block // (tempo * reveal_period_epochs)` — identical to the
+        Backend's `epoch_index_for_block`, so the validator's burn anchor lines
+        up with the epoch the pinned standings were snapshotted for. Reads tempo
+        from chain each call (not cached) so a tempo change on-chain can't drift
+        the anchor away from the Backend's.
         """
         try:
-            top = self.backend_client.get_top_miner()
-        except BackendError as e:
-            logging.warning(
-                f"Top fetch failed, using fallback burn rate: {e}"
-            )
-            return None, self.t_burn_fallback
-
-        hk = top.top_miner_hotkey
-        top_hotkey = (
-            str(hk) if hk is not None and hk is not UNSET else None
-        )
-
-        t_burn = self.t_burn_fallback
-        policy = top.policy
-        if policy is not None and policy is not UNSET:
-            try:
-                value = policy["emission_baseline_burn_rate"]
-                t_burn = float(value)
-                _validate_burn(t_burn)
-            except (KeyError, TypeError, ValueError) as e:
-                logging.warning(
-                    f"Invalid emission_baseline_burn_rate in policy, "
-                    f"using fallback {self.t_burn_fallback}: {e}"
-                )
-                t_burn = self.t_burn_fallback
-
-        return top_hotkey, t_burn
+            block = int(self.metagraph.block)
+            tempo = int(self.subtensor.tempo(self.netuid))
+            period = max(tempo, 1) * max(self.reveal_period_epochs, 1)
+            return block // period
+        except Exception as e:  # noqa: BLE001 — unreadable chain → no anchor
+            logging.warning(f"Could not derive current epoch: {e}")
+            return None
 
     def _build_weights_from_race(
         self,
@@ -283,114 +240,142 @@ class WeightSetterThread:
             top_hotkey=top_hotkey,
         )
 
-    def _build_base_vector(
-        self,
-        standings,
-        live_finishers: list[RankedFinisher],
-        live_top: Optional[str],
-        live_t_burn: float,
-    ) -> tuple[list[int], list[int]]:
-        """Build the base weight vector, preferring the epoch-pinned standings.
+    def _build_from_standings(
+        self, standings
+    ) -> Optional[tuple[list[int], list[int]]]:
+        """Build the weight vector from the authed epoch-pinned standings only.
 
-        When the Backend serves epoch-pinned standings (its
-        ``epoch_pinned_standings_enabled`` flag is on), every validator in the
-        epoch builds from the SAME snapshot and so agrees regardless of tick
-        phase — the ORO-1704 fix. Falls back to this validator's own live
-        standings when the Backend serves none, serves an empty snapshot, or the
-        payload is unusable (ORO-1704 D1) — the pin must never wedge weights or
-        burn an epoch. Empty pinned finishers degrade to live specifically
-        because reaching here means the live path DID find finishers (guarded in
-        ``_tick``), so an empty snapshot is snapshot lag / an epoch transition,
-        not a genuinely empty race.
+        Returns the `(uids, weights)` vector when the standings carry a usable
+        (non-empty) finisher set — every validator in the epoch builds from the
+        SAME snapshot and so agrees regardless of tick phase (the ORO-1704 fix).
+
+        Returns ``None`` (a "miss") when there are no standings, an empty
+        snapshot (epoch-transition lag), or an unusable payload. There is NO
+        public /top fallback (ORO-1802): the caller retains last-good weights on
+        a transient miss and burns to UID 0 only after a full epoch of misses.
         """
-        if standings is not None:
-            try:
-                p_fin, p_top, p_burn = _standings_to_inputs(standings)
-                if p_fin:
-                    logging.info(
-                        f"Weight vector from epoch-pinned standings: "
-                        f"N={len(p_fin)} finishers, "
-                        f"top={p_top or '(none — top share burns)'}, "
-                        f"t_burn={p_burn:.3f}"
-                    )
-                    return self._build_weights_from_race(p_fin, p_top, p_burn)
-                logging.warning(
-                    "epoch-pinned standings empty; using live standings"
-                )
-            except Exception as e:  # noqa: BLE001 — never wedge weights; fall back to live
-                logging.warning(
-                    f"epoch-pinned standings unusable; using live standings: {e}"
-                )
-
+        if standings is None:
+            return None
+        try:
+            p_fin, p_top, p_burn = _standings_to_inputs(standings)
+        except Exception as e:  # noqa: BLE001 — unusable payload → miss
+            logging.warning(f"epoch-pinned standings unusable: {e}")
+            return None
+        if not p_fin:
+            logging.warning("epoch-pinned standings empty (snapshot lag?)")
+            return None
         logging.info(
-            f"Weight vector from live standings: N={len(live_finishers)} "
-            f"finishers, top={live_top or '(none — top share burns)'}, "
-            f"t_burn={live_t_burn:.3f}"
+            f"Weight vector from epoch-pinned standings: N={len(p_fin)} "
+            f"finishers, top={p_top or '(none — top share burns)'}, "
+            f"t_burn={p_burn:.3f}"
         )
-        return self._build_weights_from_race(
-            live_finishers, live_top, live_t_burn
-        )
+        return self._build_weights_from_race(p_fin, p_top, p_burn)
 
-    def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
-        """Push `uids` / `weights` to the chain. No retries — the loop's
-        next tick will retry on transient blockchain failures."""
-        self.subtensor.set_weights(
+    def _burn_vector(self) -> tuple[list[int], list[int]]:
+        """Full burn-to-UID-0 vector (no finishers, no top, t_burn=1.0)."""
+        return self._build_weights_from_race([], None, 1.0)
+
+    def _submit_weights(self, uids: list[int], weights: list[int]) -> bool:
+        """Push `uids` / `weights` to the chain and return whether it was accepted.
+
+        No retries — the loop's next tick retries on transient failures. A
+        rate-limited / rejected set returns False so the caller does NOT advance
+        the burn anchor on a set that never landed.
+        """
+        result = self.subtensor.set_weights(
             netuid=self.netuid,
             wallet=self.wallet,
             uids=uids,
             weights=weights,
             wait_for_inclusion=True,
         )
+        # Read the actual success signal. bittensor 10.x returns an
+        # `ExtrinsicResponse` (has `.success`; its `__len__` is a constant 2 so a
+        # bare `bool(result)` is ALWAYS True — the bug this guards against). Older
+        # paths return a (success, message) tuple or a bare bool.
+        if isinstance(result, tuple):
+            return bool(result[0])
+        if hasattr(result, "success"):
+            return bool(result.success)
+        return bool(result)
 
     def _tick(self) -> None:
-        """One iteration of the loop — race-based weight submission."""
+        """One iteration of the loop — epoch-pinned weight submission.
+
+        Weights come ONLY from the authed epoch-pinned standings (ORO-1802);
+        there is no public /top fallback. On a transient miss we retain the
+        last-good on-chain weights (skip submit); only when a full epoch has
+        elapsed with no successful set do we burn to UID 0.
+        """
         self.metagraph.sync()
-
-        finishers: Optional[list[RankedFinisher]] = None
-        try:
-            finishers = self._fetch_race_finishers()
-        except BackendError as e:
-            # Don't crash the loop — skip this tick; the next one retries.
-            if e.is_transient:
-                logging.warning(f"Race fetch transient error, skipping tick: {e}")
-            else:
-                logging.error(f"Race fetch error, skipping tick: {e}")
-            return
-
-        if not finishers:
-            logging.warning(
-                "No completed race available — skipping weight submission for this tick"
-            )
-            return
-
-        top_hotkey, t_burn = self._fetch_top_state()
 
         # One participation-gated fetch → overlay + epoch-pinned standings for
         # THIS epoch (ORO-1704), so they can't straddle an epoch boundary.
+        # fetch_weight_salt never raises: on any error it returns an empty
+        # overlay + None standings (i.e. a miss).
         salt: WeightSalt = self.backend_client.fetch_weight_salt()
+        built = self._build_from_standings(salt.epoch_standings)
 
-        # Prefer the epoch-pinned base vector (all validators in the epoch agree);
-        # fall back to this validator's live standings when none are served.
-        uids, weights = self._build_base_vector(
-            salt.epoch_standings, finishers, top_hotkey, t_burn
-        )
+        if built is None:
+            self._handle_miss()
+            return
 
-        # Apply any Backend-provided supplementary weight assignments to the base
-        # we submit. An empty overlay leaves the base unchanged — the safe default
-        # every validator in the same state also produces.
-        overlay = salt.overlay
-        if overlay:
-            weights = apply_weight_overlay(weights, overlay)
-            logging.info(
-                f"Applied {len(overlay)} supplementary weight assignment(s)"
-            )
+        uids, weights = built
 
         if not weights:
             logging.warning("Skipping weight update (empty metagraph)")
             return
 
-        self._submit_weights(uids, weights)
+        if not self._submit_weights(uids, weights):
+            logging.warning("Weight set not accepted this tick (rate-limited?)")
+            return
+        # Record the epoch of this ACCEPTED set; the burn anchor measures
+        # elapsed epochs from here.
+        epoch = self._current_epoch()
+        if epoch is not None:
+            self._last_success_epoch = epoch
         logging.info("Successfully set weights")
+
+    def _handle_miss(self) -> None:
+        """No usable authed standings this tick. Retain last-good, or burn.
+
+        Retain (skip submit → on-chain weights persist) until a FULL epoch has
+        elapsed with no accepted set. Because a set can land late in epoch N,
+        burning requires `epoch >= last_success + 2` — i.e. the whole of epoch
+        N+1 passed with no success. Merely ticking into N+1 is a partial epoch
+        (a transient miss), so it retains. The first ever miss (no prior success)
+        establishes the epoch baseline and retains, giving a fresh subnet grace.
+        """
+        epoch = self._current_epoch()
+        if epoch is None:
+            logging.warning(
+                "No usable standings and chain epoch unknown; retaining last-good"
+            )
+            return
+        if self._last_success_epoch is None:
+            self._last_success_epoch = epoch
+            logging.warning(
+                "No usable standings; establishing epoch baseline, retaining last-good"
+            )
+            return
+        if epoch < self._last_success_epoch + 2:
+            logging.warning(
+                "No usable standings this tick; retaining last-good "
+                f"(epoch {epoch}, last success {self._last_success_epoch})"
+            )
+            return
+
+        # A full epoch has elapsed with no accepted set → burn to UID 0.
+        uids, weights = self._burn_vector()
+        if not weights:
+            logging.warning("Skipping burn (empty metagraph)")
+            return
+        logging.error(
+            f"No usable standings for a full epoch "
+            f"(last success epoch {self._last_success_epoch}, now {epoch}); "
+            "burning to UID 0"
+        )
+        self._submit_weights(uids, weights)
 
     def _run(self) -> None:
         """Background thread main loop."""
