@@ -20,7 +20,7 @@ from validator.weight_setter import (
     _standings_to_inputs,
 )
 
-from .test_weight_setter import _race_complete_history, _race_detail
+from .test_weight_setter import _race_detail
 
 
 def _finishers(n=5):
@@ -60,6 +60,9 @@ def _metagraph(finishers):
     mg = MagicMock()
     mg.hotkeys = ["5BurnUid"] + [f["miner_hotkey"] for f in finishers] + ["5Extra"]
     mg.uids = list(range(len(mg.hotkeys)))
+    # Real int block so `_current_epoch()` computes: block 100 / (tempo 100 *
+    # reveal 1) = epoch 1.
+    mg.block = 100
     return mg
 
 
@@ -113,21 +116,13 @@ def _run_tick_once(setter):
     setter.stop()
 
 
-def _wire_live(mock_backend_client, fins, live_top="5HK0"):
-    mock_backend_client.get_top_miner.return_value.top_miner_hotkey = live_top
-    mock_backend_client.get_top_miner.return_value.policy = None  # -> fallback t_burn
-    mock_backend_client.get_race_history.return_value = _race_complete_history(uuid4())
-    mock_backend_client.get_race_detail.return_value = _race_detail(fins)
-
-
 def test_uses_pinned_standings_when_served(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
-    """Standings present ⇒ submit the pinned vector. Pinned top differs from the
-    live top, so the top slot lands on the pinned hotkey."""
+    """Standings present ⇒ submit the pinned vector; top slot lands on the pinned
+    hotkey (ORO-1802: the authed epoch-pinned standings are the ONLY source)."""
     fins = _finishers(6)
     mg = _metagraph(fins)
-    _wire_live(mock_backend_client, fins, live_top="5HK0")
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
         overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK1")
     )
@@ -135,33 +130,29 @@ def test_uses_pinned_standings_when_served(
     _run_tick_once(setter)
 
     weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-    assert weights[2] > weights[1]  # pinned top 5HK1 (uid 2), not live 5HK0 (uid 1)
+    assert weights[2] > weights[1]  # pinned top 5HK1 (uid 2)
 
 
-def test_falls_back_to_live_when_no_standings(
+def test_no_standings_retains_last_good(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
-    fins = _finishers(6)
-    mg = _metagraph(fins)
-    _wire_live(mock_backend_client, fins, live_top="5HK0")
+    """No standings (first miss) ⇒ retain last-good: do NOT submit, do NOT read
+    any public fallback. There is no live /top path anymore (ORO-1802)."""
+    mg = _metagraph(_finishers(6))
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
         overlay={}, epoch_standings=None
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
 
-    weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-    assert weights[1] > weights[2]  # live top 5HK0 (uid 1)
+    mock_subtensor.set_weights.assert_not_called()
+    mock_backend_client.get_top_miner.assert_not_called()
 
 
-def test_falls_back_to_live_on_empty_pinned_finishers(
-    mock_backend_client, mock_subtensor, mock_wallet
-):
-    """An empty pinned snapshot (flag just enabled / snapshot lag) must NOT build
-    an all-burn vector — it falls back to live, which keeps the survivor tail."""
-    fins = _finishers(6)
-    mg = _metagraph(fins)
-    _wire_live(mock_backend_client, fins, live_top="5HK0")
+def test_empty_standings_retains(mock_backend_client, mock_subtensor, mock_wallet):
+    """An empty pinned snapshot (snapshot lag / epoch transition) is a transient
+    miss ⇒ retain last-good, no submit."""
+    mg = _metagraph(_finishers(6))
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
         overlay={},
         epoch_standings=EpochStandings(top_hotkey="5HK1", t_burn=0.75, finishers=[]),
@@ -169,25 +160,38 @@ def test_falls_back_to_live_on_empty_pinned_finishers(
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
 
-    weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-    # Live vector: survivor tail present (uid 6 > 0), live top 5HK0 (uid 1).
-    assert weights[6] > 0
-    assert weights[1] > weights[2]
+    mock_subtensor.set_weights.assert_not_called()
 
 
-def test_falls_back_to_live_on_malformed_standings(
-    mock_backend_client, mock_subtensor, mock_wallet
-):
-    """A payload that fails validation (out-of-range t_burn) must fall back to
-    live rather than wedge the tick."""
+def test_malformed_standings_retains(mock_backend_client, mock_subtensor, mock_wallet):
+    """A payload that fails validation (out-of-range t_burn) is an unusable miss
+    ⇒ retain last-good, no submit."""
     fins = _finishers(6)
     mg = _metagraph(fins)
-    _wire_live(mock_backend_client, fins, live_top="5HK0")
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
         overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK1", t_burn=1.5)
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
 
+    mock_subtensor.set_weights.assert_not_called()
+
+
+def test_sustained_miss_burns_to_uid0(
+    mock_backend_client, mock_subtensor, mock_wallet
+):
+    """A full epoch elapsed with no successful set ⇒ burn to UID 0. Prior success
+    was in epoch 0; the metagraph block puts us in epoch 1 with no standings."""
+    mg = _metagraph(_finishers(6))
+    mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+        overlay={}, epoch_standings=None
+    )
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
+    setter._last_success_epoch = 0  # last good set was a full epoch ago
+
+    _run_tick_once(setter)
+
     weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-    assert weights[1] > weights[2]  # fell back to live top 5HK0 (uid 1)
+    # Burn vector: all weight on the burn slot (uid 0), nothing elsewhere.
+    assert weights[0] == max(weights)
+    assert sum(weights[1:]) == 0
