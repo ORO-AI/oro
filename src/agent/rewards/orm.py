@@ -245,6 +245,11 @@ _CROSS_KEY_ALIAS_PAIRS = [
     # Category-specific key spelling drift observed in miner-audit cases.
     # Values overlap only in-category; distinctiveness stays intact.
     ("curtain_type", "type_curtain"),
+    # ORO-1797 miner-audit batch, catalog value-overlap vetted: shared values
+    # are garment sizes (l/xl/one size) and concrete cutter-type nouns —
+    # same-slot semantics, unlike the rejected brand↔model junk pattern.
+    ("glove size", "size wear"),
+    ("stationery_cutter_type", "tool_type_of_accessories"),
 ]
 _CROSS_KEY_ALIASES = frozenset(
     frozenset((normalize_attr_key(a), normalize_attr_key(b)))
