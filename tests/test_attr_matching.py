@@ -126,6 +126,12 @@ def test_cross_key_alias_positive():
     assert _hit("model", "samsung galaxy a04e", [("compatibility_by_model", "samsung galaxy a04e")])
     assert _hit("plate_size", "30x40cm", [("size", "30x40cm")])
     assert _hit("concern_oral_care", "tooth decay", [("oral care benefits", "tooth decay")])
+    # ORO-1797 miner-audit batch
+    assert _hit("glove size", "xl", [("size wear", "xl")])
+    assert _hit("stationery_cutter_type", "scissors", [("tool_type_of_accessories", "scissors")])
+    # exact-value only — different values under aliased keys must not match
+    assert not _hit("glove size", "xl", [("size wear", "xxl")])
+    assert not _hit("stationery_cutter_type", "scissors", [("tool_type_of_accessories", "screwdriver")])
 
 
 def test_cross_key_alias_requires_exact_value():
