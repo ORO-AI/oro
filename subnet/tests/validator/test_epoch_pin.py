@@ -181,8 +181,10 @@ def test_sustained_miss_burns_to_uid0(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
     """A full epoch elapsed with no successful set ⇒ burn to UID 0. Prior success
-    was in epoch 0; the metagraph block puts us in epoch 1 with no standings."""
+    was in epoch 0; block 200 / (tempo 100 * reveal 1) = epoch 2, so a whole
+    epoch (1) fully elapsed with no set (guard: epoch >= last_success + 2)."""
     mg = _metagraph(_finishers(6))
+    mg.block = 200  # epoch 2 with the conftest tempo of 100
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
         overlay={}, epoch_standings=None
     )
@@ -195,3 +197,22 @@ def test_sustained_miss_burns_to_uid0(
     # Burn vector: all weight on the burn slot (uid 0), nothing elsewhere.
     assert weights[0] == max(weights)
     assert sum(weights[1:]) == 0
+
+
+def test_partial_epoch_miss_retains_not_burn(
+    mock_backend_client, mock_subtensor, mock_wallet
+):
+    """Off-by-one guard: a miss only one epoch after the last set (a set landed
+    late in epoch 0, now epoch 1) is a partial-epoch transient miss ⇒ retain,
+    NOT burn. Burning here would zero emissions minutes after a good set."""
+    mg = _metagraph(_finishers(6))
+    mg.block = 100  # epoch 1 with the conftest tempo of 100
+    mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+        overlay={}, epoch_standings=None
+    )
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
+    setter._last_success_epoch = 0  # set landed in epoch 0
+
+    _run_tick_once(setter)
+
+    mock_subtensor.set_weights.assert_not_called()

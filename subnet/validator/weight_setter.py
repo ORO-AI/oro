@@ -275,16 +275,25 @@ class WeightSetterThread:
         """Full burn-to-UID-0 vector (no finishers, no top, t_burn=1.0)."""
         return self._build_weights_from_race([], None, 1.0)
 
-    def _submit_weights(self, uids: list[int], weights: list[int]) -> None:
-        """Push `uids` / `weights` to the chain. No retries — the loop's
-        next tick will retry on transient blockchain failures."""
-        self.subtensor.set_weights(
+    def _submit_weights(self, uids: list[int], weights: list[int]) -> bool:
+        """Push `uids` / `weights` to the chain and return whether it was accepted.
+
+        No retries — the loop's next tick retries on transient failures. A
+        rate-limited / rejected set returns False so the caller does NOT advance
+        the burn anchor on a set that never landed.
+        """
+        result = self.subtensor.set_weights(
             netuid=self.netuid,
             wallet=self.wallet,
             uids=uids,
             weights=weights,
             wait_for_inclusion=True,
         )
+        # bittensor returns (success, message); tolerate a bare bool / None from
+        # older shims. Only an explicit truthy success counts as accepted.
+        if isinstance(result, tuple):
+            return bool(result[0])
+        return bool(result)
 
     def _tick(self) -> None:
         """One iteration of the loop — epoch-pinned weight submission.
@@ -313,8 +322,10 @@ class WeightSetterThread:
             logging.warning("Skipping weight update (empty metagraph)")
             return
 
-        self._submit_weights(uids, weights)
-        # Record the epoch of this successful set; the burn anchor measures
+        if not self._submit_weights(uids, weights):
+            logging.warning("Weight set not accepted this tick (rate-limited?)")
+            return
+        # Record the epoch of this ACCEPTED set; the burn anchor measures
         # elapsed epochs from here.
         epoch = self._current_epoch()
         if epoch is not None:
@@ -324,12 +335,12 @@ class WeightSetterThread:
     def _handle_miss(self) -> None:
         """No usable authed standings this tick. Retain last-good, or burn.
 
-        Retain (skip submit → on-chain weights persist) while we are still
-        within the same epoch as the last successful set — a transient miss /
-        snapshot lag must never burn a routine epoch boundary. Burn to UID 0
-        only once a FULL epoch has elapsed with no successful set. The first
-        ever miss (no prior success) establishes the epoch baseline and retains,
-        giving one epoch of grace on a fresh subnet.
+        Retain (skip submit → on-chain weights persist) until a FULL epoch has
+        elapsed with no accepted set. Because a set can land late in epoch N,
+        burning requires `epoch >= last_success + 2` — i.e. the whole of epoch
+        N+1 passed with no success. Merely ticking into N+1 is a partial epoch
+        (a transient miss), so it retains. The first ever miss (no prior success)
+        establishes the epoch baseline and retains, giving a fresh subnet grace.
         """
         epoch = self._current_epoch()
         if epoch is None:
@@ -343,14 +354,14 @@ class WeightSetterThread:
                 "No usable standings; establishing epoch baseline, retaining last-good"
             )
             return
-        if epoch <= self._last_success_epoch:
+        if epoch < self._last_success_epoch + 2:
             logging.warning(
                 "No usable standings this tick; retaining last-good "
-                f"(still epoch {epoch})"
+                f"(epoch {epoch}, last success {self._last_success_epoch})"
             )
             return
 
-        # A full epoch has elapsed with no successful set → burn to UID 0.
+        # A full epoch has elapsed with no accepted set → burn to UID 0.
         uids, weights = self._burn_vector()
         if not weights:
             logging.warning("Skipping burn (empty metagraph)")
