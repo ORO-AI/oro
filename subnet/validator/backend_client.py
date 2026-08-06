@@ -197,9 +197,10 @@ class WeightSalt:
 
     ``overlay`` — validated supplementary uid→share assignments (empty on any
     error). ``epoch_standings`` — the epoch-pinned base standings (ORO-1704), or
-    None when the pin is disabled/absent, in which case the caller builds its
-    base vector from live standings. Both come from the SAME response so they
-    can't straddle an epoch boundary.
+    None when the pin is disabled/absent, which the caller treats as a miss
+    (retains its last-good on-chain weights; burns to UID 0 only after a full
+    epoch of misses — there is NO live/public-top fallback). Both come from the
+    SAME response so they can't straddle an epoch boundary.
     """
 
     overlay: dict[int, float]
@@ -594,15 +595,17 @@ class BackendClient:
 
         Participation-gated (signed client). One request so both fields come
         from the same epoch. On ANY fetch/parse error → empty overlay + None
-        standings, so the caller submits its live base vector (ORO-1704 D1) — a
-        malformed payload must never raise past here or it would break Yuma
-        consensus.
+        standings, i.e. a miss: the caller retains its last-good on-chain weights
+        (and burns to UID 0 only after a full epoch of misses) — there is NO live
+        / public-top fallback. A malformed payload must never raise past here or
+        it would break Yuma consensus.
 
         The overlay is the trust boundary: every share must be finite and in
         [0, 1] and the total <= MAX_OVERLAY_SHARE, else the *whole* overlay is
-        rejected (keeps every honest validator on the same fallback). The pinned
-        standings feed ``build_metagraph_weight_vector``, which already tolerates
-        arbitrary finisher input; an unusable value degrades to None (live).
+        rejected (keeps every honest validator on the same miss handling). The
+        pinned standings feed ``build_metagraph_weight_vector``, which already
+        tolerates arbitrary finisher input; an unusable value degrades to None
+        (a miss).
         """
         try:
             resp = self._call_api(
@@ -611,7 +614,7 @@ class BackendClient:
                 client=self._auth_client,
             )
         except (BackendError, ValueError, TypeError, AttributeError) as e:
-            logging.warning(f"Weight salt unavailable, using base vector: {e}")
+            logging.warning(f"Weight salt unavailable (miss; retaining last-good weights): {e}")
             return WeightSalt(overlay={}, epoch_standings=None)
 
         overlay = self._parse_overlay(resp)
