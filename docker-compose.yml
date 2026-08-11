@@ -182,6 +182,14 @@ services:
     dns:
       - 8.8.8.8
       - 1.1.1.1
+    # Restore Docker Desktop's host.docker.internal magic hostname (the `dns:`
+    # override above strips it). Local dev can point BACKEND_URL at a Backend
+    # running on the host machine. No-op on production hosts: nothing in the
+    # validator dereferences this hostname unless BACKEND_URL uses it, and
+    # host-gateway resolves to the local docker bridge (~172.17.0.1 on
+    # Linux) which has no listener on prod, so a lookup would just fail.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     labels:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     networks:
