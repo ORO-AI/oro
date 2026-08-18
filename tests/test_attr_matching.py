@@ -5,10 +5,14 @@ cross-key aliases, and the invariants that keep it exact-after-normalize
 (distinct enums never collide, non-allowlisted keys never cross-match).
 """
 
+import pytest
+
 from src.agent.rewards.orm import (
     _attr_constraint_hit,
     _build_attr_index,
     _is_token_subsequence,
+    _stem_form,
+    _stem_token,
     normalize_attr_key,
     normalize_attr_value,
 )
@@ -260,3 +264,138 @@ def test_compat_cross_key_alias_symmetric_with_prefix():
     # curated sibling `compatibility_by_model` with the prefix on either side.
     assert _hit("compatibility", "for vivo y02a", [("compatibility_by_model", "vivo y02a")])
     assert _hit("compatibility", "vivo y02a", [("compatibility_by_model", "for vivo y02a")])
+
+
+# ── ORO-1924 morphological stem ─────────────────────────────────
+def test_stem_token_strips_common_suffixes():
+    assert _stem_token("mixed") == "mix"
+    assert _stem_token("powders") == "powder"
+    assert _stem_token("printing") == "print"
+    assert _stem_token("adults") == "adult"
+    # Regex is greedy on the `[a-z]{3,}` base, so `boxes` / `dishes` /
+    # `boxes` lose only the trailing `s` (→ `boxe`, `dishe`). That leaves
+    # some `-es` plurals unmerged, but the backtest confirmed the
+    # backwards-compat behavior of the plural-`s` strip is enough to catch
+    # 74 clean flips on 10 races with 0 false accepts. Broadening to a
+    # proper Porter-style `es` rule is deferred until real data shows the
+    # gap. Pinning current behavior here so a future change is deliberate.
+    assert _stem_token("boxes") == "boxe"
+    assert _stem_token("dishes") == "dishe"
+
+
+def test_stem_token_min_base_length():
+    # base < 3 chars: don't strip — avoids `used → us`, `ing → i`.
+    assert _stem_token("used") == "used"
+    assert _stem_token("ing") == "ing"
+    assert _stem_token("ed") == "ed"
+
+
+def test_stem_token_double_consonant_s_kept():
+    # `pass → pas` is exactly the collision we're guarding against.
+    assert _stem_token("pass") == "pass"
+    assert _stem_token("class") == "class"
+    assert _stem_token("dress") == "dress"
+
+
+def test_stem_token_no_suffix_unchanged():
+    for w in ("black", "cotton", "wall", "brand", "mix", "no"):
+        assert _stem_token(w) == w
+
+
+def test_stem_form_empty_when_no_ascii_tokens():
+    # Empty-stem bucket would collect `.`, `-`, non-ASCII values under one
+    # bogus canonical. `_stem_form` must return "" so `_attr_constraint_hit`
+    # skips the stem branch instead of forcing a false collision.
+    assert _stem_form("") == ""
+    assert _stem_form(".") == ""
+    assert _stem_form("...") == ""
+    assert _stem_form("黑色") == ""
+
+
+def test_stem_form_joins_and_stems_tokens():
+    assert _stem_form("mix brands") == "mix brand"
+    assert _stem_form("mixed brands") == "mix brand"
+    assert _stem_form("no stones") == "no stone"
+    assert _stem_form("32 ohms") == "32 ohm"
+
+
+# Miner-reported ORO-1924 case + representative flips from the 10-race
+# backtest (75 flips: 74 clean, 1 borderline, 0 false accepts). Each pair
+# was previously a false FAIL; after the stem fix each must PASS in both
+# directions (reward=singular vs plural is symmetric in the wild).
+_STEM_FLIP_PAIRS = [
+    # (attribute_key, side_a, side_b, comment)
+    ("brand", "mixed brands", "mix brands", "ORO-1924 target case"),
+    ("mainstone", "no stones", "no stone", "top flip pattern, ×11 in backtest"),
+    ("formulationsupplement", "powder", "powders", "×7"),
+    ("typeofhangers/hook", "wall mounted", "wall mount", "×3"),
+    ("impedance", "32 ohms", "32 ohm", "×3, numeric-unit intact through stem"),
+    ("ingredient", "bcaas", "bcaa", "×3, uppercase acronym pluralized"),
+    ("stationerypentype", "ballpoint pens", "ballpoint pen", "×2"),
+    ("topstype", "t-shirt", "t-shirts", "×1, plural drift"),
+    ("swimweartype", "bikini sets", "bikini set", "×1"),
+    ("packagingtype", "sachet", "sachets", "×1"),
+    ("skirtstyle", "ruffle skirts", "ruffle skirt", "×2"),
+    ("fageneralstyle", "basics", "basic", "×2"),
+    ("lifestage", "adult", "adults", "×1"),
+    ("fmltskincare", "cream", "creams", "×1"),
+]
+
+
+@pytest.mark.parametrize("key,side_a,side_b,comment", _STEM_FLIP_PAIRS)
+def test_stem_flip_pairs_match_both_directions(key, side_a, side_b, comment):
+    assert _hit(key, side_a, [(key, side_b)]), (
+        f"{comment}: reward={side_a!r} did not match product={side_b!r}"
+    )
+    assert _hit(key, side_b, [(key, side_a)]), (
+        f"{comment}: reward={side_b!r} did not match product={side_a!r}"
+    )
+
+
+def test_stem_does_not_bucket_empty_string_values():
+    # The one failure mode found in the backtest: values that normalize to
+    # zero tokens (`.`, `-`, `..`, `...`, `@`) would all share stem `""` and
+    # be treated as equivalent. Empty-stem guard blocks that.
+    assert not _hit("colorfamily", ".", [("colorfamily", "-")])
+    assert not _hit("colorfamily", "...", [("colorfamily", "@")])
+    assert not _hit("color", "黑色", [("color", "红色")])
+
+
+def test_stem_does_not_collide_across_short_tokens():
+    # Distinct enum values that share a suffix but have <3-char bases must
+    # not stem into each other. `red` vs `reds` fine (both stem to `red`),
+    # but `red` vs `use` — no overlap.
+    assert not _hit("color", "red", [("color", "blue")])
+    assert not _hit("color", "use", [("color", "red")])
+    assert not _hit("gender", "men", [("gender", "women")])
+
+
+def test_stem_does_not_over_match_distinct_semantics():
+    # Distinct SKU dimensions must stay distinct through stem — the number+
+    # unit fuse and 3-char-base guard together prevent cross-value creep.
+    assert not _hit("size", "42w", [("size", "42")])
+    assert not _hit("capacity", "3000mah", [("capacity", "3000")])
+    assert not _hit("color", "black", [("color", "white")])
+
+
+def test_stem_symmetric_with_token_subseq():
+    # Stem branch composes with token-subsequence: a plural reward can hit
+    # a longer-tokened product whose stemmed form contains the reward's
+    # stemmed tokens as a subsequence.
+    assert _hit(
+        "stationerypenciltype",
+        "graphite pencil",
+        [("stationerypenciltype", "graphite & lead pencils")],
+    )
+    assert _hit(
+        "packagingtype",
+        "bottle",
+        [("packagingtype", "plastic bottles")],
+    )
+
+
+def test_stem_does_not_regress_existing_exact_matches():
+    # Simple positive: after the fix the exact-match path is still fastest
+    # and stem branch never fires when it isn't needed.
+    assert _hit("brand", "nike", [("brand", "nike")])
+    assert _hit("color", "black", [("color", "black")])
