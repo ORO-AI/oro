@@ -2,9 +2,8 @@
 #   .github/workflows/system-map.yml
 # (Frontend, Backend, oro, oro-sdk, DB, Infrastructure)
 # Thin wrapper: on any PR to main, hand off to the shared dispatcher.
-#
-# NOTE: the `uses:` ref below is pinned to a commit SHA of ORO-AI/.github
-# for supply-chain safety. Bump it when the dispatcher changes.
+# Tracks ORO-AI/.github@main (a first-party, branch-protected repo), so
+# dispatcher updates apply with no per-caller bump.
 
 name: system-map
 
@@ -22,6 +21,6 @@ jobs:
   sync:
     # Skip fork PRs — secrets aren't available to them, so the PAT would be empty.
     if: github.event.pull_request.head.repo.fork == false
-    uses: ORO-AI/.github/.github/workflows/sync-system-map.yml@3bf228bc48733185867f30db9a5c53c86d98bea4
+    uses: ORO-AI/.github/.github/workflows/sync-system-map.yml@main
     secrets:
       MAP_SYNC_PAT: ${{ secrets.MAP_SYNC_PAT }}
