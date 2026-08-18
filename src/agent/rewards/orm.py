@@ -162,6 +162,43 @@ def _value_tokens(value) -> list:
     return _WORD_RE.findall(normalize_attr_value(value))
 
 
+# Per-token morphological stem — strips a single English suffix (`s`, `es`,
+# `ed`, `ing`) from tokens whose base is ≥3 chars, guarding against `pass →
+# pas`-style double-consonant false stems. Backtested on 10 races / 2,662
+# submissions / 7,196 constraints: +75 FAIL→PASS, 0 regressions, 0 false
+# accepts (ORO-1924). Deliberately narrow: no `-er/-est/-ly/-tion` cascade —
+# each of those has known catalog-value collisions.
+_STEM_SUFFIX_RE = re.compile(r"^([a-z]{3,})(ed|ing|es|s)$")
+
+
+def _stem_token(t: str) -> str:
+    m = _STEM_SUFFIX_RE.match(t)
+    if not m:
+        return t
+    stem, suf = m.groups()
+    # Avoid stripping the second `s` of a double-consonant plural
+    # (`pass → pas`, `dress → dres`, `class → clas`).
+    if suf == "s" and stem.endswith("s"):
+        return t
+    return stem
+
+
+def _stem_tokens(tokens: list) -> list:
+    return [_stem_token(t) for t in tokens]
+
+
+def _stem_form(nv: str) -> str:
+    """Return the space-joined stemmed form of a NORMALIZED value. Callers
+    must gate on the result being non-empty and different from `nv` — the
+    empty-stem bucket would otherwise collect punctuation-only / non-ASCII
+    values (`.`, `-`, `黑色`) under one bogus canonical, which the backtest
+    surfaced as the sole failure mode."""
+    toks = _WORD_RE.findall(nv)
+    if not toks:
+        return ""
+    return " ".join(_stem_token(t) for t in toks)
+
+
 def _is_size_key(nk: str) -> bool:
     """Only the canonical clothing/apparel size slot. Keys like `ring_size`,
     `screen_size`, `package_size` intentionally excluded — letter codes there
@@ -215,6 +252,18 @@ def _build_attr_index(kv_pairs):
             stripped_toks = _strip_compat_prefix_tokens(toks)
             if stripped_toks != toks:
                 key_tokens[nk].append(stripped_toks)
+        # ORO-1924: also index under morphological stem so a reward using
+        # a different plural/participle form (`"mixed brands"` vs product
+        # `"mix brands"`) resolves via the same-key paths in
+        # `_attr_constraint_hit`. Empty / unchanged stems are skipped — the
+        # empty-stem bucket would otherwise collect any punctuation-only or
+        # non-ASCII value under a single shared canonical.
+        sv = _stem_form(nv)
+        if sv and sv != nv:
+            val_keys.setdefault(sv, set()).add(nk)
+        stem_toks = _stem_tokens(toks)
+        if stem_toks and stem_toks != toks:
+            key_tokens[nk].append(stem_toks)
     return val_keys, key_tokens
 
 
@@ -270,6 +319,12 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
        so dimensional / unit content (`l x w h`, `5 l`, `s hook`) never expands.
     3. Cross-key alias: the same value (exact, after normalization) sits under a
        curated sibling key that is semantically the same slot (`_CROSS_KEY_ALIASES`).
+    4. Same-key morphological stem (ORO-1924): the reward's stemmed form
+       (`_stem_form` — strips `s`/`es`/`ed`/`ing` off ≥3-char tokens) matches a
+       product value's stemmed form, either via exact same-key lookup or
+       token-subsequence. Catches plural/participle drift (`"mix brands"` ↔
+       `"mixed brands"`, `"no stones"` ↔ `"no stone"`, `"32 ohms"` ↔ `"32 ohm"`)
+       without introducing false collisions on short catalog tokens.
     """
     nk = normalize_attr_key(reward_key)
     is_compat = _is_compat_key(nk)
@@ -300,6 +355,23 @@ def _attr_constraint_hit(reward_key, reward_value, val_keys, key_tokens) -> bool
     for pk in val_keys.get(nv, ()):
         if pk != nk and frozenset((nk, pk)) in _CROSS_KEY_ALIASES:
             return True
+
+    # (4) Same-key morphological stem — plural/participle drift like
+    #     `"mixed brands"` ↔ `"mix brands"` (ORO-1924). The product side was
+    #     stem-augmented in `_build_attr_index`, so the same exact + subseq
+    #     lookups fire against the reward's stemmed form. Skip when stem is
+    #     empty or unchanged: empty-stem catches punctuation-only values
+    #     under one bogus bucket; unchanged means path (1)/(2) already fired
+    #     or truly missed on non-morphological grounds.
+    sv = _stem_form(nv)
+    if sv and sv != nv and nk in val_keys.get(sv, ()):
+        return True
+    if rt_matched:
+        st = _stem_tokens(rt_matched)
+        if st and st != rt_matched:
+            for ptoks in key_tokens.get(nk, ()):
+                if _is_token_subsequence(st, ptoks):
+                    return True
     return False
 
 
