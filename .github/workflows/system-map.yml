@@ -1,0 +1,27 @@
+# Caller — install in EACH mapped repo at:
+#   .github/workflows/system-map.yml
+# (Frontend, Backend, oro, oro-sdk, DB, Infrastructure)
+# Thin wrapper: on any PR to main, hand off to the shared dispatcher.
+#
+# NOTE: the `uses:` ref below is pinned to a commit SHA of ORO-AI/.github
+# for supply-chain safety. Bump it when the dispatcher changes.
+
+name: system-map
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# Least-privilege token forwarded to the reusable workflow.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  sync:
+    # Skip fork PRs — secrets aren't available to them, so the PAT would be empty.
+    if: github.event.pull_request.head.repo.fork == false
+    uses: ORO-AI/.github/.github/workflows/sync-system-map.yml@3bf228bc48733185867f30db9a5c53c86d98bea4
+    secrets:
+      MAP_SYNC_PAT: ${{ secrets.MAP_SYNC_PAT }}
