@@ -32,6 +32,8 @@ The first run pulls pre-built images from GHCR (~8 GB total). Subsequent runs st
 | `--problem-file` | `data/suites/problem_suite_v3.json` | Problem suite (30 problems) |
 | `--max-workers` | `3` | Parallel sandbox workers |
 
+**Note on `find_product`:** the `q` parameter matches against product title and the values within `attributes` / `sku_options`. Field names (keys) themselves are not searchable.
+
 ### Output
 
 The test runner scores each problem and prints per-category results:
