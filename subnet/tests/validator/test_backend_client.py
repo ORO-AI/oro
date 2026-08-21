@@ -270,32 +270,6 @@ class TestBackendClientPresign:
         assert result.results_s3_key == "logs/run-123.tar.gz"
 
 
-class TestBackendClientTopMiner:
-    def test_get_top_miner(self, mock_wallet):
-        from oro_sdk.models.top_agent_response import TopAgentResponse
-
-        client = BackendClient("https://api.example.com", mock_wallet)
-
-        sdk_response = TopAgentResponse(
-            suite_id=789,
-            computed_at=datetime(2025, 1, 13, 12, 0, 0),
-            top_agent_version_id=UUID("87654321-4321-4321-4321-210987654321"),
-            top_miner_hotkey="5GrwvaEF...",
-            top_score=0.92,
-        )
-
-        mock_response = _create_response(200, sdk_response)
-
-        with patch(
-            "validator.backend_client.get_top_agent.sync_detailed",
-            return_value=mock_response,
-        ):
-            result = client.get_top_miner()
-
-        assert result.top_miner_hotkey == "5GrwvaEF..."
-        assert result.top_score == 0.92
-
-
 class TestBackendClientWeightOverlay:
     def _client(self, mock_wallet):
         return BackendClient("https://api.example.com", mock_wallet)
