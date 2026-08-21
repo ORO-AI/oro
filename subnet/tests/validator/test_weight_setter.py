@@ -38,12 +38,6 @@ def _salt(finishers, top_hotkey, overlay=None):
     )
 
 
-def _empty_history():
-    history = MagicMock()
-    history.races = []
-    return history
-
-
 def _race_detail(qualifiers: list[dict]):
     """Build a mock RaceDetailResponse with the supplied qualifier dicts.
 
@@ -70,13 +64,6 @@ def _race_detail(qualifiers: list[dict]):
 
 
 class TestWeightSetterThread:
-    @pytest.fixture
-    def mock_backend_client(self, mock_backend_client_with_top_miner):
-        mock_backend_client_with_top_miner.get_race_history.return_value = (
-            _empty_history()
-        )
-        return mock_backend_client_with_top_miner
-
     @pytest.fixture
     def mock_wallet(self, mock_wallet_simple):
         return mock_wallet_simple

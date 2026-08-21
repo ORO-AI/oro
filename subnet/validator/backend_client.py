@@ -19,8 +19,7 @@ from uuid import UUID
 import httpx
 import requests
 from bittensor_wallet import Wallet
-from oro_sdk import BittensorAuthClient, Client
-from oro_sdk.api.public import get_race_detail, get_race_history, get_top_agent
+from oro_sdk import BittensorAuthClient
 from oro_sdk.api.validator import (
     claim_work,
     complete_run,
@@ -47,10 +46,7 @@ from oro_sdk.models.presign_upload_request import PresignUploadRequest
 from oro_sdk.models.presign_upload_response import PresignUploadResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.models.progress_update_request import ProgressUpdateRequest
-from oro_sdk.models.race_detail_response import RaceDetailResponse
-from oro_sdk.models.race_history_response import RaceHistoryResponse
 from oro_sdk.models.terminal_status import TerminalStatus
-from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
 
@@ -226,11 +222,6 @@ class BackendClient:
         self._consecutive_failures = 0
         self._last_recreate_at: float = 0.0
         self._auth_client = self._build_auth_client()
-        self._public_client = Client(
-            base_url=self.base_url,
-            timeout=httpx.Timeout(timeout),
-            raise_on_unexpected_status=False,
-        )
 
     def _build_auth_client(self) -> BittensorAuthClient:
         return BittensorAuthClient(
@@ -575,21 +566,6 @@ class BackendClient:
             body=request_body,
         )
 
-    def get_top_miner(self) -> TopAgentResponse:
-        """Get the current top miner for emissions.
-
-        Returns:
-            TopAgentResponse with top miner info.
-
-        Raises:
-            BackendError: If the request fails.
-        """
-        return self._call_api(
-            get_top_agent.sync_detailed,
-            "get_top_miner",
-            client=self._public_client,
-        )
-
     def fetch_weight_salt(self) -> WeightSalt:
         """Fetch this epoch's overlay + epoch-pinned standings in ONE call.
 
@@ -647,35 +623,6 @@ class BackendClient:
             )
             return {}
         return parsed
-
-    def get_race_history(self, limit: int = 1) -> RaceHistoryResponse:
-        """Fetch the most recent races (ordered newest-first).
-
-        Args:
-            limit: Number of races to return.
-
-        Raises:
-            BackendError: If the request fails.
-        """
-        return self._call_api(
-            get_race_history.sync_detailed,
-            "get_race_history",
-            client=self._public_client,
-            limit=limit,
-        )
-
-    def get_race_detail(self, race_id: UUID) -> RaceDetailResponse:
-        """Fetch a single race with its qualifiers.
-
-        Raises:
-            BackendError: If the request fails.
-        """
-        return self._call_api(
-            get_race_detail.sync_detailed,
-            "get_race_detail",
-            race_id=race_id,
-            client=self._public_client,
-        )
 
     def upload_to_s3(self, presign: PresignUploadResponse, data: bytes) -> None:
         """Upload data to S3 using presigned URL.

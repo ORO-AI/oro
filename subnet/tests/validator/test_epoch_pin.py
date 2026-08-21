@@ -147,7 +147,6 @@ def test_no_standings_retains_last_good(
     _run_tick_once(setter)
 
     mock_subtensor.set_weights.assert_not_called()
-    mock_backend_client.get_top_miner.assert_not_called()
 
 
 def test_empty_standings_retains(mock_backend_client, mock_subtensor, mock_wallet):
