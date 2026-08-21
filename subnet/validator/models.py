@@ -47,16 +47,3 @@ class CompletionRequest:
         if self.sandbox_metadata:
             d["sandbox_metadata"] = self.sandbox_metadata
         return d
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "CompletionRequest":
-        """Deserialize from dict loaded from JSON."""
-        return cls(
-            eval_run_id=UUID(data["eval_run_id"]),
-            status=TerminalStatus(data["terminal_status"]),
-            validator_score=data.get("validator_score"),
-            score_components=data.get("score_components", {}),
-            results_s3_key=data.get("results_s3_key", ""),
-            failure_reason=data.get("failure_reason"),
-            sandbox_metadata=data.get("sandbox_metadata"),
-        )
