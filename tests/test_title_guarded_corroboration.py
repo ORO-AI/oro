@@ -200,6 +200,70 @@ def test_distinctive_count_normalizes_key_variants():
     assert orm._distinctive_reward_key_count(r) == 0
 
 
+# ── review-regression: guard must fail when price/service fails ───
+def test_guard_inactive_when_price_constraint_fails(stub_model):
+    # Reviewer's blocking case: distinctive attr passes, price fails,
+    # title sim in band. `max_hit == max_total` isn't enough — the guard
+    # must see the price outcome too.
+    stub_model({("cand", "gt"): 0.60})
+    product = _product(
+        "cand",
+        attributes={"console_type": ["nintendo"]},
+        price=100.0,
+    )
+    reward = _reward(
+        title="gt",
+        attributes=[{"console_type": ["nintendo"]}],
+        price=[{"less than": [0, 50]}],
+    )
+    score, total, hit = orm.rule_score_reward(product, reward)
+    # 3 constraints: attr hit, price miss, title miss (guard suppressed)
+    assert hit["title"] == 0
+    assert score == pytest.approx(1 / 3)
+
+
+def test_guard_inactive_when_service_constraint_fails(stub_model):
+    # Companion case — service is the other non-title constraint class
+    # not covered by max_hit/max_total.
+    stub_model({("cand", "gt"): 0.60})
+    product = _product(
+        "cand",
+        attributes={"console_type": ["nintendo"]},
+        service=["COD"],  # freeShipping missing
+    )
+    reward = _reward(
+        title="gt",
+        attributes=[{"console_type": ["nintendo"]}],
+        service=["freeShipping"],
+    )
+    score, total, hit = orm.rule_score_reward(product, reward)
+    # 3 constraints: attr hit, service miss, title miss
+    assert hit["title"] == 0
+    assert score == pytest.approx(1 / 3)
+
+
+def test_guard_active_when_price_and_service_both_pass(stub_model):
+    # Positive case for the extended check — every non-title constraint
+    # (attr + price + service) passes, so the guard credits the band title.
+    stub_model({("cand", "gt"): 0.60})
+    product = _product(
+        "cand",
+        attributes={"console_type": ["nintendo"]},
+        price=45.0,
+        service=["freeShipping"],
+    )
+    reward = _reward(
+        title="gt",
+        attributes=[{"console_type": ["nintendo"]}],
+        price=[{"less than": [0, 50]}],
+        service=["freeShipping"],
+    )
+    score, total, hit = orm.rule_score_reward(product, reward)
+    # 4 constraints all credited
+    assert hit["title"] == 1
+    assert score == pytest.approx(1.0)
+
+
 # ── GT match short-circuits guard entirely ────────────────────────
 def test_gt_match_scores_1_regardless_of_sim(stub_model):
     stub_model({("gt-title", "gt-title"): 0.0})  # sim unused

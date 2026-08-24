@@ -520,10 +520,12 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
     # expensive part), then non-title, then decide whether to credit each
     # title constraint. GT-match still short-circuits below.
     #
-    # `title_sims` holds one raw cosine per reward["title"] entry; None
-    # means "no model available and no valid precomputed embedding" — same
-    # skip semantics as before.
-    title_sims: list[float | None] = []
+    # `title_sims` holds one raw cosine per reward["title"] entry that had
+    # a usable model or valid precomputed embedding. Titles that fail both
+    # sources are dropped here (never appended) so they never reach the
+    # denominator — matching pre-PR behavior where the `continue` skipped
+    # them before any counter increment.
+    title_sims: list[float] = []
     if not is_ground_truth and "title" in reward:
         model = _get_sentence_model()
         precomputed = reward.get("_title_embeddings", {})
@@ -547,7 +549,6 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
                     elif model is not None:
                         gt_emb = model.encode([title])
                     else:
-                        title_sims.append(None)
                         continue
                     sim = float(model.similarity(product_emb, gt_emb)[0][0])
                     title_sims.append(sim)
@@ -629,23 +630,34 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
         hit_counter["title"] += n_titles
     elif "title" in reward:
         # Guard eligibility: relaxed threshold applies only when the
-        # product passes EVERY non-title constraint (no free credit if
-        # any constraint failed) AND the reward is discriminative enough
-        # (>=K distinctive non-title constraint keys) to make "all
-        # non-title pass" a non-trivial statement. Both conditions must
-        # be true — either alone re-opens the corroboration exploit
-        # documented in the ORO-1458 catalog scan.
+        # product passes EVERY non-title constraint — sku_options,
+        # attributes, price, AND service — AND the reward is
+        # discriminative enough (>=K distinctive non-title constraint
+        # keys) to make "all non-title pass" a non-trivial statement.
+        # Either arm alone re-opens the corroboration exploit documented
+        # in the ORO-1458 catalog scan. `max_hit`/`max_total` only carry
+        # sku/attr outcomes; price and service go straight into the
+        # counters, so read from `hit_counter`/`total_counter` for the
+        # full non-title tally.
+        non_title_total = (
+            max_total
+            + total_counter["price"]
+            + total_counter["service"]
+        )
+        non_title_hit = (
+            max_hit
+            + hit_counter["price"]
+            + hit_counter["service"]
+        )
         guard_active = (
             _title_guard_enabled()
-            and max_total > 0
-            and max_hit == max_total
+            and non_title_total > 0
+            and non_title_hit == non_title_total
             and _distinctive_reward_key_count(reward) >= TITLE_GUARD_MIN_DISTINCTIVE
         )
         for sim in title_sims:
             total_count += 1
             total_counter["title"] += 1
-            if sim is None:
-                continue
             if sim >= TITLE_SIM_THRESHOLD:
                 hit_count += 1
                 hit_counter["title"] += 1
