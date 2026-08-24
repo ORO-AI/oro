@@ -8,6 +8,28 @@ from collections import Counter
 SENTENCE_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 TITLE_SIM_THRESHOLD = 0.72
 
+# Guarded corroboration relaxes the title cosine threshold for products
+# that pass every non-title constraint on a reward with at least one
+# distinctive (non-generic-key) non-title constraint. This recovers the
+# 0.50–0.72 band of "same category, different wording" title-FNs
+# documented in ORO-1458 (~11% of failures) without opening the
+# corroboration exploit surface — the discrimination guard rejects thin
+# rewards whose non-title constraints are trivially satisfied by
+# unrelated products (the ORO-1776 catalog scan measured 400+ passers on
+# `colour=pink` alone). Post-ORO-1776 the synth-side floor makes this
+# safe: every emitted reward now has ≥1 distinctive non-title
+# constraint, so the guard's K=1 requirement collapses to "reward is not
+# thin", which the synth already enforces.
+TITLE_SIM_GUARDED_THRESHOLD = 0.50
+TITLE_GUARD_MIN_DISTINCTIVE = 1
+# Generic keys mirror the ORO-1776 synth set exactly. A constraint whose
+# normalized key sits in here is treated as widening (not narrowing) the
+# acceptable pool for the purpose of the guard, and does NOT count
+# toward the distinctive threshold.
+_TITLE_GUARD_GENERIC_KEYS = frozenset({
+    "color", "colorfamily", "colour", "material", "size", "brand", "style",
+})
+
 # Shadow scoring: when SHADOW_SCORE_MODEL is set, encode the same
 # (product_title, gt_title) pair with the candidate model and log the
 # canonical + shadow cosine similarity so we can grep CW Logs Insights and
@@ -461,6 +483,30 @@ def ground_truth_reward(product: dict, reward: dict) -> float:
     return 0
 
 
+def _title_guard_enabled() -> bool:
+    # Default-on (ORO-1458). Set TITLE_CORROBORATION_GUARD=0 to disable
+    # and fall back to the strict TITLE_SIM_THRESHOLD-only path.
+    return os.environ.get("TITLE_CORROBORATION_GUARD", "1") != "0"
+
+
+def _distinctive_reward_key_count(reward: dict) -> int:
+    """Count reward attribute + sku_options keys that are NOT in the
+    generic set. Price and service don't count toward distinctiveness —
+    they widen the pool without narrowing on product identity, which is
+    exactly the "corroboration is vacuous" failure mode the guard exists
+    to prevent."""
+    keys = set()
+    for opt in reward.get("sku_options") or []:
+        if isinstance(opt, dict):
+            for k in opt:
+                keys.add(normalize_attr_key(k))
+    for attr in reward.get("attributes") or []:
+        if isinstance(attr, dict):
+            for k in attr:
+                keys.add(normalize_attr_key(k))
+    return sum(1 for k in keys if k not in _TITLE_GUARD_GENERIC_KEYS)
+
+
 def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tuple[float, Counter, Counter]:
     total_count = 0
     hit_count = 0
@@ -469,15 +515,18 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
 
     is_ground_truth = ground_truth_reward(product, reward) == 1
 
-    # title — use precomputed embeddings if available, otherwise encode both
-    if is_ground_truth and "title" in reward:
-        # GT match: same product = same title, skip expensive embedding computation
-        n_titles = len(reward["title"])
-        total_count += n_titles
-        total_counter["title"] += n_titles
-        hit_count += n_titles
-        hit_counter["title"] += n_titles
-    elif "title" in reward:
+    # ORO-1458 guarded corroboration reorders scoring so title can rely on
+    # non-title outcomes. Compute title similarities first (they're the
+    # expensive part), then non-title, then decide whether to credit each
+    # title constraint. GT-match still short-circuits below.
+    #
+    # `title_sims` holds one raw cosine per reward["title"] entry that had
+    # a usable model or valid precomputed embedding. Titles that fail both
+    # sources are dropped here (never appended) so they never reach the
+    # denominator — matching pre-PR behavior where the `continue` skipped
+    # them before any counter increment.
+    title_sims: list[float] = []
+    if not is_ground_truth and "title" in reward:
         model = _get_sentence_model()
         precomputed = reward.get("_title_embeddings", {})
         # Precomputed embeddings shipped with the problem suite may have been
@@ -486,7 +535,6 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
         # and would raise on similarity().
         expected_dim = model.get_sentence_embedding_dimension() if model is not None else None
         if model is not None or precomputed:
-            # Use pre-encoded embedding if provided, otherwise encode now
             if product_title_emb is not None:
                 product_emb = [product_title_emb]
             elif model is not None:
@@ -502,13 +550,10 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
                         gt_emb = model.encode([title])
                     else:
                         continue
-                    sim = model.similarity(product_emb, gt_emb)[0][0]
-                    total_count += 1
-                    total_counter["title"] += 1
-                    if sim >= TITLE_SIM_THRESHOLD:
-                        hit_count += 1
-                        hit_counter["title"] += 1
-                    _log_shadow_sim(product["title"], title, float(sim))
+                    sim = float(model.similarity(product_emb, gt_emb)[0][0])
+                    title_sims.append(sim)
+                    _log_shadow_sim(product["title"], title, sim)
+
     # price
     if "price" in reward:
         price = product["price"]
@@ -572,6 +617,53 @@ def rule_score_reward(product: dict, reward: dict, product_title_emb=None) -> tu
     total_counter["sku & attrs"] += max_total
     hit_count += max_hit
     hit_counter["sku & attrs"] += max_hit
+
+    # title crediting — deferred until after non-title so guarded
+    # corroboration can consult the sku/attr outcomes.
+    if is_ground_truth and "title" in reward:
+        # GT match: same product = same title, skip embedding entirely
+        # and credit every title constraint.
+        n_titles = len(reward["title"])
+        total_count += n_titles
+        total_counter["title"] += n_titles
+        hit_count += n_titles
+        hit_counter["title"] += n_titles
+    elif "title" in reward:
+        # Guard eligibility: relaxed threshold applies only when the
+        # product passes EVERY non-title constraint — sku_options,
+        # attributes, price, AND service — AND the reward is
+        # discriminative enough (>=K distinctive non-title constraint
+        # keys) to make "all non-title pass" a non-trivial statement.
+        # Either arm alone re-opens the corroboration exploit documented
+        # in the ORO-1458 catalog scan. `max_hit`/`max_total` only carry
+        # sku/attr outcomes; price and service go straight into the
+        # counters, so read from `hit_counter`/`total_counter` for the
+        # full non-title tally.
+        non_title_total = (
+            max_total
+            + total_counter["price"]
+            + total_counter["service"]
+        )
+        non_title_hit = (
+            max_hit
+            + hit_counter["price"]
+            + hit_counter["service"]
+        )
+        guard_active = (
+            _title_guard_enabled()
+            and non_title_total > 0
+            and non_title_hit == non_title_total
+            and _distinctive_reward_key_count(reward) >= TITLE_GUARD_MIN_DISTINCTIVE
+        )
+        for sim in title_sims:
+            total_count += 1
+            total_counter["title"] += 1
+            if sim >= TITLE_SIM_THRESHOLD:
+                hit_count += 1
+                hit_counter["title"] += 1
+            elif guard_active and sim >= TITLE_SIM_GUARDED_THRESHOLD:
+                hit_count += 1
+                hit_counter["title"] += 1
 
     if is_ground_truth:
         # Ground truth match — perfect score, but counters reflect actual field matches
