@@ -230,12 +230,28 @@ function validate(r) {
     return;
   }
 
+  // Enforce the allowlist across the whole request, not just the scalar `model`.
+  // OpenRouter also honours `models[]` (candidate list), `provider` preferences,
+  // `route`, `transforms`, and `preset`; strip them so every request runs on the
+  // single validated model rather than one steered by these fields. Log any that
+  // were present — the proxy does not otherwise record them.
+  var stripped = [];
+  ["models", "provider", "route", "transforms", "preset"].forEach(function (f) {
+    if (parsed[f] !== undefined) {
+      delete parsed[f];
+      stripped.push(f);
+    }
+  });
+  if (stripped.length > 0) {
+    r.error("stripped inference routing fields: " + stripped.join(","));
+  }
+
   var rewritten = rewriteModelFor(provider, parsed.model);
-  var forwardBody = body;
   if (rewritten !== null) {
     parsed.model = rewritten;
-    forwardBody = JSON.stringify(parsed);
   }
+  var forwardBody =
+    rewritten !== null || stripped.length > 0 ? JSON.stringify(parsed) : body;
 
   getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
