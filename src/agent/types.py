@@ -98,11 +98,16 @@ class JudgeResult(TypedDict):
     score: float
     explanation: str
     model: str
+    valid: bool
+    failure_class: str | None
     inference_failed: int
     inference_total: int
     # 402 = miner out of credits. Counted separately so the validator can
     # label a stalled eval as a miner-funding failure rather than infra.
     inference_402: int
+    inference_402_in_flight: int
+    inference_402_credits: int
+    inference_403: int
 
 
 class ReasoningSummary(TypedDict):
@@ -111,9 +116,17 @@ class ReasoningSummary(TypedDict):
     """
     reasoning_quality: float
     reasoning_coefficient: float
+    reasoning_judgments_expected: int
+    reasoning_judgments_valid: int
+    reasoning_judgments_failed: int
+    reasoning_judgments_skipped: int
+    reasoning_failure_class: str | None
     judge_inference_failed: int
     judge_inference_total: int
     judge_inference_402: int
+    judge_inference_402_in_flight: int
+    judge_inference_402_credits: int
+    judge_inference_403: int
 
 
 class ScoreComponentsSummary(TypedDict, total=False):

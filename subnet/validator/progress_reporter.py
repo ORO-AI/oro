@@ -38,6 +38,27 @@ from .scoring_pool import DEFAULT_SCORING_WORKERS, ScoringPool
 from .types import EnvelopeMeta, ProblemResult
 
 
+def reasoning_coverage_failure_reason(summary: ReasoningSummary) -> str | None:
+    """Return a terminal failure reason unless every expected problem is judged."""
+    expected = summary["reasoning_judgments_expected"]
+    valid = summary["reasoning_judgments_valid"]
+    failed = summary["reasoning_judgments_failed"]
+    skipped = summary["reasoning_judgments_skipped"]
+    if valid == expected and failed == skipped == 0:
+        return None
+
+    failure_class = summary["reasoning_failure_class"]
+    counts = (
+        f"expected={expected}, valid={valid}, failed={failed}, skipped={skipped}"
+    )
+    if failure_class == "insufficient_miner_credits":
+        return f"Reasoning judge insufficient miner credits ({counts})"
+    return (
+        f"Reasoning judge incomplete coverage ({counts}, "
+        f"class={failure_class or 'unknown'})"
+    )
+
+
 class ProgressReporter:
     """Monitors sandbox output, scores problems, and reports to Backend."""
 
@@ -184,30 +205,93 @@ class ProgressReporter:
             return {
                 "reasoning_quality": 0.0,
                 "reasoning_coefficient": reasoning_coefficient(0.0),
+                "reasoning_judgments_expected": 0,
+                "reasoning_judgments_valid": 0,
+                "reasoning_judgments_failed": 0,
+                "reasoning_judgments_skipped": 0,
+                "reasoning_failure_class": None,
                 "judge_inference_failed": 0,
                 "judge_inference_total": 0,
                 "judge_inference_402": 0,
+                "judge_inference_402_in_flight": 0,
+                "judge_inference_402_credits": 0,
+                "judge_inference_403": 0,
             }
 
-        judged = [r for r in results if r.reasoning_score is not None]
-        total_score = sum(r.reasoning_score for r in judged)
-        avg = round(total_score / len(judged), 4) if judged else 0.0
+        expected_results = [r for r in results if r.reasoning_judgment_expected]
+        valid_results = [
+            r for r in expected_results if r.reasoning_judgment_status == "valid"
+        ]
+        failed_results = [
+            r for r in expected_results if r.reasoning_judgment_status == "failed"
+        ]
+        skipped_results = [
+            r for r in expected_results if r.reasoning_judgment_status == "skipped"
+        ]
+        expected = len(expected_results)
+        valid = len(valid_results)
+        failed = len(failed_results)
+        skipped = len(skipped_results)
+        full_coverage = valid == expected and failed == skipped == 0
+
+        total_score = sum(
+            r.reasoning_score for r in valid_results if r.reasoning_score is not None
+        )
+        avg = round(total_score / valid, 4) if full_coverage and valid else 0.0
         coeff = reasoning_coefficient(avg)
-        total_inf_failed = sum(r.reasoning_inf_failed for r in results)
-        total_inf_total = sum(r.reasoning_inf_total for r in results)
-        total_inf_402 = sum(r.reasoning_inf_402 for r in results)
+        total_inf_failed = sum(r.reasoning_inf_failed for r in expected_results)
+        total_inf_total = sum(r.reasoning_inf_total for r in expected_results)
+        total_inf_402 = sum(r.reasoning_inf_402 for r in expected_results)
+        total_inf_402_in_flight = sum(
+            r.reasoning_inf_402_in_flight for r in expected_results
+        )
+        total_inf_402_credits = sum(
+            r.reasoning_inf_402_credits for r in expected_results
+        )
+        total_inf_403 = sum(r.reasoning_inf_403 for r in expected_results)
+
+        failure_priority = (
+            "insufficient_miner_credits",
+            "miner_key_limit_exceeded",
+            "invalid_miner_credentials",
+            "in_flight_requests_exhausted",
+            "judge_parse_exhausted",
+            "judge_infrastructure_exhausted",
+            "judge_exception",
+            "circuit_breaker_skipped",
+            "judge_disabled",
+            "missing_reasoning_result",
+        )
+        observed_failures = {
+            r.reasoning_failure_class
+            for r in expected_results
+            if r.reasoning_failure_class is not None
+        }
+        failure_class = next(
+            (name for name in failure_priority if name in observed_failures),
+            next(iter(observed_failures), None),
+        )
 
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
-            f"({len(judged)} problems judged)"
+            f"(expected={expected}, valid={valid}, failed={failed}, "
+            f"skipped={skipped})"
         )
 
         return {
             "reasoning_quality": avg,
             "reasoning_coefficient": coeff,
+            "reasoning_judgments_expected": expected,
+            "reasoning_judgments_valid": valid,
+            "reasoning_judgments_failed": failed,
+            "reasoning_judgments_skipped": skipped,
+            "reasoning_failure_class": failure_class,
             "judge_inference_failed": total_inf_failed,
             "judge_inference_total": total_inf_total,
             "judge_inference_402": total_inf_402,
+            "judge_inference_402_in_flight": total_inf_402_in_flight,
+            "judge_inference_402_credits": total_inf_402_credits,
+            "judge_inference_403": total_inf_403,
         }
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:

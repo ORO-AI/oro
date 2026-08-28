@@ -178,6 +178,8 @@ class TestScoreReasoningQuality:
         assert result["explanation"] == "Strong reasoning"
         assert result["inference_failed"] == 0
         assert result["inference_total"] == 1
+        assert result["valid"] is True
+        assert result["failure_class"] is None
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
@@ -198,12 +200,14 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
-    def test_returns_zero_after_all_retries_exhausted(self, mock_post, _mock_sleep):
+    def test_infrastructure_exhaustion_is_not_a_valid_zero(self, mock_post, _mock_sleep):
         mock_post.return_value = MagicMock(status_code=429, text="rate limited")
         result = score_reasoning_quality(REGEX_AGENT, api_key="test-key", max_retries=3)
         assert result["score"] == 0.0
         assert result["inference_failed"] == 3
         assert result["inference_total"] == 3
+        assert result["valid"] is False
+        assert result["failure_class"] == "judge_infrastructure_exhausted"
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
@@ -250,7 +254,7 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
-    def test_returns_zero_when_all_retries_unparseable(self, mock_post, _mock_sleep):
+    def test_parse_exhaustion_is_not_a_valid_zero(self, mock_post, _mock_sleep):
         """If every rotated judge returns an unparseable 200, fall through
         to the max-retries exit path with score=0 and inference_failed
         counting every attempt — don't surface one of the spurious 0s."""
@@ -262,6 +266,8 @@ class TestScoreReasoningQuality:
         assert result["score"] == 0.0
         assert result["inference_failed"] == 3
         assert result["inference_total"] == 3
+        assert result["valid"] is False
+        assert result["failure_class"] == "judge_parse_exhausted"
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
@@ -279,6 +285,7 @@ class TestScoreReasoningQuality:
         assert result["explanation"] == "0 inference calls"
         assert result["inference_failed"] == 0
         assert result["inference_total"] == 1
+        assert result["valid"] is True
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
@@ -349,7 +356,7 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
-    def test_short_circuits_on_402_without_retry(self, mock_post, _mock_sleep):
+    def test_short_circuits_on_credit_402_without_retry(self, mock_post, _mock_sleep):
         """HTTP 402 = miner out of credits. The same token is used for
         every model in the rotation, so retrying is guaranteed to fail
         too. The scorer must short-circuit on the first 402 and surface
@@ -363,7 +370,42 @@ class TestScoreReasoningQuality:
         assert result["inference_402"] == 1
         assert result["inference_failed"] == 1
         assert result["inference_total"] == 1
+        assert result["valid"] is False
+        assert result["failure_class"] == "insufficient_miner_credits"
+        assert result["inference_402_credits"] == 1
         assert mock_post.call_count == 1
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_retries_in_flight_402_then_succeeds(self, mock_post, _mock_sleep):
+        in_flight = MagicMock(status_code=402)
+        in_flight.json.return_value = {
+            "error": {"metadata": {"reason": "in_flight_requests"}}
+        }
+        mock_post.side_effect = [
+            in_flight,
+            MagicMock(
+                status_code=200,
+                json=lambda: {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"reasoning_quality": 0.9}'
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+
+        result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+
+        assert result["valid"] is True
+        assert result["score"] == 0.9
+        assert result["inference_total"] == 2
+        assert result["inference_failed"] == 1
+        assert result["inference_402_in_flight"] == 1
+        assert result["inference_402_credits"] == 0
 
 
 class TestFetchRankedModels:

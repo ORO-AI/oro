@@ -591,6 +591,17 @@ def _rotate_and_backoff(model_idx: int, attempt: int) -> int:
     return model_idx + 1
 
 
+def _openrouter_error_metadata(resp: requests.Response) -> dict[str, Any]:
+    """Return the safe, structured metadata from an OpenRouter error."""
+    try:
+        body = resp.json()
+    except (requests.JSONDecodeError, ValueError):
+        return {}
+    error = body.get("error") if isinstance(body, dict) else None
+    metadata = error.get("metadata") if isinstance(error, dict) else None
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def score_reasoning_quality(
     dialogue: Dialogue,
     api_key: str,
@@ -601,17 +612,30 @@ def score_reasoning_quality(
 ) -> JudgeResult:
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
-    Retries with model rotation on transient failures (429, 502-504).
+    Retries with model rotation on transient failures (402 in-flight
+    reservations, 429, 502-504).
     Uses exponential backoff matching ProxyClient conventions on rate
     limits; rotates without backoff and blacklists the model for the
     rest of this eval when a 200 returns unparseable content.
-    Stops immediately on auth failures (401, 403).
+    Stops immediately on terminal credential, credit, and key-cap failures.
 
     Returns:
         Dict with 'score' (float 0-1), 'explanation' (str),
         'model' (str), 'inference_failed' (int), 'inference_total' (int).
     """
-    empty = {"score": 0.0, "explanation": "", "model": "", "inference_failed": 0, "inference_total": 0, "inference_402": 0}
+    empty: JudgeResult = {
+        "score": 0.0,
+        "explanation": "",
+        "model": "",
+        "valid": False,
+        "failure_class": "missing_reasoning_result",
+        "inference_failed": 0,
+        "inference_total": 0,
+        "inference_402": 0,
+        "inference_402_in_flight": 0,
+        "inference_402_credits": 0,
+        "inference_403": 0,
+    }
     if not dialogue:
         return empty
 
@@ -632,6 +656,23 @@ def score_reasoning_quality(
     inference_failed = 0
     inference_total = 0
     inference_402 = 0
+    inference_402_in_flight = 0
+    inference_402_credits = 0
+    inference_403 = 0
+    last_failure_class = "judge_infrastructure_exhausted"
+
+    def failure_result(failure_class: str) -> JudgeResult:
+        return {
+            **empty,
+            "failure_class": failure_class,
+            "inference_failed": inference_failed,
+            "inference_total": inference_total,
+            "inference_402": inference_402,
+            "inference_402_in_flight": inference_402_in_flight,
+            "inference_402_credits": inference_402_credits,
+            "inference_403": inference_403,
+        }
+
     for attempt in range(max_retries):
         if len(bad_models) >= len(models):
             logger.error(
@@ -675,14 +716,20 @@ def score_reasoning_quality(
                     return {
                         **{k: parsed[k] for k in ("score", "explanation")},
                         "model": model,
+                        "valid": True,
+                        "failure_class": None,
                         "inference_failed": inference_failed,
                         "inference_total": inference_total,
                         "inference_402": inference_402,
+                        "inference_402_in_flight": inference_402_in_flight,
+                        "inference_402_credits": inference_402_credits,
+                        "inference_403": inference_403,
                     }
                 # 200 OK with empty/unparseable body — model is broken upstream
                 # (Chutes serving an unhealthy TEE instance). Blacklist it for
                 # this eval and rotate immediately, with no rate-limit backoff.
                 inference_failed += 1
+                last_failure_class = "judge_parse_exhausted"
                 bad_models.add(model)
                 logger.warning(
                     f"Judge response unparseable from {model} "
@@ -696,16 +743,32 @@ def score_reasoning_quality(
             inference_failed += 1
             if resp.status_code == 402:
                 inference_402 += 1
+                metadata = _openrouter_error_metadata(resp)
+                if metadata.get("reason") == "in_flight_requests":
+                    inference_402_in_flight += 1
+                    last_failure_class = "in_flight_requests_exhausted"
+                    logger.warning(
+                        "Judge 402 in-flight reservation with %s; retrying "
+                        "(attempt %s/%s)",
+                        model,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    model_idx = _rotate_and_backoff(model_idx, attempt)
+                    continue
 
-            # Auth failures are terminal — token is bad, retrying won't help.
-            # 402 = miner out of credits; same token is used across every
-            # rotation model, so retrying any other model hits the same wall.
-            if resp.status_code in (401, 402, 403):
+                inference_402_credits += 1
+                return failure_result("insufficient_miner_credits")
+
+            if resp.status_code == 403:
+                inference_403 += 1
+                return failure_result("miner_key_limit_exceeded")
+
+            if resp.status_code == 401:
                 logger.error(
-                    f"Judge {resp.status_code} with {model}, aborting: "
-                    f"{resp.text[:200]}"
+                    "Judge credentials rejected with %s; aborting", model
                 )
-                return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}
+                return failure_result("invalid_miner_credentials")
 
             if resp.status_code in (429, 502, 503, 504):
                 logger.warning(
@@ -714,20 +777,22 @@ def score_reasoning_quality(
                 )
             else:
                 logger.warning(
-                    f"Judge call returned {resp.status_code} with {model}: "
-                    f"{resp.text[:200]}"
+                    "Judge call returned %s with %s", resp.status_code, model
                 )
+            last_failure_class = "judge_infrastructure_exhausted"
             model_idx = _rotate_and_backoff(model_idx, attempt)
             continue
 
         except requests.exceptions.Timeout:
             inference_failed += 1
+            last_failure_class = "judge_infrastructure_exhausted"
             logger.warning(f"Judge call timed out with {model}")
             model_idx += 1
         except requests.RequestException as e:
             inference_failed += 1
+            last_failure_class = "judge_infrastructure_exhausted"
             logger.warning(f"Judge call failed with {model}: {e}")
             model_idx += 1
 
-    logger.error(f"All {max_retries} judge retries exhausted, returning 0.0")
-    return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}
+    logger.error("Reasoning judge retries exhausted without a valid judgment")
+    return failure_result(last_failure_class)

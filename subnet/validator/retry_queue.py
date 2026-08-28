@@ -117,6 +117,8 @@ class LocalRetryQueue:
         if entry.get("validator_score") is not None:
             kwargs["score"] = entry["validator_score"]
             kwargs["score_components"] = entry.get("score_components", {})
+        elif entry.get("score_components"):
+            kwargs["score_components"] = entry["score_components"]
         if entry.get("results_s3_key"):
             kwargs["results_s3_key"] = entry["results_s3_key"]
         if entry.get("failure_reason"):
@@ -146,4 +148,3 @@ class LocalRetryQueue:
             logging.error(
                 f"Unexpected error for completion {entry['eval_run_id']}, dropping: {e}"
             )
-

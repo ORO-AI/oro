@@ -52,4 +52,10 @@ class ProblemResult:
     reasoning_inf_failed: int = 0
     reasoning_inf_total: int = 0
     reasoning_inf_402: int = 0
+    reasoning_inf_402_in_flight: int = 0
+    reasoning_inf_402_credits: int = 0
+    reasoning_inf_403: int = 0
+    reasoning_judgment_expected: bool = False
+    reasoning_judgment_status: str = "skipped"
+    reasoning_failure_class: str | None = "missing_reasoning_result"
     execution_time: float | None = None

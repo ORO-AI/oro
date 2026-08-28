@@ -65,6 +65,33 @@ class TestLocalRetryQueue:
         assert queue.get_pending_count() == 0
         mock_backend_client.complete_run.assert_called_once()
 
+    def test_failed_completion_retry_preserves_reasoning_diagnostics(
+        self, temp_storage_path, mock_backend_client
+    ):
+        diagnostics = {
+            "reasoning_judgments_expected": 30,
+            "reasoning_judgments_valid": 3,
+            "reasoning_judgments_failed": 1,
+            "reasoning_judgments_skipped": 26,
+        }
+        completion = CompletionRequest(
+            eval_run_id=UUID("12345678-1234-1234-1234-123456789012"),
+            status=TerminalStatus.FAILED,
+            score_components=diagnostics,
+            failure_reason="Reasoning judge incomplete coverage",
+        )
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add(completion)
+
+        queue.process_pending()
+
+        mock_backend_client.complete_run.assert_called_once_with(
+            eval_run_id=completion.eval_run_id,
+            status=TerminalStatus.FAILED,
+            score_components=diagnostics,
+            failure_reason=completion.failure_reason,
+        )
+
     def test_process_pending_keeps_on_failure(
         self, temp_storage_path, mock_backend_client, sample_completion
     ):
@@ -116,5 +143,4 @@ class TestLocalRetryQueue:
 
         queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
         assert queue.get_pending_count() == 1
-
 
