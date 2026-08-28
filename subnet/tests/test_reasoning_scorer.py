@@ -349,21 +349,43 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
-    def test_short_circuits_on_402_without_retry(self, mock_post, _mock_sleep):
-        """HTTP 402 = miner out of credits. The same token is used for
-        every model in the rotation, so retrying is guaranteed to fail
-        too. The scorer must short-circuit on the first 402 and surface
-        inference_402 to the caller."""
-        mock_post.return_value = MagicMock(
-            status_code=402,
-            text='{"error":{"message":"This request requires more credits"}}',
-        )
+    def test_short_circuits_on_payment_required_402_without_retry(
+        self, mock_post, _mock_sleep
+    ):
+        """An explicitly typed payment_required response is miner-attributable."""
+        response = MagicMock(status_code=402)
+        response.json.return_value = {
+            "error": {"metadata": {"error_type": "payment_required"}}
+        }
+        mock_post.return_value = response
         result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
         assert result["score"] == 0.0
         assert result["inference_402"] == 1
         assert result["inference_failed"] == 1
         assert result["inference_total"] == 1
         assert mock_post.call_count == 1
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    @pytest.mark.parametrize(
+        "metadata",
+        [{}, {"reason": "in_flight_requests"}],
+        ids=["unclassified", "in_flight"],
+    )
+    def test_non_payment_402_retries_without_blame(
+        self, mock_post, _mock_sleep, metadata
+    ):
+        response = MagicMock(status_code=402)
+        response.json.return_value = {"error": {"metadata": metadata}}
+        mock_post.return_value = response
+
+        result = score_reasoning_quality(
+            REASONING_AGENT, api_key="test-key", max_retries=2
+        )
+
+        assert result["model"] == ""
+        assert result["inference_402"] == 0
+        assert mock_post.call_count == 2
 
 
 class TestFetchRankedModels:

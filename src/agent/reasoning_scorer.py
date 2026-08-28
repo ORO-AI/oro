@@ -591,6 +591,17 @@ def _rotate_and_backoff(model_idx: int, attempt: int) -> int:
     return model_idx + 1
 
 
+def _openrouter_error_metadata(resp: requests.Response) -> dict[str, Any]:
+    """Return the safe, structured metadata from an OpenRouter error."""
+    try:
+        body = resp.json()
+    except (requests.JSONDecodeError, ValueError):
+        return {}
+    error = body.get("error") if isinstance(body, dict) else None
+    metadata = error.get("metadata") if isinstance(error, dict) else None
+    return metadata if isinstance(metadata, dict) else {}
+
+
 def score_reasoning_quality(
     dialogue: Dialogue,
     api_key: str,
@@ -601,11 +612,12 @@ def score_reasoning_quality(
 ) -> JudgeResult:
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
-    Retries with model rotation on transient failures (429, 502-504).
+    Retries with model rotation on transient failures (ambiguous or in-flight
+    402 responses, 429, 502-504).
     Uses exponential backoff matching ProxyClient conventions on rate
     limits; rotates without backoff and blacklists the model for the
     rest of this eval when a 200 returns unparseable content.
-    Stops immediately on auth failures (401, 403).
+    Stops immediately on terminal credential, credit, and key-cap failures.
 
     Returns:
         Dict with 'score' (float 0-1), 'explanation' (str),
@@ -632,6 +644,7 @@ def score_reasoning_quality(
     inference_failed = 0
     inference_total = 0
     inference_402 = 0
+
     for attempt in range(max_retries):
         if len(bad_models) >= len(models):
             logger.error(
@@ -695,12 +708,34 @@ def score_reasoning_quality(
 
             inference_failed += 1
             if resp.status_code == 402:
-                inference_402 += 1
+                metadata = _openrouter_error_metadata(resp)
+                if metadata.get("reason") == "in_flight_requests":
+                    logger.warning(
+                        "Judge 402 in-flight reservation with %s; retrying "
+                        "(attempt %s/%s)",
+                        model,
+                        attempt + 1,
+                        max_retries,
+                    )
+                    model_idx = _rotate_and_backoff(model_idx, attempt)
+                    continue
 
-            # Auth failures are terminal — token is bad, retrying won't help.
-            # 402 = miner out of credits; same token is used across every
-            # rotation model, so retrying any other model hits the same wall.
-            if resp.status_code in (401, 402, 403):
+                if metadata.get("error_type") == "payment_required":
+                    inference_402 += 1
+                    return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}
+
+                # Unknown 402s may be transient billing infrastructure failures.
+                logger.warning(
+                    "Judge returned unclassified 402 with %s; retrying "
+                    "(attempt %s/%s)",
+                    model,
+                    attempt + 1,
+                    max_retries,
+                )
+                model_idx = _rotate_and_backoff(model_idx, attempt)
+                continue
+
+            if resp.status_code in (401, 403):
                 logger.error(
                     f"Judge {resp.status_code} with {model}, aborting: "
                     f"{resp.text[:200]}"

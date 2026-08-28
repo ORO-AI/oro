@@ -189,17 +189,19 @@ class ProgressReporter:
                 "judge_inference_402": 0,
             }
 
-        judged = [r for r in results if r.reasoning_score is not None]
+        expected_results = [r for r in results if r.reasoning_judgment_expected]
+        judged = [r for r in expected_results if r.reasoning_score is not None]
+        complete = len(judged) == len(expected_results)
         total_score = sum(r.reasoning_score for r in judged)
-        avg = round(total_score / len(judged), 4) if judged else 0.0
+        avg = round(total_score / len(judged), 4) if complete and judged else 0.0
         coeff = reasoning_coefficient(avg)
-        total_inf_failed = sum(r.reasoning_inf_failed for r in results)
-        total_inf_total = sum(r.reasoning_inf_total for r in results)
-        total_inf_402 = sum(r.reasoning_inf_402 for r in results)
+        total_inf_failed = sum(r.reasoning_inf_failed for r in expected_results)
+        total_inf_total = sum(r.reasoning_inf_total for r in expected_results)
+        total_inf_402 = sum(r.reasoning_inf_402 for r in expected_results)
 
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
-            f"({len(judged)} problems judged)"
+            f"({len(judged)}/{len(expected_results)} problems judged)"
         )
 
         return {
@@ -209,6 +211,27 @@ class ProgressReporter:
             "judge_inference_total": total_inf_total,
             "judge_inference_402": total_inf_402,
         }
+
+    def get_reasoning_failure_reason(self) -> str | None:
+        """Fail closed unless every scorable trajectory has a judgment."""
+        with self._lock:
+            expected = [
+                result
+                for result in self._results.values()
+                if result.reasoning_judgment_expected
+            ]
+        judged = sum(result.reasoning_score is not None for result in expected)
+        if judged == len(expected):
+            return None
+        if any(result.reasoning_inf_402 for result in expected):
+            return (
+                "Reasoning judge insufficient miner credits "
+                f"({judged}/{len(expected)} problems judged)"
+            )
+        return (
+            "Reasoning judge infrastructure failure "
+            f"({judged}/{len(expected)} problems judged)"
+        )
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:
         """Return the status for a scored problem."""

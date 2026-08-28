@@ -52,4 +52,5 @@ class ProblemResult:
     reasoning_inf_failed: int = 0
     reasoning_inf_total: int = 0
     reasoning_inf_402: int = 0
+    reasoning_judgment_expected: bool = False
     execution_time: float | None = None

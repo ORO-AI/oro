@@ -146,4 +146,3 @@ class LocalRetryQueue:
             logging.error(
                 f"Unexpected error for completion {entry['eval_run_id']}, dropping: {e}"
             )
-

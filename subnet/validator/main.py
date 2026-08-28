@@ -972,17 +972,8 @@ class Validator:
             # Step 4b: Get reasoning data (judged per-problem during scoring)
             reasoning_result = progress_reporter.get_reasoning_data()
 
-            # If most judge calls failed, treat as failure. Any 402 means
-            # the miner is out of inference credits — surface that as a
-            # miner-funding failure instead of misleading "infrastructure".
-            judge_total = reasoning_result["judge_inference_total"]
-            judge_failed = reasoning_result["judge_inference_failed"]
-            judge_402 = reasoning_result["judge_inference_402"]
-            if judge_total >= 3 and judge_failed > judge_total / 2:
-                if judge_402 > 0:
-                    failure_reason = f"Reasoning judge insufficient miner credits ({judge_402}/{judge_total} calls returned 402)"
-                else:
-                    failure_reason = f"Reasoning judge infrastructure failure ({judge_failed}/{judge_total} calls failed)"
+            failure_reason = progress_reporter.get_reasoning_failure_reason()
+            if failure_reason is not None:
                 logging.warning(f"Completing as FAILED: {failure_reason}")
                 self._complete_with_failure(
                     eval_run_id,
@@ -996,17 +987,7 @@ class Validator:
                 success_rate, reasoning_result["reasoning_quality"]
             )
 
-            aggregate["reasoning_quality"] = reasoning_result["reasoning_quality"]
-            aggregate["reasoning_coefficient"] = reasoning_result[
-                "reasoning_coefficient"
-            ]
-            aggregate["judge_inference_failed"] = reasoning_result[
-                "judge_inference_failed"
-            ]
-            aggregate["judge_inference_total"] = reasoning_result[
-                "judge_inference_total"
-            ]
-            aggregate["judge_inference_402"] = reasoning_result["judge_inference_402"]
+            aggregate.update(reasoning_result)
 
             logging.info(
                 f"Score: final={score:.4f} "
