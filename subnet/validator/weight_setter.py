@@ -5,9 +5,9 @@ Builds a deterministic survivor-set race-finisher weight vector via
 chain. Determinism across validators is load-bearing for Yuma consensus on
 subnet 15 (`kappa = 0.5`).
 
-When no completed race is available (fresh subnet, race-system rollback,
-backend outage) the tick is skipped — weight setting waits for the next
-tick rather than submitting a stale or non-race vector.
+After a full epoch without private standings, the setter uses the public top
+once it clears the reveal embargo. If it is still hidden or unavailable, the
+last-good on-chain vector remains unchanged.
 """
 
 import threading
@@ -114,10 +114,7 @@ class WeightSetterThread:
     Runs in a background thread, independent of the evaluation loop.
     """
 
-    # Construction-time validation only: `t_burn_fallback` is fed to
-    # `compute_pinned_weights` in __init__ to fail fast on a misconfigured value.
-    # It is NOT a runtime fallback anymore — with the public /top path removed,
-    # an unusable standings payload is a miss (retain/burn), not a fallback.
+    # Used when the public top response omits an emission policy.
     _DEFAULT_BURN_RATE = 0.75
 
     # Default tick cadence. 22 min sits just above the on-chain
@@ -146,12 +143,8 @@ class WeightSetterThread:
         self.t_burn_fallback = t_burn_fallback
         self.reveal_period_epochs = reveal_period_epochs
 
-        # Epoch-anchored burn state (ORO-1802). We build weights only from the
-        # authed epoch-pinned standings; there is NO public /top fallback. On a
-        # transient miss we retain last-good (skip submit); only when a FULL
-        # epoch has elapsed with no successful set do we burn to UID 0. Anchored
-        # on the chain epoch index (block // (tempo * reveal_period)) so it is
-        # independent of tick cadence.
+        # A transient private-standings miss retains last-good. Public fallback
+        # begins only after a full epoch has elapsed.
         self._last_success_epoch: Optional[int] = None
 
         # Fail fast on misconfiguration of the fallback value. The live
@@ -250,9 +243,7 @@ class WeightSetterThread:
         SAME snapshot and so agrees regardless of tick phase (the ORO-1704 fix).
 
         Returns ``None`` (a "miss") when there are no standings, an empty
-        snapshot (epoch-transition lag), or an unusable payload. There is NO
-        public /top fallback (ORO-1802): the caller retains last-good weights on
-        a transient miss and burns to UID 0 only after a full epoch of misses.
+        snapshot (epoch-transition lag), or an unusable payload.
         """
         if standings is None:
             return None
@@ -271,9 +262,32 @@ class WeightSetterThread:
         )
         return self._build_weights_from_race(p_fin, p_top, p_burn)
 
-    def _burn_vector(self) -> tuple[list[int], list[int]]:
-        """Full burn-to-UID-0 vector (no finishers, no top, t_burn=1.0)."""
-        return self._build_weights_from_race([], None, 1.0)
+    def _public_top_vector(self) -> Optional[tuple[list[int], list[int]]]:
+        """Build burn + top weights from the atomic public `/top` response."""
+        try:
+            top = self.backend_client.get_top_miner()
+            hotkey = top.top_miner_hotkey
+            if hotkey is None or hotkey is UNSET:
+                logging.warning(
+                    "Public top is still embargoed; retaining last-good weights"
+                )
+                return None
+            if str(hotkey) not in self.metagraph.hotkeys:
+                logging.warning(
+                    "Public top is not registered; retaining last-good weights"
+                )
+                return None
+
+            t_burn = self.t_burn_fallback
+            if top.policy is not None and top.policy is not UNSET:
+                t_burn = float(top.policy["emission_baseline_burn_rate"])
+                _validate_burn(t_burn)
+            return self._build_weights_from_race([], str(hotkey), t_burn)
+        except (BackendError, KeyError, TypeError, ValueError, AttributeError) as e:
+            logging.warning(
+                f"Public top unavailable; retaining last-good weights: {e}"
+            )
+            return None
 
     def _submit_weights(self, uids: list[int], weights: list[int]) -> bool:
         """Push `uids` / `weights` to the chain and return whether it was accepted.
@@ -302,10 +316,8 @@ class WeightSetterThread:
     def _tick(self) -> None:
         """One iteration of the loop — epoch-pinned weight submission.
 
-        Weights come ONLY from the authed epoch-pinned standings (ORO-1802);
-        there is no public /top fallback. On a transient miss we retain the
-        last-good on-chain weights (skip submit); only when a full epoch has
-        elapsed with no successful set do we burn to UID 0.
+        Authenticated epoch-pinned standings are preferred. On a transient miss
+        retain last-good; after a full epoch use the post-embargo public top.
         """
         self.metagraph.sync()
 
@@ -317,6 +329,10 @@ class WeightSetterThread:
         built = self._build_from_standings(salt.epoch_standings)
 
         if built is None:
+            if salt.eligible is False:
+                logging.warning(
+                    "Private standings withheld: validator is currently ineligible"
+                )
             self._handle_miss()
             return
 
@@ -329,22 +345,21 @@ class WeightSetterThread:
         if not self._submit_weights(uids, weights):
             logging.warning("Weight set not accepted this tick (rate-limited?)")
             return
-        # Record the epoch of this ACCEPTED set; the burn anchor measures
-        # elapsed epochs from here.
+        # Record the epoch of this accepted private set; fallback eligibility is
+        # measured from here.
         epoch = self._current_epoch()
         if epoch is not None:
             self._last_success_epoch = epoch
         logging.info("Successfully set weights")
 
     def _handle_miss(self) -> None:
-        """No usable authed standings this tick. Retain last-good, or burn.
+        """Retain last-good for a full epoch, then try the public top.
 
         Retain (skip submit → on-chain weights persist) until a FULL epoch has
         elapsed with no accepted set. Because a set can land late in epoch N,
-        burning requires `epoch >= last_success + 2` — i.e. the whole of epoch
-        N+1 passed with no success. Merely ticking into N+1 is a partial epoch
-        (a transient miss), so it retains. The first ever miss (no prior success)
-        establishes the epoch baseline and retains, giving a fresh subnet grace.
+        fallback requires `epoch >= last_success + 2` — i.e. the whole of epoch
+        N+1 passed with no success. The first ever miss establishes the epoch
+        baseline and retains, giving a fresh subnet grace.
         """
         epoch = self._current_epoch()
         if epoch is None:
@@ -365,15 +380,16 @@ class WeightSetterThread:
             )
             return
 
-        # A full epoch has elapsed with no accepted set → burn to UID 0.
-        uids, weights = self._burn_vector()
-        if not weights:
-            logging.warning("Skipping burn (empty metagraph)")
+        built = self._public_top_vector()
+        if built is None:
             return
-        logging.error(
-            f"No usable standings for a full epoch "
-            f"(last success epoch {self._last_success_epoch}, now {epoch}); "
-            "burning to UID 0"
+        uids, weights = built
+        if not weights:
+            logging.warning("Public top produced no weights; retaining last-good")
+            return
+        logging.warning(
+            f"Submitting public top after a full epoch without private standings "
+            f"(last success epoch {self._last_success_epoch}, now {epoch})"
         )
         self._submit_weights(uids, weights)
 
