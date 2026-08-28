@@ -612,8 +612,8 @@ def score_reasoning_quality(
 ) -> JudgeResult:
     """Score reasoning quality of an agent trajectory using an LLM judge.
 
-    Retries with model rotation on transient failures (402 in-flight
-    reservations, 429, 502-504).
+    Retries with model rotation on transient failures (ambiguous or in-flight
+    402 responses, 429, 502-504).
     Uses exponential backoff matching ProxyClient conventions on rate
     limits; rotates without backoff and blacklists the model for the
     rest of this eval when a 200 returns unparseable content.
@@ -757,8 +757,25 @@ def score_reasoning_quality(
                     model_idx = _rotate_and_backoff(model_idx, attempt)
                     continue
 
-                inference_402_credits += 1
-                return failure_result("insufficient_miner_credits")
+                if metadata.get("error_type") == "payment_required":
+                    inference_402_credits += 1
+                    return failure_result("insufficient_miner_credits")
+
+                # A bare 402 is not enough to attribute the failure to the
+                # miner. OpenRouter billing incidents and temporary key-budget
+                # reservations have both surfaced as 402s. Retry them like
+                # infrastructure failures; incomplete coverage still fails the
+                # run, but without incorrectly blaming the miner.
+                last_failure_class = "judge_infrastructure_exhausted"
+                logger.warning(
+                    "Judge returned unclassified 402 with %s; retrying "
+                    "(attempt %s/%s)",
+                    model,
+                    attempt + 1,
+                    max_retries,
+                )
+                model_idx = _rotate_and_backoff(model_idx, attempt)
+                continue
 
             if resp.status_code == 403:
                 inference_403 += 1

@@ -88,6 +88,21 @@ def test_minions_partial_sample_cannot_distort_score():
     assert reasoning_coverage_failure_reason(summary) is not None
 
 
+def test_judge_outage_is_reported_as_infrastructure_failure():
+    results = [
+        _result(0, "failed", failure_class="judge_infrastructure_exhausted"),
+        *[
+            _result(i, "skipped", failure_class="judge_infrastructure_exhausted")
+            for i in range(1, 30)
+        ],
+    ]
+
+    reason = reasoning_coverage_failure_reason(_summary(results))
+
+    assert reason is not None
+    assert reason.startswith("Reasoning judge infrastructure failure")
+
+
 def test_concurrent_completion_order_does_not_change_coverage():
     results = [_result(i, "valid", score=0.7) for i in range(30)]
 

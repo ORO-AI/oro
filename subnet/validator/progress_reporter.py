@@ -53,6 +53,16 @@ def reasoning_coverage_failure_reason(summary: ReasoningSummary) -> str | None:
     )
     if failure_class == "insufficient_miner_credits":
         return f"Reasoning judge insufficient miner credits ({counts})"
+    if failure_class in {
+        "in_flight_requests_exhausted",
+        "judge_parse_exhausted",
+        "judge_infrastructure_exhausted",
+        "judge_exception",
+    }:
+        return (
+            f"Reasoning judge infrastructure failure ({counts}, "
+            f"class={failure_class})"
+        )
     return (
         f"Reasoning judge incomplete coverage ({counts}, "
         f"class={failure_class or 'unknown'})"

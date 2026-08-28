@@ -356,15 +356,15 @@ class TestScoreReasoningQuality:
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
-    def test_short_circuits_on_credit_402_without_retry(self, mock_post, _mock_sleep):
-        """HTTP 402 = miner out of credits. The same token is used for
-        every model in the rotation, so retrying is guaranteed to fail
-        too. The scorer must short-circuit on the first 402 and surface
-        inference_402 to the caller."""
-        mock_post.return_value = MagicMock(
-            status_code=402,
-            text='{"error":{"message":"This request requires more credits"}}',
-        )
+    def test_short_circuits_on_payment_required_402_without_retry(
+        self, mock_post, _mock_sleep
+    ):
+        """An explicitly typed payment_required response is miner-attributable."""
+        response = MagicMock(status_code=402)
+        response.json.return_value = {
+            "error": {"metadata": {"error_type": "payment_required"}}
+        }
+        mock_post.return_value = response
         result = score_reasoning_quality(REASONING_AGENT, api_key="test-key")
         assert result["score"] == 0.0
         assert result["inference_402"] == 1
@@ -374,6 +374,25 @@ class TestScoreReasoningQuality:
         assert result["failure_class"] == "insufficient_miner_credits"
         assert result["inference_402_credits"] == 1
         assert mock_post.call_count == 1
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_unclassified_402_exhaustion_is_not_miner_attributable(
+        self, mock_post, _mock_sleep
+    ):
+        ambiguous = MagicMock(status_code=402)
+        ambiguous.json.return_value = {"error": {"message": "Unknown"}}
+        mock_post.return_value = ambiguous
+
+        result = score_reasoning_quality(
+            REASONING_AGENT, api_key="test-key", max_retries=2
+        )
+
+        assert result["valid"] is False
+        assert result["failure_class"] == "judge_infrastructure_exhausted"
+        assert result["inference_402"] == 2
+        assert result["inference_402_credits"] == 0
+        assert mock_post.call_count == 2
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")
