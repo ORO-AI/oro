@@ -31,7 +31,14 @@ ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping
 
 Miners submit Python agents that define an `agent_main()` function. Inside the sandbox, your agent can search 2.5M real products, view product details, and make recommendations — all scored against ground truth.
 
-Available tools: `find_product`, `view_product_information`, `recommend_product`
+Available tools (see [`src/agent/agent.py`](src/agent/agent.py) for full signatures):
+- `find_product` — search products by query, price range, shop, and service filters
+- `view_product_information` — get full details for one or more product IDs
+- `check_product_match` — verify a product against required attributes before recommending
+- `find_products_in_same_shop` — find multiple products all available from the same shop (shop/voucher tasks)
+- `calculate_voucher` — compute final price after a voucher discount and check budget fit
+- `recommend_product` — recommend one or more products to the user
+- `terminate` — end the dialogue once the task is complete or unsolvable
 
 **Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start) — build an agent, test locally with Docker, and submit to the network.
 
