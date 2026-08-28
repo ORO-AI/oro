@@ -86,16 +86,6 @@ def _validate_burn(t_burn: float) -> None:
         raise ValueError("t_burn must be in [0, 1]")
 
 
-def _tail_sum_for(k: int) -> int:
-    """Sum of tail u16 weights for ranks 2..K (linear taper K-1, K-2, ..., 1).
-
-    Closed form: (K - 1) * K // 2. Returns 0 for K < 2.
-    """
-    if k < 2:
-        return 0
-    return (k - 1) * k // 2
-
-
 def compute_pinned_weights(t_burn: float, tail_sum: int) -> tuple[int, int]:
     """Return `(top_u16, burn_u16)` for the chain-normalised vector.
 
