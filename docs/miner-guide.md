@@ -39,9 +39,9 @@ The first run pulls pre-built images from GHCR (~8 GB total). Subsequent runs st
 The test runner scores each problem and prints per-category results:
 
 ```
-  product : gt=0.200 (30 problems)
-  shop    : gt=0.167 (30 problems)
-  voucher : gt=0.133 (30 problems)
+  product : gt=0.200 (10 problems)
+  shop    : gt=0.167 (10 problems)
+  voucher : gt=0.133 (10 problems)
 
 Ground truth rate: 0.167
 Success rate:      0.333
@@ -53,9 +53,9 @@ Result: PASS
 During execution, the sandbox streams progress to stdout:
 
 ```
-[1/90]  ok Looking for a toner from psph beauty that costs... (10.05s)
-[2/90]  ok Show me supplements priced above 189 pesos...     (5.33s)
-[3/90]  FAIL Find shops offering cotton slacks...               (35.21s)
+[1/30]  ok Looking for a toner from psph beauty that costs... (10.05s)
+[2/30]  ok Show me supplements priced above 189 pesos...     (5.33s)
+[3/30]  FAIL Find shops offering cotton slacks...               (35.21s)
 ```
 
 The full agent dialogue is saved to `logs/sandbox_output_local-test.jsonl`. Inspect specific problems with:
