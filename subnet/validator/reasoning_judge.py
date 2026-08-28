@@ -27,17 +27,6 @@ _EMPTY_RESULT: Dict[str, Any] = {
     "reasoning_inf_failed": 0,
     "reasoning_inf_total": 0,
     "reasoning_inf_402": 0,
-    "reasoning_inf_402_in_flight": 0,
-    "reasoning_inf_402_credits": 0,
-    "reasoning_inf_403": 0,
-    "reasoning_judgment_status": "skipped",
-    "reasoning_failure_class": "missing_reasoning_result",
-}
-
-_IMMEDIATE_BREAKER_FAILURES = {
-    "insufficient_miner_credits",
-    "invalid_miner_credentials",
-    "miner_key_limit_exceeded",
 }
 
 
@@ -56,21 +45,13 @@ class ReasoningJudge:
         self._lock = threading.Lock()
         self._consecutive_failures = 0
         self._circuit_open = False
-        self._circuit_failure_class: str | None = None
 
     def score(self, dialogue: list, problem_id: str) -> Dict[str, Any]:
         """Return reasoning-fields dict to unpack into ProblemResult."""
         with self._lock:
             should_judge = bool(self._token and not self._circuit_open)
         if not should_judge:
-            result = dict(_EMPTY_RESULT)
-            if not self._token:
-                result["reasoning_failure_class"] = "judge_disabled"
-            else:
-                result["reasoning_failure_class"] = (
-                    self._circuit_failure_class or "circuit_breaker_skipped"
-                )
-            return result
+            return dict(_EMPTY_RESULT)
 
         try:
             from src.agent.reasoning_scorer import score_reasoning_quality
@@ -85,60 +66,43 @@ class ReasoningJudge:
             inf_failed = judge_result["inference_failed"]
             inf_total = judge_result["inference_total"]
             inf_402 = judge_result["inference_402"]
-            valid = judge_result["valid"]
-            failure_class = judge_result["failure_class"]
             with self._lock:
-                if failure_class in _IMMEDIATE_BREAKER_FAILURES:
+                # Only a confirmed OpenRouter payment_required response
+                # increments inference_402.
+                if inf_402 > 0:
                     self._circuit_open = True
-                    self._circuit_failure_class = failure_class
                     self._consecutive_failures = CIRCUIT_BREAKER_THRESHOLD
                     logging.error(
-                        "Reasoning judge circuit breaker tripped on %s at problem %s",
-                        failure_class,
-                        problem_id,
+                        f"Reasoning judge circuit breaker tripped on 402 "
+                        f"(miner out of credits) at problem {problem_id}"
                     )
-                elif not valid:
+                elif inf_total > 0 and inf_failed == inf_total:
                     self._consecutive_failures += 1
                     if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
                         self._circuit_open = True
-                        self._circuit_failure_class = (
-                            failure_class or "circuit_breaker_skipped"
-                        )
                         logging.error(
                             "Reasoning judge circuit breaker tripped: "
                             f"{CIRCUIT_BREAKER_THRESHOLD} consecutive problems "
                             "with 100% judge failure."
                         )
-                elif valid:
+                else:
                     self._consecutive_failures = 0
 
-            if valid:
-                logging.info(
-                    f"Reasoning score: {judge_result['score']:.2f} "
-                    f"(problem={problem_id}, model={judge_result['model']})"
-                )
-            else:
-                logging.warning(
-                    "No valid reasoning judgment for %s (%s)",
-                    problem_id,
-                    failure_class,
-                )
+            logging.info(
+                f"Reasoning score: {judge_result['score']:.2f} "
+                f"(problem={problem_id}, model={judge_result['model']})"
+            )
             return {
-                "reasoning_score": judge_result["score"] if valid else None,
+                # A real zero has a model; an empty model means every judge
+                # attempt failed and must not become a score sample.
+                "reasoning_score": (
+                    judge_result["score"] if judge_result["model"] else None
+                ),
                 "reasoning_explanation": judge_result["explanation"],
                 "reasoning_model": judge_result["model"],
                 "reasoning_inf_failed": inf_failed,
                 "reasoning_inf_total": inf_total,
                 "reasoning_inf_402": inf_402,
-                "reasoning_inf_402_in_flight": judge_result[
-                    "inference_402_in_flight"
-                ],
-                "reasoning_inf_402_credits": judge_result[
-                    "inference_402_credits"
-                ],
-                "reasoning_inf_403": judge_result["inference_403"],
-                "reasoning_judgment_status": "valid" if valid else "failed",
-                "reasoning_failure_class": failure_class,
             }
         except Exception as e:
             logging.warning(f"Reasoning judge failed for {problem_id}: {e}")
@@ -146,11 +110,7 @@ class ReasoningJudge:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
                     self._circuit_open = True
-                    self._circuit_failure_class = "judge_exception"
                     logging.error(
                         "Reasoning judge circuit breaker tripped after exceptions."
                     )
-            result = dict(_EMPTY_RESULT)
-            result["reasoning_judgment_status"] = "failed"
-            result["reasoning_failure_class"] = "judge_exception"
-            return result
+            return dict(_EMPTY_RESULT)

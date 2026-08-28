@@ -554,21 +554,12 @@ class BackendClient:
                 sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
             )
         else:
-            from oro_sdk.models.complete_run_request_score_components_type_0 import (
-                CompleteRunRequestScoreComponentsType0,
-            )
-
-            diagnostics = (
-                CompleteRunRequestScoreComponentsType0.from_dict(score_components)
-                if score_components
-                else UNSET
-            )
+            # For FAILED/TIMED_OUT, include failure reason
             request_body = CompleteRunRequest(
                 terminal_status=status,
                 results_s3_key=results_s3_key if results_s3_key else UNSET,
                 failure_reason=failure_reason if failure_reason else UNSET,
                 sandbox_metadata=sandbox_metadata if sandbox_metadata else UNSET,
-                score_components=diagnostics,
             )
 
         return self._call_api(

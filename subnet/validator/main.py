@@ -39,7 +39,7 @@ from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
-from .progress_reporter import ProgressReporter, reasoning_coverage_failure_reason
+from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
 from .models import CompletionRequest
@@ -972,7 +972,7 @@ class Validator:
             # Step 4b: Get reasoning data (judged per-problem during scoring)
             reasoning_result = progress_reporter.get_reasoning_data()
 
-            failure_reason = reasoning_coverage_failure_reason(reasoning_result)
+            failure_reason = progress_reporter.get_reasoning_failure_reason()
             if failure_reason is not None:
                 logging.warning(f"Completing as FAILED: {failure_reason}")
                 self._complete_with_failure(
@@ -980,7 +980,6 @@ class Validator:
                     TerminalStatus.FAILED,
                     failure_reason,
                     sandbox_metadata=sandbox_metadata,
-                    score_components=dict(reasoning_result),
                 )
                 return
 
@@ -1347,7 +1346,6 @@ class Validator:
         status: TerminalStatus,
         reason: str,
         sandbox_metadata: Optional[SandboxMetadata] = None,
-        score_components: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Report a failed evaluation to Backend, with retry queue fallback.
 
@@ -1356,7 +1354,6 @@ class Validator:
             status: Terminal status (TerminalStatus enum).
             reason: Failure reason for logging.
             sandbox_metadata: Optional sandbox execution metadata.
-            score_components: Optional non-authoritative failure diagnostics.
         """
         logging.error(f"Evaluation {eval_run_id} failed: {reason}")
         logging.info(f"Reporting failure to Backend with status={status.value}...")
@@ -1366,7 +1363,6 @@ class Validator:
                 status=status,
                 failure_reason=reason,
                 sandbox_metadata=sandbox_metadata,
-                score_components=score_components,
             )
             logging.info(
                 f"Successfully completed failed run {eval_run_id}: "
@@ -1389,7 +1385,6 @@ class Validator:
                         status=status,
                         failure_reason=reason,
                         sandbox_metadata=sandbox_metadata,
-                        score_components=score_components,
                     )
                 )
             else:
