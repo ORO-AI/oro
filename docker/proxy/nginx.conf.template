@@ -31,6 +31,14 @@ http {
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
+    # Return 429 (Too Many Requests) instead of the nginx default 503 when an
+    # agent bursts past the cap. 503 misleads agent authors — it reads as
+    # "server broken" so agents either give up or spam-retry with no backoff.
+    # 429 is the correct HTTP semantic for a client-side rate breach and lets
+    # a well-behaved agent add jitter/backoff without polluting real 5xx
+    # dashboards.
+    limit_req_status 429;
+
     # Combined access log + upstream metadata + per-request outcome label.
     # `$upstream_status` propagates the upstream HTTP status when a parent
     # location uses `proxy_pass` (e.g. /search/*) but stays `-` when the
