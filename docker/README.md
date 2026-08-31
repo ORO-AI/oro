@@ -42,7 +42,7 @@ The Dockerfile assumes the indexes are already built and copies them into the im
 To build the image:
 
 ```bash
-docker-compose build search-server
+docker compose build search-server
 ```
 
 Or build directly:
@@ -56,7 +56,7 @@ docker build -f docker/search-server/Dockerfile -t shoppingbench-search-server .
 - No `documents.jsonl` is needed at code-layer build time (all data is in the base image's index and sidecar)
 - Build is fast since it skips index building (~3.1GB copy vs minutes of indexing)
 - Docker automatically caches image layers - subsequent builds will be much faster if only code or indexes change
-- Images built locally persist and are automatically reused by `docker-compose` (no need to rebuild if images already exist)
+- Images built locally persist and are automatically reused by `docker compose` (no need to rebuild if images already exist)
 
 ### Running the Service
 
@@ -64,13 +64,13 @@ docker build -f docker/search-server/Dockerfile -t shoppingbench-search-server .
 
 ```bash
 # Start the service
-docker-compose up -d search-server
+docker compose up -d search-server
 
 # View logs
-docker-compose logs -f search-server
+docker compose logs -f search-server
 
 # Stop the service
-docker-compose down
+docker compose down
 ```
 
 #### Using Docker directly
@@ -159,7 +159,7 @@ Other services in the same Docker network can access it using the service name.
 View logs:
 ```bash
 # Docker Compose
-docker-compose logs -f search-server
+docker compose logs -f search-server
 
 # Docker
 docker logs -f shoppingbench-search-server
@@ -175,7 +175,7 @@ Docker automatically caches image layers, which significantly speeds up rebuilds
 
 - **Layer caching**: Docker caches each layer (instruction) in the Dockerfile
 - **Cache invalidation**: If a layer changes, all subsequent layers are rebuilt
-- **Automatic reuse**: `docker-compose` automatically uses cached images if they exist
+- **Automatic reuse**: `docker compose` automatically uses cached images if they exist
 
 ### Optimizing Build Times
 
@@ -194,8 +194,8 @@ If you've built images before, Docker will automatically reuse them:
 # Check if images exist
 docker images | grep shoppingbench
 
-# Images are automatically reused by docker-compose
-docker-compose up -d  # Uses cached images if available
+# Images are automatically reused by docker compose
+docker compose up -d  # Uses cached images if available
 ```
 
 ### Clearing Caches
@@ -242,13 +242,13 @@ Bridge Network (default, has internet)
 
 ```bash
 # Build proxy image
-docker-compose build proxy
+docker compose build proxy
 
 # Start proxy (requires search-server to be running)
-docker-compose up -d proxy
+docker compose up -d proxy
 
 # View logs
-docker-compose logs -f proxy
+docker compose logs -f proxy
 ```
 
 ### Environment Variables
