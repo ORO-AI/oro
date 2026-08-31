@@ -969,19 +969,10 @@ class Validator:
 
             success_rate = aggregate.get("success_rate", 0.0)
 
-            # Step 4b: Get reasoning data (judged per-problem during scoring)
+            # Step 4b: Get reasoning data (judged per-problem during scoring).
+            # Missing/failed judgments count as 0; incomplete coverage never
+            # fails the run (the reasoning judge is being retired).
             reasoning_result = progress_reporter.get_reasoning_data()
-
-            failure_reason = progress_reporter.get_reasoning_failure_reason()
-            if failure_reason is not None:
-                logging.warning(f"Completing as FAILED: {failure_reason}")
-                self._complete_with_failure(
-                    eval_run_id,
-                    TerminalStatus.FAILED,
-                    failure_reason,
-                    sandbox_metadata=sandbox_metadata,
-                )
-                return
 
             score = blend_final_score(
                 success_rate, reasoning_result["reasoning_quality"]

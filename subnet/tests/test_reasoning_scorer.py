@@ -1,5 +1,6 @@
 """Tests for reasoning quality scoring via LLM judge."""
 
+import logging
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -364,6 +365,21 @@ class TestScoreReasoningQuality:
         assert result["inference_failed"] == 1
         assert result["inference_total"] == 1
         assert mock_post.call_count == 1
+
+    @patch("reasoning_scorer.time.sleep")
+    @patch("reasoning_scorer.requests.post")
+    def test_payment_required_402_logs_reason(self, mock_post, _mock_sleep, caplog):
+        """Out-of-credits 402 must be logged, not silently swallowed."""
+        response = MagicMock(status_code=402)
+        response.json.return_value = {
+            "error": {"metadata": {"error_type": "payment_required"}}
+        }
+        mock_post.return_value = response
+
+        with caplog.at_level(logging.INFO):
+            score_reasoning_quality(REASONING_AGENT, api_key="test-key")
+
+        assert "payment_required" in caplog.text
 
     @patch("reasoning_scorer.time.sleep")
     @patch("reasoning_scorer.requests.post")

@@ -711,9 +711,10 @@ def score_reasoning_quality(
                 metadata = _openrouter_error_metadata(resp)
                 if metadata.get("reason") == "in_flight_requests":
                     logger.warning(
-                        "Judge 402 in-flight reservation with %s; retrying "
+                        "Judge 402 in-flight reservation with %s (%s); retrying "
                         "(attempt %s/%s)",
                         model,
+                        metadata,
                         attempt + 1,
                         max_retries,
                     )
@@ -721,14 +722,21 @@ def score_reasoning_quality(
                     continue
 
                 if metadata.get("error_type") == "payment_required":
+                    logger.warning(
+                        "Judge 402 payment_required (miner out of credits) with "
+                        "%s (%s); scoring this trajectory as unjudged",
+                        model,
+                        metadata,
+                    )
                     inference_402 += 1
                     return {**empty, "inference_failed": inference_failed, "inference_total": inference_total, "inference_402": inference_402}
 
                 # Unknown 402s may be transient billing infrastructure failures.
                 logger.warning(
-                    "Judge returned unclassified 402 with %s; retrying "
+                    "Judge returned unclassified 402 with %s (%s); retrying "
                     "(attempt %s/%s)",
                     model,
+                    metadata,
                     attempt + 1,
                     max_retries,
                 )
