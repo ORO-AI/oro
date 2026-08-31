@@ -174,13 +174,18 @@ class ProgressReporter:
     def get_reasoning_data(self) -> ReasoningSummary:
         """Return aggregate reasoning metrics for run-level score_components.
 
-        Per-problem reasoning data is now sent via progress reports.
-        This method returns only the summary fields needed at run completion.
+        Per-problem reasoning data is now sent via progress reports. This method
+        returns only the summary fields needed at run completion. A missing or
+        failed per-problem judgment counts as 0: the average is over expected
+        trajectories, not just the judged ones. Incomplete coverage never blocks
+        the run.
         """
         with self._lock:
-            results = list(self._results.values())
+            expected = [
+                r for r in self._results.values() if r.reasoning_judgment_expected
+            ]
 
-        if not results:
+        if not expected:
             return {
                 "reasoning_quality": 0.0,
                 "reasoning_coefficient": reasoning_coefficient(0.0),
@@ -189,49 +194,22 @@ class ProgressReporter:
                 "judge_inference_402": 0,
             }
 
-        expected_results = [r for r in results if r.reasoning_judgment_expected]
-        judged = [r for r in expected_results if r.reasoning_score is not None]
-        complete = len(judged) == len(expected_results)
-        total_score = sum(r.reasoning_score for r in judged)
-        avg = round(total_score / len(judged), 4) if complete and judged else 0.0
+        judged = [r for r in expected if r.reasoning_score is not None]
+        avg = round(sum(r.reasoning_score for r in judged) / len(expected), 4)
         coeff = reasoning_coefficient(avg)
-        total_inf_failed = sum(r.reasoning_inf_failed for r in expected_results)
-        total_inf_total = sum(r.reasoning_inf_total for r in expected_results)
-        total_inf_402 = sum(r.reasoning_inf_402 for r in expected_results)
 
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
-            f"({len(judged)}/{len(expected_results)} problems judged)"
+            f"({len(judged)}/{len(expected)} problems judged)"
         )
 
         return {
             "reasoning_quality": avg,
             "reasoning_coefficient": coeff,
-            "judge_inference_failed": total_inf_failed,
-            "judge_inference_total": total_inf_total,
-            "judge_inference_402": total_inf_402,
+            "judge_inference_failed": sum(r.reasoning_inf_failed for r in expected),
+            "judge_inference_total": sum(r.reasoning_inf_total for r in expected),
+            "judge_inference_402": sum(r.reasoning_inf_402 for r in expected),
         }
-
-    def get_reasoning_failure_reason(self) -> str | None:
-        """Fail closed unless every scorable trajectory has a judgment."""
-        with self._lock:
-            expected = [
-                result
-                for result in self._results.values()
-                if result.reasoning_judgment_expected
-            ]
-        judged = sum(result.reasoning_score is not None for result in expected)
-        if judged == len(expected):
-            return None
-        if any(result.reasoning_inf_402 for result in expected):
-            return (
-                "Reasoning judge insufficient miner credits "
-                f"({judged}/{len(expected)} problems judged)"
-            )
-        return (
-            "Reasoning judge infrastructure failure "
-            f"({judged}/{len(expected)} problems judged)"
-        )
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:
         """Return the status for a scored problem."""
