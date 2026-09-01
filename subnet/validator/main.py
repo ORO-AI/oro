@@ -401,7 +401,7 @@ class Validator:
         log_cmd = [
             arg.split("=")[0] + "=***"
             if any(
-                s in arg for s in ("CHUTES_ACCESS_TOKEN=", "INFERENCE_ACCESS_TOKEN=")
+                s in arg for s in ("INFERENCE_ACCESS_TOKEN=",)
             )
             else arg
             for arg in cmd
