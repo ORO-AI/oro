@@ -177,7 +177,7 @@ class ProxyClient:
             retry_delay: Base delay between retries in seconds (doubled each attempt)
             rate_limit_retry_delay: Base delay for 429 retries in seconds (doubled each
                 attempt). Longer than retry_delay since rate limits need more time to clear.
-            api_key: API key for inference requests (defaults to CHUTES_ACCESS_TOKEN env var).
+            api_key: API key for inference requests (defaults to INFERENCE_ACCESS_TOKEN env var).
                 When set, inference POST requests include an Authorization header.
         """
         self.proxy_url = proxy_url or os.getenv("SANDBOX_PROXY_URL", "http://proxy:80")
@@ -185,7 +185,7 @@ class ProxyClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_retry_delay = rate_limit_retry_delay
-        self.api_key = api_key or os.getenv("CHUTES_ACCESS_TOKEN")
+        self.api_key = api_key or os.getenv("INFERENCE_ACCESS_TOKEN")
         stats_file = os.environ.get(
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
