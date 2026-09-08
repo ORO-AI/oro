@@ -4,6 +4,7 @@ import json
 import os
 import random
 import subprocess
+import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -245,6 +246,17 @@ class Validator:
         )
         # Adds subtensor specific arguments.
         Subtensor.add_args(parser)
+        # bittensor's chain_endpoint flag has no env-var default (unlike our
+        # own knobs above). Docker-compose can't emit `--subtensor.chain_endpoint`
+        # conditionally in a YAML list, and passing the flag with an empty
+        # value makes bittensor route to `("unknown", "")` and crash on connect
+        # (see `bittensor.utils.determine_chain_endpoint_and_network`), so
+        # inject it into argv here only when the env var is non-empty. Lets
+        # validators point at a private subtensor RPC via `.env` without
+        # inheriting the shared foundation-finney 429s.
+        endpoint = (os.environ.get("SUBTENSOR_CHAIN_ENDPOINT") or "").strip()
+        if endpoint and "--subtensor.chain_endpoint" not in sys.argv:
+            sys.argv.extend(["--subtensor.chain_endpoint", endpoint])
         # Adds logging specific arguments.
         logging.add_args(parser)
         # Adds wallet specific arguments.

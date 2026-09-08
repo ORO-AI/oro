@@ -149,6 +149,11 @@ services:
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-15}
       - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
+      # Optional private subtensor RPC. When set, wins over SUBTENSOR_NETWORK
+      # so validators can point at their own node and avoid the shared
+      # foundation-finney 429s. Empty = fall back to the network's default
+      # public endpoint via bittensor's network→endpoint resolver.
+      - SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
