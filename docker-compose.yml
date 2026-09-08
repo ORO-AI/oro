@@ -175,21 +175,15 @@ services:
       # at process start (numeric, 0.1 ≤ v ≤ 30.0) — invalid values fail
       # the container fast rather than silently poisoning eval runs.
       - ORO_TOKEN_401_BACKOFF_BASE=${ORO_TOKEN_401_BACKOFF_BASE:-}
-    # Shell form so `--subtensor.chain_endpoint` only appears when
-    # SUBTENSOR_CHAIN_ENDPOINT is set. bittensor rejects the flag if the
-    # value is empty (it doesn't degrade to network resolution), and a YAML
-    # list can't carry a conditional item, so we override entrypoint to
-    # `sh -c` and let compose's ${VAR:+…} interpolation drop the whole flag
-    # when the env var is unset.
-    entrypoint: ["sh", "-c"]
     command:
-      - >
-        exec .venv/bin/python -m subnet.validator.main
-        --wallet.name "${WALLET_NAME:-default}"
-        --wallet.hotkey "${WALLET_HOTKEY:-default}"
-        --netuid "${NETUID:-15}"
-        --subtensor.network "${SUBTENSOR_NETWORK:-finney}"
-        ${SUBTENSOR_CHAIN_ENDPOINT:+--subtensor.chain_endpoint "${SUBTENSOR_CHAIN_ENDPOINT}"}
+      - "--wallet.name"
+      - "${WALLET_NAME:-default}"
+      - "--wallet.hotkey"
+      - "${WALLET_HOTKEY:-default}"
+      - "--netuid"
+      - "${NETUID:-15}"
+      - "--subtensor.network"
+      - "${SUBTENSOR_NETWORK:-finney}"
     dns:
       - 8.8.8.8
       - 1.1.1.1
