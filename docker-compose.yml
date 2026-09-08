@@ -149,6 +149,11 @@ services:
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-15}
       - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
+      # Optional private subtensor RPC. When set, wins over SUBTENSOR_NETWORK
+      # so validators can point at their own node and avoid the shared
+      # foundation-finney 429s. Empty = fall back to the network's default
+      # public endpoint via bittensor's network→endpoint resolver.
+      - SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
@@ -170,15 +175,21 @@ services:
       # at process start (numeric, 0.1 ≤ v ≤ 30.0) — invalid values fail
       # the container fast rather than silently poisoning eval runs.
       - ORO_TOKEN_401_BACKOFF_BASE=${ORO_TOKEN_401_BACKOFF_BASE:-}
+    # Shell form so `--subtensor.chain_endpoint` only appears when
+    # SUBTENSOR_CHAIN_ENDPOINT is set. bittensor rejects the flag if the
+    # value is empty (it doesn't degrade to network resolution), and a YAML
+    # list can't carry a conditional item, so we override entrypoint to
+    # `sh -c` and let compose's ${VAR:+…} interpolation drop the whole flag
+    # when the env var is unset.
+    entrypoint: ["sh", "-c"]
     command:
-      - "--wallet.name"
-      - "${WALLET_NAME:-default}"
-      - "--wallet.hotkey"
-      - "${WALLET_HOTKEY:-default}"
-      - "--netuid"
-      - "${NETUID:-15}"
-      - "--subtensor.network"
-      - "${SUBTENSOR_NETWORK:-finney}"
+      - >
+        exec .venv/bin/python -m subnet.validator.main
+        --wallet.name "${WALLET_NAME:-default}"
+        --wallet.hotkey "${WALLET_HOTKEY:-default}"
+        --netuid "${NETUID:-15}"
+        --subtensor.network "${SUBTENSOR_NETWORK:-finney}"
+        ${SUBTENSOR_CHAIN_ENDPOINT:+--subtensor.chain_endpoint "${SUBTENSOR_CHAIN_ENDPOINT}"}
     dns:
       - 8.8.8.8
       - 1.1.1.1
