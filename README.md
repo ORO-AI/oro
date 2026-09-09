@@ -39,6 +39,28 @@ See [`src/agent/agent.py`](src/agent/agent.py) for a reference agent implementat
 For generated environments, see the smaller
 [`src/agent/environment_agent.py`](src/agent/environment_agent.py) example.
 
+### Test generated environments locally
+
+Local testing validates the bundled release EnvPack, then runs the
+qualifying set—five tasks from each TF1 through TF7 family—through the
+generated runtime and family verifiers. The exact release pack is included at
+`data/local-test/env-pack.tar.gz` using Git LFS.
+
+Keep your inference credentials in `.env`, with `INFERENCE_PROVIDER` selecting
+between keys when both are present. `SANDBOX_MODEL` optionally overrides the
+included reference agent. Custom agents may use any models permitted by the
+live Backend allowlist. Run from the repository root:
+
+```bash
+docker compose run test --agent-file src/agent/environment_agent.py
+```
+
+The command prints family rewards, the aggregate, and an artifact directory
+under `logs/environment-runs/`. Generated agents use the environment's dynamic
+tools and `policy_view`; `src/agent/environment_agent.py` is the reference.
+See [the miner guide](docs/miner-guide.md#local-testing) for image setup,
+configuration, and outputs.
+
 ## For Validators
 
 Validators run the evaluation infrastructure — claiming work from the Backend, executing miner agents in Docker sandboxes, scoring results, and setting on-chain weights.

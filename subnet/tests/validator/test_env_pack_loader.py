@@ -16,7 +16,11 @@ import httpx
 import pytest
 
 from validator import env_pack_loader
-from validator.env_pack_loader import fetch_and_validate_pack
+from validator.env_pack_loader import (
+    PackValidationError,
+    fetch_and_validate_pack,
+    load_local_pack,
+)
 
 pytest_plugins = ("tests.compat_fixture",)
 
@@ -40,6 +44,7 @@ def _task_row() -> dict:
         "runtime": {"max_steps": 30},
         "task": {
             "seed": 1,
+            "catalog_epoch": "test-catalog",
             "family": "retrieval_recall",
             "family_payload": {},
             "goal_text": "Find the requested product.",
@@ -56,7 +61,13 @@ def _task_row() -> dict:
 
 def _archive_bytes() -> bytes:
     files = {
-        "epoch/manifest.json": json.dumps({"pack_version": "test"}).encode(),
+        "epoch/manifest.json": json.dumps(
+            {
+                "pack_version": "test",
+                "catalog_fingerprint": "1" * 64,
+                "search": {"index_sha256": "2" * 64},
+            }
+        ).encode(),
         "epoch/data/tasks/private_tasks.jsonl": (
             json.dumps(_task_row(), sort_keys=True) + "\n"
         ).encode(),
@@ -69,6 +80,57 @@ def _archive_bytes() -> bytes:
             info.mtime = 0
             archive.addfile(info, io.BytesIO(payload))
     return output.getvalue()
+
+
+def test_loads_local_pack_and_derives_digest_when_not_supplied(tmp_path: Path) -> None:
+    artifact = _archive_bytes()
+    archive_path = tmp_path / "pack.tar.gz"
+    archive_path.write_bytes(artifact)
+
+    loaded = load_local_pack(archive_path, scratch_root=tmp_path / "scratch")
+
+    try:
+        assert loaded.pack_sha256 == hashlib.sha256(artifact).hexdigest()
+        assert loaded.task_ids == ["TF2-retrieval_recall-1"]
+        assert loaded.metadata["task_count"] == 1
+        assert loaded.metadata["family_counts"] == {"retrieval_recall": 1}
+        assert loaded.metadata["catalog_epoch"] == "test-catalog"
+        assert loaded.metadata["catalog_sha256"] == "1" * 64
+        assert loaded.metadata["search_index_epoch"] is None
+        assert loaded.metadata["search_index_sha256"] == "2" * 64
+    finally:
+        loaded.close()
+
+
+def test_local_pack_rejects_wrong_optional_digest(tmp_path: Path) -> None:
+    archive_path = tmp_path / "pack.tar.gz"
+    archive_path.write_bytes(_archive_bytes())
+
+    with pytest.raises(PackValidationError, match="artifact sha256 mismatch"):
+        load_local_pack(
+            archive_path,
+            "0" * 64,
+            scratch_root=tmp_path / "scratch",
+        )
+
+
+def test_local_pack_removes_scratch_data_when_validation_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "pack.tar.gz"
+    archive_path.write_bytes(_archive_bytes())
+    scratch_root = tmp_path / "scratch"
+    monkeypatch.setattr(
+        env_pack_loader,
+        "validate_epoch",
+        lambda _pack_dir: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        load_local_pack(archive_path, scratch_root=scratch_root)
+
+    assert list(scratch_root.iterdir()) == []
 
 
 def _metadata(pack_sha256: str, artifact: bytes, **updates: object) -> dict:
@@ -212,7 +274,7 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
     assert loaded is not None
     assert loaded.pack_sha256 == pack_sha256
     assert loaded.pack_dir.name == "epoch"
-    assert loaded.manifest == {"pack_version": "test"}
+    assert loaded.manifest["pack_version"] == "test"
     assert loaded.task_ids == ["TF2-retrieval_recall-1"]
     assert loaded.task_specs[0].family == "retrieval_recall"
     assert requests[0].headers["X-Hotkey"] == "test-hotkey"

@@ -11,11 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-
-from oro_env_runtime.schema import Event, LedgerEntry
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION
-from validator.episode_emitter import replay_ledger
+from oro_env_runtime.schema import Event, LedgerEntry
 from validator.env_pack_loader import LoadedPack
+from validator.episode_emitter import replay_ledger
 from validator.session_registry import (
     HarnessExecutionError,
     HarnessTimeoutError,
@@ -71,12 +70,15 @@ def _call_envelope(
     }
 
 
+@pytest.mark.parametrize("proxy_url", ["http://proxy:80", "http://127.0.0.1:80"])
 def test_default_simulator_uses_the_miner_funded_proxy(
     loaded_pack: LoadedPack,
+    proxy_url: str,
 ) -> None:
     with SessionRegistry(
         loaded_pack,
         inference_access_token="miner-token",
+        simulator_proxy_url=proxy_url,
     ) as registry:
         _start(registry)
         session = registry._sessions["session-1"].session
@@ -85,6 +87,7 @@ def test_default_simulator_uses_the_miner_funded_proxy(
         assert simulator.model == session.model_roles["user_simulator"]
         assert simulator._completion is registry._simulator_completion
         assert registry._simulator_completion._client.api_key == "miner-token"
+        assert registry._simulator_completion._client.proxy_url == proxy_url
 
 
 def test_default_simulator_evidence_is_private_and_persisted(
@@ -355,7 +358,7 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
     signals: list[dict | None] = []
 
     class Simulator:
-        async def respond(self, transcript, signal):  # noqa: ANN001, ANN201
+        async def respond(self, transcript, signal):
             signals.append(signal)
             if signal is not None:
                 return {"action": "no_op", "content": "", "reason": "chose_no_op"}
@@ -369,10 +372,13 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
                 "reason": "spoke",
             }
 
-        def ensure_react(self, _decision, _signal):  # noqa: ANN001, ANN201
+        def ensure_react(self, _decision, signal):
             return {
                 "action": "react_to_event",
-                "content": "please find another option",
+                "content": (
+                    f"price changed to {signal['new_price']:.2f} "
+                    f"{signal['currency']}"
+                ),
                 "reason": "forced_event_notice",
             }
 
@@ -435,8 +441,10 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
         state = registry._sessions["session-1"]
         state.session.env.applied_events.append(
             Event(
-                kind="stockout",
+                kind="price_change",
                 target=state.session.task.gold_set[0],
+                old_price=10.0,
+                new_price=12.0,
                 currency=state.session.task.hard.currency,
             )
         )
@@ -449,11 +457,17 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
                 turn=2,
             )
         )
-        assert signals[-1]["kind"] == "stockout"
-        assert event_response["user_message"] == {
-            "content": "please find another option"
+        expected_signal = {
+            "kind": "price_change",
+            "old_price": 10.0,
+            "new_price": 12.0,
+            "currency": state.session.task.hard.currency,
         }
-        assert state.session.env.ledger.last().payload["env_signal"]["kind"] == "stockout"
+        assert signals[-1] == expected_signal
+        assert event_response["user_message"] == {
+            "content": f"price changed to 12.00 {state.session.task.hard.currency}"
+        }
+        assert state.session.env.ledger.last().payload["env_signal"] == expected_signal
 
 
 def test_shopper_reply_is_delivered_for_every_retained_family(

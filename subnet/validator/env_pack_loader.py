@@ -364,6 +364,82 @@ def _load_validated_contents(
     return pack_dir, manifest, task_specs, task_ids, cache_hit
 
 
+def load_local_pack(
+    archive_path: str | Path,
+    expected_sha256: str | None = None,
+    *,
+    scratch_root: str | Path | None = None,
+) -> LoadedPack:
+    """Validate and load a sealed pack already present on the local host."""
+
+    source = Path(archive_path)
+    if not source.is_file():
+        raise PackValidationError(f"local pack does not exist: {source}")
+    if expected_sha256 is not None and not _SHA256_RE.fullmatch(expected_sha256):
+        raise PackValidationError("expected_sha256 must be 64 lowercase hex characters")
+
+    actual_sha256 = sha256_file(source)
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
+        raise PackValidationError(
+            f"artifact sha256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+
+    scratch_parent = None if scratch_root is None else Path(scratch_root)
+    if scratch_parent is not None:
+        scratch_parent.mkdir(parents=True, exist_ok=True)
+    scratch_dir = Path(
+        tempfile.mkdtemp(prefix=f"oro-pack-{actual_sha256[:12]}-", dir=scratch_parent)
+    )
+    try:
+        pack_dir = _safe_extract(source, scratch_dir)
+        validation = validate_epoch(pack_dir)
+        if validation.get("status") != "pass":
+            detail = json.dumps(validation, sort_keys=True, separators=(",", ":"))
+            raise PackValidationError(f"sealed epoch validation failed: {detail}")
+
+        manifest = json.loads((pack_dir / "manifest.json").read_text())
+        rows = [
+            json.loads(line)
+            for line in (pack_dir / "data" / "tasks" / "private_tasks.jsonl")
+            .read_text()
+            .splitlines()
+            if line.strip()
+        ]
+        task_specs = [TaskSpec.model_validate(row["task"]) for row in rows]
+        task_ids = [str(row["task_id"]) for row in rows]
+        family_counts = Counter(task.family for task in task_specs)
+        catalog_epochs = {task.catalog_epoch for task in task_specs}
+        catalog_epoch = next(iter(catalog_epochs)) if len(catalog_epochs) == 1 else None
+        search = manifest.get("search")
+        metadata = {
+            "pack_sha256": actual_sha256,
+            "artifact_size_bytes": source.stat().st_size,
+            "task_count": len(task_specs),
+            "family_counts": dict(family_counts),
+            **PACK_VERSION_IDENTITIES,
+            "catalog_epoch": catalog_epoch,
+            "catalog_sha256": manifest.get("catalog_fingerprint"),
+            "search_index_epoch": None,
+            "search_index_sha256": (
+                search.get("index_sha256") if isinstance(search, dict) else None
+            ),
+        }
+        cache_validated_epoch(pack_dir)
+        return LoadedPack(
+            pack_dir=pack_dir,
+            manifest=manifest,
+            task_specs=task_specs,
+            task_ids=task_ids,
+            pack_sha256=actual_sha256,
+            metadata=metadata,
+            _scratch_dir=scratch_dir,
+        )
+    except BaseException:
+        evict_epoch_resources(scratch_dir / "epoch")
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        raise
+
+
 async def fetch_and_validate_pack(
     pack_sha256: str,
     backend_url: str,
@@ -538,4 +614,5 @@ __all__ = [
     "LoadedPack",
     "PackValidationError",
     "fetch_and_validate_pack",
+    "load_local_pack",
 ]

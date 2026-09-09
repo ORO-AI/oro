@@ -9,19 +9,63 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from subnet.sandbox import build_sandbox_command
 from tests.integration.conftest import (
-    exec_in_container,
-    SEARCH_SERVER_CONTAINER,
     PROXY_CONTAINER,
+    SEARCH_SERVER_CONTAINER,
     SESSION_RUNTIME_CONTAINER,
-    is_container_running,
+    exec_in_container,
     get_container_health,
+    is_container_running,
 )
 
 
 class TestSandboxIsolation:
     """Tests for sandbox network isolation."""
+
+    def test_generated_artifact_mounts_are_readonly(self, tmp_path):
+        tmp_path.chmod(0o755)
+        output_dir = tmp_path / "sandbox"
+        output_dir.mkdir(mode=0o777)
+        output_dir.chmod(0o777)
+        inputs = {
+            "problems.jsonl": json.dumps(
+                {"problem_id": "artifact-probe", "query": "Probe artifact mounts"}
+            )
+            + "\n",
+            "environment_sessions.json": '{"sessions": []}\n',
+            "summary.json": '{"status": "running"}\n',
+            "episode_results.jsonl": '{"trusted": true}\n',
+        }
+        for name, content in inputs.items():
+            path = tmp_path / name
+            path.write_text(content)
+            path.chmod(0o666)
+        command = build_sandbox_command(
+            agent_host_path=str(
+                Path("tests/integration/hostile_artifact_agent.py").resolve()
+            ),
+            logs_host_path=str(tmp_path),
+            output_host_path=str(output_dir),
+            problem_file_arg="/app/logs/problems.jsonl",
+            output_path="/app/output/sandbox_output.jsonl",
+            image=os.getenv(
+                "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
+            ),
+            network="none",
+            max_workers=1,
+            timeout=30,
+        )
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=60, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        row = json.loads((output_dir / "sandbox_output.jsonl").read_text())
+        assert row["status"] == "SUCCESS"
+        report = row["dialogue"][0]["artifact_isolation"]
+        assert len(report) == 9 and all(report.values()), report
+        assert {name: (tmp_path / name).read_text() for name in inputs} == inputs
 
     def test_required_containers_running(self):
         """Test that required containers are running."""

@@ -272,18 +272,41 @@ services:
       - main
     restart: unless-stopped
 
-  # Local testing — run agent against test problems, print score, exit
+  # Local generated evaluation, using the existing miner command and .env.
+  test-search-server:
+    # Use the same promoted image as production validators. Runtime preflight
+    # still verifies that its immutable index identity matches the bundled pack.
+    image: ${LOCAL_SEARCH_SERVER_IMAGE:-ghcr.io/oro-ai/oro/search-server:stable}
+    profiles:
+      - test
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5632
+      - SEARCH_WORKERS=${SEARCH_WORKERS:-}
+      - SEARCH_THREADS=${SEARCH_THREADS:-4}
+      - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5632/health').read()\""]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - main
+    restart: unless-stopped
+
   test:
     image: ghcr.io/oro-ai/oro/validator:${IMAGE_TAG:-stable}
+    pull_policy: build
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
     profiles:
       - test
     depends_on:
-      search-server:
+      test-search-server:
         condition: service_healthy
-      proxy:
+      test-proxy:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -291,18 +314,53 @@ services:
       - ./logs:/app/logs
     environment:
       - HOST_PROJECT_DIR=${PWD}
+      - PYTHONPATH=/workspace:/app
+      - LOCAL_OUTPUT_ROOT=/app/logs/environment-runs
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:${IMAGE_TAG:-stable}}
-      - SANDBOX_NETWORK=sandbox-network
+      - SANDBOX_NETWORK=${COMPOSE_PROJECT_NAME:-shoppingbench}-test-sandbox
+      - SANDBOX_MODEL=${SANDBOX_MODEL:-deepseek-ai/DeepSeek-V3.2-TEE}
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INFERENCE_PROVIDER=${INFERENCE_PROVIDER:-}
-      # Opt-in shadow scoring (mirrors the validator service).
-      - SHADOW_SCORE_MODEL=${SHADOW_SCORE_MODEL:-}
-    # Use the venv interpreter — bare `python` is the system Python and
-    # has no project dependencies installed (e.g. `requests`).
-    entrypoint: [".venv/bin/python", "-m", "subnet.test_runner"]
+      - LOCAL_ENV_PACK_PATH=${LOCAL_ENV_PACK_PATH:-/workspace/data/local-test/env-pack.tar.gz}
+      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-}
+      - LOCAL_MAX_WORKERS=${LOCAL_MAX_WORKERS:-7}
+      - LOCAL_TIMEOUT=${LOCAL_TIMEOUT:-1800}
+      - SEARCH_SERVER_URL=http://test-search-server:5632
+    working_dir: /workspace
+    entrypoint: ["/app/.venv/bin/python", "-m", "subnet.local_generated_validator"]
+    # Compose run omits service aliases. Sharing the local proxy's network
+    # namespace lets it reach this run's session server on loopback.
+    network_mode: service:test-proxy
+    restart: "no"
+
+  test-proxy:
+    image: ghcr.io/oro-ai/oro/proxy:${IMAGE_TAG:-stable}
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    profiles:
+      - test
+    environment:
+      - SEARCH_SERVER_URL=test-search-server
+      - SEARCH_SERVER_PORT=5632
+      - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
+      - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
+      - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
+      - SESSION_RUNTIME_HOST=127.0.0.1
+      - SESSION_RUNTIME_PORT=9101
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
-      - main
+      main:
+      test-sandbox:
+        aliases:
+          - proxy
     restart: "no"
 
 volumes:
@@ -315,5 +373,9 @@ networks:
     driver: bridge
   sandbox:
     name: sandbox-network
+    driver: bridge
+    internal: true
+  test-sandbox:
+    name: ${COMPOSE_PROJECT_NAME:-shoppingbench}-test-sandbox
     driver: bridge
     internal: true

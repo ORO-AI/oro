@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import concurrent.futures
+import copy
 import hashlib
 import json
 import threading
@@ -16,8 +16,8 @@ from uuid import uuid4
 
 from oro_env_runtime.families import get_family
 from oro_env_runtime.loop import _record_user_message, due_interventions
-from oro_env_runtime.user_sim import UserSim
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
+from oro_env_runtime.user_sim import UserSim
 
 from .env_pack_loader import LoadedPack
 from .session_errors import (
@@ -135,6 +135,7 @@ class SessionRegistry:
         max_calls_per_turn: int = MAX_CALLS_PER_TURN,
         max_workers: int = 8,
         inference_access_token: str | None = None,
+        simulator_proxy_url: str = "http://proxy:80",
         simulator_factory: Callable[[TaskSession], Any] | None = None,
     ) -> None:
         if tool_timeout_s <= 0:
@@ -151,7 +152,7 @@ class SessionRegistry:
         self.simulator_timeout_s = float(simulator_timeout_s)
         self.max_calls_per_turn = int(max_calls_per_turn)
         self._simulator_completion = (
-            SimulatorCompletion(inference_access_token)
+            SimulatorCompletion(inference_access_token, proxy_url=simulator_proxy_url)
             if inference_access_token
             else None
         )
