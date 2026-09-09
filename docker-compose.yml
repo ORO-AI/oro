@@ -1,6 +1,8 @@
 services:
   search-server:
-    image: ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}
+    # SEARCH_SERVER_IMAGE lets a deployment pin a generated-index image without
+    # changing the shared validator/proxy/sandbox IMAGE_TAG.
+    image: ${SEARCH_SERVER_IMAGE:-ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}}
     build:
       context: .
       dockerfile: docker/search-server/Dockerfile
@@ -59,6 +61,9 @@ services:
       # production; staging/dev override via BACKEND_URL env var.
       - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
+      - SESSION_RUNTIME_HOST=${SESSION_RUNTIME_HOST:-validator}
+      - SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
     # Loopback-only publish. Sandbox agents reach the proxy over the `main`
     # docker network (`SANDBOX_PROXY_URL=http://proxy:80`), so no host publish
     # is required for normal operation. Keeping a loopback publish preserves
@@ -155,6 +160,13 @@ services:
       # public endpoint via bittensor's network→endpoint resolver.
       - SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
+      - ORO_SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
+      - ORO_SESSION_SIMULATOR_TIMEOUT=${ORO_SESSION_SIMULATOR_TIMEOUT:-60}
+      # Default-off gate for the sealed environment path. Supply an immutable
+      # pack hash when enabling it.
+      - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}
+      - ORO_EVALUATION_MODE=${ORO_EVALUATION_MODE:-legacy}
+      - ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256=${ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256:-}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
       # defaults to "true" in `bittensor.core.config.no_parse_cli`), so

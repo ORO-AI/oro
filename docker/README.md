@@ -51,9 +51,10 @@ Or build directly:
 docker build -f docker/search-server/Dockerfile -t shoppingbench-search-server .
 ```
 
-**Note**: 
-- The build process copies the pre-built `indexes/` and `sidecar/` directories into the base image
-- No `documents.jsonl` is needed at code-layer build time (all data is in the base image's index and sidecar)
+**Note**:
+- The base image contains the pre-built `indexes/` and `sidecar/` directories and its identity manifest
+- A new index is released as a new pinned base image; the server never switches indexes at runtime
+- No `documents.jsonl` is needed at code-layer build time (all data is in the index and sidecar)
 - Build is fast since it skips index building (~3.1GB copy vs minutes of indexing)
 - Docker automatically caches image layers - subsequent builds will be much faster if only code or indexes change
 - Images built locally persist and are automatically reused by `docker-compose` (no need to rebuild if images already exist)
@@ -105,7 +106,7 @@ PORT=5632
    ```bash
    curl http://localhost:5632/health
    ```
-   Should return: `{"status":"healthy","service":"search-server"}`
+   Returns the service status and baked search identity, including the index and documents hashes.
 
 2. **Check API usage**:
    ```bash
@@ -118,6 +119,16 @@ PORT=5632
    curl "http://localhost:5632/find_product?q=shoes&page=1"
    ```
    Should return a JSON array of products
+
+   Trusted generator/runtime components can use pure BM25 search through:
+   ```bash
+   curl "http://localhost:5632/internal/bm25?q=travel%20mug&k=10"
+   ```
+
+   An index declaring `oro.lucene.catalog.v2` also exposes task-runtime catalog
+   search, batch product lookup, and structured filtering under `/internal/catalog/`.
+   These loopback-only operations hydrate the existing agent tools; they are not a
+   new miner-facing API.
 
 4. **Test product information endpoint**:
    ```bash

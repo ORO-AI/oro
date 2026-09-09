@@ -10,9 +10,14 @@ import requests
 from typing import List, Optional
 
 # Container names
-SEARCH_SERVER_CONTAINER = "shoppingbench-search-server"
-PROXY_CONTAINER = "shoppingbench-proxy"
-SANDBOX_CONTAINER = "shoppingbench-sandbox"
+SEARCH_SERVER_CONTAINER = os.getenv(
+    "INTEGRATION_SEARCH_SERVER_CONTAINER", "shoppingbench-search-server"
+)
+PROXY_CONTAINER = os.getenv("INTEGRATION_PROXY_CONTAINER", "shoppingbench-proxy")
+SANDBOX_CONTAINER = os.getenv("INTEGRATION_SANDBOX_CONTAINER", "shoppingbench-sandbox")
+SESSION_RUNTIME_CONTAINER = os.getenv(
+    "INTEGRATION_SESSION_RUNTIME_CONTAINER", "shoppingbench-session-runtime"
+)
 
 # Service URLs
 SEARCH_SERVER_PORT = int(os.getenv("PORT", "5632"))

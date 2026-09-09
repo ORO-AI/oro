@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import gzip
 import json
 import os
@@ -8,6 +9,7 @@ import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any
 from uuid import UUID
@@ -43,7 +45,23 @@ from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
+from .env_pack_loader import fetch_and_validate_pack
+from .environment_preflight import (
+    environment_preflight_run_id,
+    run_environment_preflight,
+)
+from .episode_emitter import emit_finalized_results
+from .generated_evaluation import (
+    GENERATED_SCORE_SCHEMA,
+    aggregate_results,
+    select_run_task_roster,
+    validate_run_results,
+    write_problem_file,
+)
+from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
+from .session_registry import SessionRegistry
+from .session_service import SessionRuntime, SessionServer
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
@@ -66,6 +84,14 @@ METRICS_PORT = 9100
 # starving the auth-client httpx pool. The matching Backend per-IP cap on
 # /v1/validator/* sits comfortably above the resulting RPM.
 _UPLOAD_LOGS_WORKERS = 20
+
+
+@dataclass(frozen=True)
+class _EvaluationCompletion:
+    score: float
+    score_components: dict[str, Any]
+    results_s3_key: str
+    sandbox_metadata: SandboxMetadata
 
 
 # Inference-token 401 retry backoff base (seconds). Multiplied by
@@ -112,11 +138,57 @@ def _parse_token_401_backoff_base() -> float:
 TOKEN_401_BACKOFF_BASE = _parse_token_401_backoff_base()
 
 
+def _parse_env_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in ("true", "1", "yes"):
+        return True
+    if normalized in ("false", "0", "no"):
+        return False
+    raise SystemExit(f"{name} must be true or false, got {raw!r}")
+
+
 def _rewrite_localhost_url(url: str) -> str:
     """Rewrite localhost URLs to host.docker.internal for Docker connectivity."""
     if url.startswith("http://localhost:"):
         return url.replace("http://localhost:", "http://host.docker.internal:", 1)
     return url
+
+
+def _claim_string(work: ClaimWorkResponse, field_name: str) -> str | None:
+    """Read a nullable claim field across old and regenerated SDK models."""
+
+    value = getattr(work, field_name, None)
+    if value is None or isinstance(value, Unset):
+        value = getattr(work, "additional_properties", {}).get(field_name)
+    if value is None:
+        return None
+    if isinstance(value, UUID):
+        return str(value)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"claim field {field_name} must be a non-empty string")
+    return value
+
+
+def _claim_environment_binding(
+    work: ClaimWorkResponse,
+) -> str | None:
+    """Return the immutable pack binding supplied by claim work.
+
+    The pack sha is the sole frozen binding — content-addressed, so it cannot
+    drift. Returns ``None`` for legacy work with no pack.
+    """
+
+    pack_sha256 = _claim_string(work, "env_pack_sha256")
+    if pack_sha256 is None:
+        return None
+    if len(pack_sha256) != 64 or any(
+        char not in "0123456789abcdef" for char in pack_sha256
+    ):
+        raise ValueError("claim field env_pack_sha256 must be 64 lowercase hex chars")
+    return pack_sha256
 
 
 class Validator:
@@ -140,6 +212,13 @@ class Validator:
 
         # Collect Docker image digests for version tracking
         self.service_versions = collect_service_versions()
+
+        self.session_runtime = SessionRuntime()
+        self.session_server = SessionServer(
+            self.session_runtime,
+            host=self.config.session_runtime_host,
+            port=self.config.session_runtime_port,
+        )
 
     def get_config(self):
         # Set up the configuration parser.
@@ -201,6 +280,58 @@ class Validator:
             type=int,
             default=int(os.environ.get("REASONING_MAX_WORKERS") or "8"),
             help="Number of parallel reasoning judge workers (env: REASONING_MAX_WORKERS).",
+        )
+        parser.add_argument(
+            "--session-runtime-host",
+            default=os.environ.get("ORO_SESSION_RUNTIME_HOST", "0.0.0.0"),
+            help="Internal session HTTP bind host (env: ORO_SESSION_RUNTIME_HOST).",
+        )
+        parser.add_argument(
+            "--session-runtime-port",
+            type=int,
+            default=int(os.environ.get("ORO_SESSION_RUNTIME_PORT", "9101")),
+            help="Internal session HTTP port (env: ORO_SESSION_RUNTIME_PORT).",
+        )
+        parser.add_argument(
+            "--session-tool-timeout",
+            type=float,
+            default=float(os.environ.get("ORO_SESSION_TOOL_TIMEOUT", "10")),
+            help="Per-action timeout before quarantine (env: ORO_SESSION_TOOL_TIMEOUT).",
+        )
+        parser.add_argument(
+            "--session-simulator-timeout",
+            type=float,
+            default=float(os.environ.get("ORO_SESSION_SIMULATOR_TIMEOUT") or "60"),
+            help=(
+                "Shopper simulator timeout before quarantine "
+                "(env: ORO_SESSION_SIMULATOR_TIMEOUT)."
+            ),
+        )
+        parser.add_argument(
+            "--environment-runtime-enabled",
+            action=argparse.BooleanOptionalAction,
+            default=_parse_env_bool("ORO_ENVIRONMENT_RUNTIME_ENABLED"),
+            help=(
+                "Enable the sealed environment runtime and its startup preflight "
+                "(env: ORO_ENVIRONMENT_RUNTIME_ENABLED, default: false)."
+            ),
+        )
+        parser.add_argument(
+            "--evaluation-mode",
+            choices=("legacy", "generated"),
+            default=os.environ.get("ORO_EVALUATION_MODE", "legacy"),
+            help=(
+                "Select the evaluation implementation once per claimed run "
+                "(env: ORO_EVALUATION_MODE, default: legacy)."
+            ),
+        )
+        parser.add_argument(
+            "--environment-preflight-pack-sha256",
+            default=os.environ.get("ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256", ""),
+            help=(
+                "Sealed pack hash used by the environment startup preflight "
+                "(env: ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256)."
+            ),
         )
         # Backend API configuration
         parser.add_argument(
@@ -613,6 +744,19 @@ class Validator:
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
 
+        self.session_server.start()
+        logging.info(
+            "Session runtime listening on "
+            f"{self.config.session_runtime_host}:{self.config.session_runtime_port}"
+        )
+
+        try:
+            self._run_environment_preflight_if_enabled()
+        except Exception:
+            self.session_runtime.clear()
+            self.session_server.stop()
+            raise
+
         # Expose a /metrics endpoint for the bundled Prometheus to scrape.
         # Default registry already includes Python process collectors (CPU,
         # memory, fd count, GC). Bound to 0.0.0.0 inside the container; the
@@ -786,10 +930,241 @@ class Validator:
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt detected, shutting down...")
         finally:
+            self.session_runtime.clear()
+            self.session_server.stop()
             if watchdog is not None:
                 watchdog.stop()
             weight_setter.stop()
             logging.info("Validator stopped.")
+
+    def _run_environment_preflight_if_enabled(self) -> dict[str, Any] | None:
+        """Run the default-off environment gate before claiming miner work."""
+
+        if not self.config.environment_runtime_enabled:
+            logging.info("Environment runtime feature flag is disabled")
+            return None
+
+        pack_sha256 = self.config.environment_preflight_pack_sha256
+        if len(pack_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in pack_sha256
+        ):
+            raise RuntimeError(
+                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
+                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
+            )
+
+        loaded_pack = asyncio.run(
+            fetch_and_validate_pack(
+                pack_sha256,
+                self.config.backend_url,
+                self.wallet.hotkey,
+                download_url_rewriter=_rewrite_localhost_url,
+            )
+        )
+        if loaded_pack is None:
+            raise RuntimeError(
+                f"environment preflight pack {pack_sha256} failed validation"
+            )
+
+        run_dir = self._eval_dir(environment_preflight_run_id(pack_sha256))
+        logging.info(
+            f"Running feature-flagged environment preflight for pack={pack_sha256}"
+        )
+        summary = run_environment_preflight(
+            loaded_pack=loaded_pack,
+            runtime=self.session_runtime,
+            run_dir=run_dir,
+            sandbox_runner=self.run_sandbox,
+        )
+        logging.info(
+            f"Environment preflight receipt: {json.dumps(summary, sort_keys=True)}"
+        )
+        logging.info(f"Environment preflight passed: pack={pack_sha256}")
+        return summary
+
+    def prepare_environment_sessions(
+        self,
+        work: ClaimWorkResponse,
+        *,
+        inference_access_token: str,
+    ) -> SessionRegistry | None:
+        """Provision optional sealed sessions alongside the legacy evaluation."""
+
+        if not self.config.environment_runtime_enabled:
+            return None
+
+        try:
+            binding = _claim_environment_binding(work)
+        except ValueError as exc:
+            logging.warning(
+                f"Invalid environment binding for evaluation {work.eval_run_id}: {exc}"
+            )
+            return None
+        if binding is None:
+            return None
+        try:
+            registry, _, _ = self._create_environment_sessions(
+                work,
+                inference_access_token=inference_access_token,
+            )
+            return registry
+        except Exception as exc:
+            logging.warning(
+                f"Environment session setup failed for evaluation {work.eval_run_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None
+
+    def _create_environment_sessions(
+        self,
+        work: ClaimWorkResponse,
+        *,
+        inference_access_token: str,
+    ) -> tuple[SessionRegistry, list[dict[str, Any]], dict[str, str]]:
+        """Create the bound sessions, raising when authoritative setup fails."""
+
+        pack_sha256 = _claim_environment_binding(work)
+        if pack_sha256 is None:
+            raise ValueError("generated evaluation requires a bound env pack")
+        loaded_pack = asyncio.run(
+            fetch_and_validate_pack(
+                pack_sha256,
+                self.config.backend_url,
+                self.wallet.hotkey,
+                download_url_rewriter=_rewrite_localhost_url,
+            )
+        )
+        if loaded_pack is None:
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation")
+
+        registry: SessionRegistry | None = None
+        try:
+            selected_roster = select_run_task_roster(
+                self.backend_client.get_run_problems(work.eval_run_id),
+                {
+                    task_id: task.family
+                    for task_id, task in zip(
+                        loaded_pack.task_ids, loaded_pack.task_specs, strict=True
+                    )
+                },
+            )
+            registry = SessionRegistry(
+                loaded_pack,
+                tool_timeout_s=self.config.session_tool_timeout,
+                simulator_timeout_s=self.config.session_simulator_timeout,
+                max_workers=self.config.sandbox_max_workers,
+                inference_access_token=inference_access_token,
+            )
+            sessions = [
+                registry.start(
+                    evaluation_run_id=str(work.eval_run_id),
+                    agent_version_id=str(work.agent_version_id),
+                    task_id=task_id,
+                )
+                for task_id in selected_roster
+            ]
+            session_file = self._eval_dir(str(work.eval_run_id)) / (
+                "environment_sessions.json"
+            )
+            session_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "oro.session_bootstrap.v1",
+                        "sessions": sessions,
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            os.chmod(session_file, 0o444)
+            self.session_runtime.install(registry)
+            logging.info(
+                f"Provisioned {len(sessions)} sealed sessions for evaluation "
+                f"{work.eval_run_id}"
+            )
+            return registry, sessions, selected_roster
+        except Exception:
+            if registry is None:
+                loaded_pack.close()
+            else:
+                self.session_runtime.clear(registry)
+                registry.close()
+            raise
+
+    def _emit_environment_results(
+        self,
+        work: ClaimWorkResponse,
+        registry: SessionRegistry,
+        *,
+        expected_task_roster: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        results = registry.finalized_results()
+        self._emit_environment_result_batch(
+            work,
+            results,
+            expected_task_roster,
+            require_complete=True,
+        )
+        return results
+
+    def _emit_environment_result_batch(
+        self,
+        work: ClaimWorkResponse,
+        results: list[dict[str, Any]],
+        expected_task_roster: dict[str, str] | None = None,
+        *,
+        require_complete: bool = False,
+    ) -> None:
+        env_pack_sha256 = _claim_environment_binding(work)
+        if env_pack_sha256 is None:
+            raise ValueError("environment binding disappeared during evaluation")
+        if expected_task_roster is not None:
+            validate_run_results(
+                results,
+                expected_task_roster,
+                evaluation_run_id=str(work.eval_run_id),
+                agent_version_id=str(work.agent_version_id),
+                pack_sha256=env_pack_sha256,
+                require_complete=require_complete,
+            )
+        submitted = asyncio.run(
+            emit_finalized_results(
+                backend_url=self.config.backend_url,
+                validator_keypair=self.wallet.hotkey,
+                env_pack_sha256=env_pack_sha256,
+                results=results,
+                download_url_rewriter=_rewrite_localhost_url,
+            )
+        )
+        logging.info(
+            "Persisted generated-environment progress for "
+            f"{work.eval_run_id}: {submitted.get('counts', {})}"
+        )
+
+    def finalize_environment_sessions(
+        self,
+        work: ClaimWorkResponse,
+        registry: SessionRegistry,
+    ) -> None:
+        """Persist all environment outcomes without changing legacy scoring."""
+
+        try:
+            self._emit_environment_results(work, registry)
+        except Exception as exc:
+            # Episode capture is preview telemetry. A transport or schema defect
+            # must never change the legacy evaluation's score or completion path.
+            logging.warning(
+                "Generated-environment episode emission failed for "
+                f"{work.eval_run_id}: {type(exc).__name__}: {exc}"
+            )
+        finally:
+            try:
+                self.session_runtime.clear(registry)
+            except Exception as exc:
+                logging.warning(
+                    "Generated-environment session cleanup failed for "
+                    f"{work.eval_run_id}: {type(exc).__name__}: {exc}"
+                )
 
     def fetch_problems(
         self, suite_id: int, eval_run_id_str: str
@@ -843,6 +1218,221 @@ class Validator:
             logging.error(f"Unexpected error fetching problems: {e}")
             return None, [], []
 
+    def _run_claimed_evaluation(
+        self,
+        work: ClaimWorkResponse,
+        agent_path: Path,
+        *,
+        inference_access_token: str,
+        inference_provider: str,
+        inference_base_url: str,
+    ) -> _EvaluationCompletion | None:
+        """Select the evaluation implementation once, at the loop boundary."""
+
+        runner = (
+            self._run_generated_evaluation
+            if getattr(self.config, "evaluation_mode", "legacy") == "generated"
+            else self._run_legacy_evaluation
+        )
+        return runner(
+            work,
+            agent_path,
+            inference_access_token=inference_access_token,
+            inference_provider=inference_provider,
+            inference_base_url=inference_base_url,
+        )
+
+    def _run_generated_evaluation(
+        self,
+        work: ClaimWorkResponse,
+        agent_path: Path,
+        *,
+        inference_access_token: str,
+        inference_provider: str,
+        inference_base_url: str,
+    ) -> _EvaluationCompletion | None:
+        """Execute and score the sealed pack bound to the claimed work."""
+
+        eval_run_id = work.eval_run_id
+        eval_run_id_str = str(eval_run_id)
+        registry, sessions, selected_roster = self._create_environment_sessions(
+            work,
+            inference_access_token=inference_access_token,
+        )
+        sandbox_output = None
+        sandbox_metadata: SandboxMetadata = {}
+        reporter = GeneratedProgressReporter(
+            registry,
+            lambda batch: self._emit_environment_result_batch(
+                work, batch, selected_roster
+            ),
+        )
+        try:
+            reporter.start()
+            problem_file = self._eval_dir(eval_run_id_str) / "problems.jsonl"
+            write_problem_file(problem_file, sessions)
+            try:
+                sandbox_output, sandbox_metadata = self.run_sandbox(
+                    agent_path,
+                    eval_run_id_str,
+                    problem_file,
+                    inference_access_token=inference_access_token,
+                    inference_provider=inference_provider,
+                    inference_base_url=inference_base_url,
+                )
+            finally:
+                reporter.stop()
+                results = registry.finalized_results()
+                env_pack_sha256 = _claim_environment_binding(work)
+                if env_pack_sha256 is None:
+                    raise ValueError(
+                        "environment binding disappeared before finalization"
+                    )
+                validate_run_results(
+                    results,
+                    selected_roster,
+                    evaluation_run_id=str(work.eval_run_id),
+                    agent_version_id=str(work.agent_version_id),
+                    pack_sha256=env_pack_sha256,
+                )
+                try:
+                    reporter.flush(results)
+                except Exception as exc:
+                    logging.warning(
+                        "Final generated progress batch failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+        finally:
+            reporter.stop()
+            self.session_runtime.clear(registry)
+
+        if not sandbox_output:
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "Sandbox execution failed",
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
+
+        try:
+            score = aggregate_results(results)
+        except ValueError as exc:
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                str(exc),
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
+        logging.info(
+            "Generated evaluation score: "
+            f"{score:.6f} across {len(results)} tasks"
+        )
+        return _EvaluationCompletion(
+            score=score,
+            score_components={"schema_version": GENERATED_SCORE_SCHEMA},
+            results_s3_key="",
+            sandbox_metadata=sandbox_metadata,
+        )
+
+    def _run_legacy_evaluation(
+        self,
+        work: ClaimWorkResponse,
+        agent_path: Path,
+        *,
+        inference_access_token: str,
+        inference_provider: str,
+        inference_base_url: str,
+    ) -> _EvaluationCompletion | None:
+        """Run the existing ShoppingBench evaluation unchanged."""
+
+        eval_run_id = work.eval_run_id
+        eval_run_id_str = str(eval_run_id)
+        problem_file, problem_ids, problems = self.fetch_problems(
+            work.suite_id, eval_run_id_str
+        )
+        if not problem_file or not problems:
+            self._complete_with_failure(
+                eval_run_id, TerminalStatus.FAILED, "Failed to load problems"
+            )
+            return None
+
+        eval_dir = self._eval_dir(eval_run_id_str)
+        output_file = eval_dir / "output.jsonl"
+        progress_reporter = ProgressReporter(
+            backend_client=self.backend_client,
+            eval_run_id=eval_run_id,
+            output_file=output_file,
+            problems=problems,
+            workspace_dir=Path(self.config.workspace_dir),
+            inference_access_token=inference_access_token,
+            inference_provider=inference_provider,
+            max_scoring_workers=self.config.reasoning_max_workers,
+        )
+        progress_reporter.start_monitoring()
+        environment_registry = self.prepare_environment_sessions(
+            work,
+            inference_access_token=inference_access_token,
+        )
+
+        try:
+            sandbox_output, sandbox_metadata = self.run_sandbox(
+                agent_path,
+                eval_run_id_str,
+                problem_file,
+                inference_access_token=inference_access_token,
+                inference_provider=inference_provider,
+                inference_base_url=inference_base_url,
+            )
+        finally:
+            try:
+                progress_reporter.signal_sandbox_done()
+                progress_reporter.wait_for_completion()
+            finally:
+                if environment_registry is not None:
+                    self.finalize_environment_sessions(work, environment_registry)
+
+        if not sandbox_output:
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "Sandbox execution failed",
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
+
+        aggregate = progress_reporter.get_aggregate_score()
+        if aggregate is None:
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "ProgressReporter did not compute aggregate score",
+            )
+            return None
+
+        success_rate = aggregate.get("success_rate", 0.0)
+        # Missing or failed judgments count as zero. Incomplete reasoning-judge
+        # coverage does not fail the run because the judge is being retired.
+        reasoning_result = progress_reporter.get_reasoning_data()
+        score = blend_final_score(success_rate, reasoning_result["reasoning_quality"])
+        aggregate.update(reasoning_result)
+        logging.info(
+            f"Score: final={score:.4f} "
+            f"(success_rate={success_rate:.4f} * "
+            f"coefficient={reasoning_result['reasoning_coefficient']:.4f}, "
+            f"reasoning_quality={reasoning_result['reasoning_quality']:.4f})"
+        )
+        results_s3_key = self._upload_logs(
+            eval_run_id, output_file, problem_ids, progress_reporter
+        )
+        return _EvaluationCompletion(
+            score=score,
+            score_components=aggregate,
+            results_s3_key=results_s3_key,
+            sandbox_metadata=sandbox_metadata,
+        )
+
     def run_evaluation_cycle(self, work: ClaimWorkResponse):
         """Execute a single evaluation cycle for claimed work.
 
@@ -868,10 +1458,8 @@ class Validator:
                 f"No miner inference token for {eval_run_id_str}, cannot run inference"
             )
 
-        # Track temp files for cleanup
-        problem_file = None
         agent_path = None
-        workspace_dir = Path(self.config.workspace_dir)
+        sandbox_metadata: SandboxMetadata | None = None
 
         # Step 0: Verify miner inference token is present and valid
         if (
@@ -918,100 +1506,24 @@ class Validator:
                 )
                 return
 
-            # Step 2: Fetch problems from Backend API
-            # Returns sanitized file (no rewards) for sandbox + full problems for scorer
-            problem_file, problem_ids, problems = self.fetch_problems(
-                work.suite_id, eval_run_id_str
-            )
-            if not problem_file or not problems:
-                self._complete_with_failure(
-                    eval_run_id, TerminalStatus.FAILED, "Failed to load problems"
-                )
-                return
-
-            # Step 3: Run sandbox with ProgressReporter for per-problem scoring
-            eval_dir = self._eval_dir(eval_run_id_str)
-            output_file = eval_dir / "output.jsonl"
-
-            # Start progress reporter (scores problems AND judges reasoning per-problem)
-            progress_reporter = ProgressReporter(
-                backend_client=self.backend_client,
-                eval_run_id=eval_run_id,
-                output_file=output_file,
-                problems=problems,
-                workspace_dir=workspace_dir,
+            completion = self._run_claimed_evaluation(
+                work,
+                agent_path,
                 inference_access_token=inference_access_token,
                 inference_provider=inference_provider,
-                max_scoring_workers=self.config.reasoning_max_workers,
+                inference_base_url=inference_base_url,
             )
-            progress_reporter.start_monitoring()
-
-            try:
-                sandbox_output, sandbox_metadata = self.run_sandbox(
-                    agent_path,
-                    eval_run_id_str,
-                    problem_file,
-                    inference_access_token=inference_access_token,
-                    inference_provider=inference_provider,
-                    inference_base_url=inference_base_url,
-                )
-            finally:
-                progress_reporter.signal_sandbox_done()
-                progress_reporter.wait_for_completion()
-
-            if not sandbox_output:
-                self._complete_with_failure(
-                    eval_run_id,
-                    TerminalStatus.FAILED,
-                    "Sandbox execution failed",
-                    sandbox_metadata=sandbox_metadata,
-                )
+            if completion is None:
                 return
+            sandbox_metadata = completion.sandbox_metadata
 
-            # Step 4: Get aggregate score from ProgressReporter
-            aggregate = progress_reporter.get_aggregate_score()
-
-            if aggregate is None:
-                self._complete_with_failure(
-                    eval_run_id,
-                    TerminalStatus.FAILED,
-                    "ProgressReporter did not compute aggregate score",
-                )
-                return
-
-            success_rate = aggregate.get("success_rate", 0.0)
-
-            # Step 4b: Get reasoning data (judged per-problem during scoring).
-            # Missing/failed judgments count as 0; incomplete coverage never
-            # fails the run (the reasoning judge is being retired).
-            reasoning_result = progress_reporter.get_reasoning_data()
-
-            score = blend_final_score(
-                success_rate, reasoning_result["reasoning_quality"]
-            )
-
-            aggregate.update(reasoning_result)
-
-            logging.info(
-                f"Score: final={score:.4f} "
-                f"(success_rate={success_rate:.4f} * "
-                f"coefficient={reasoning_result['reasoning_coefficient']:.4f}, "
-                f"reasoning_quality={reasoning_result['reasoning_quality']:.4f})"
-            )
-
-            # Step 5: Upload logs (reasoning data appended to each problem's trajectory)
-            results_s3_key = self._upload_logs(
-                eval_run_id, output_file, problem_ids, progress_reporter
-            )
-
-            # Step 6: Complete the run
             self._complete_run(
                 eval_run_id=eval_run_id,
                 status=TerminalStatus.SUCCESS,
-                score=score,
-                score_components=aggregate,
-                results_s3_key=results_s3_key,
-                sandbox_metadata=sandbox_metadata,
+                score=completion.score,
+                score_components=completion.score_components,
+                results_s3_key=completion.results_s3_key,
+                sandbox_metadata=completion.sandbox_metadata,
             )
 
         except Exception as e:
@@ -1021,9 +1533,7 @@ class Validator:
                 eval_run_id,
                 TerminalStatus.FAILED,
                 str(e),
-                sandbox_metadata=sandbox_metadata
-                if "sandbox_metadata" in locals()
-                else None,
+                sandbox_metadata=sandbox_metadata,
             )
         finally:
             heartbeat_mgr.stop()

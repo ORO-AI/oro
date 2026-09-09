@@ -36,6 +36,8 @@ Available tools: `find_product`, `view_product_information`, `recommend_product`
 **Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start) — build an agent, test locally with Docker, and submit to the network.
 
 See [`src/agent/agent.py`](src/agent/agent.py) for a reference agent implementation.
+For generated environments, see the smaller
+[`src/agent/environment_agent.py`](src/agent/environment_agent.py) example.
 
 ## For Validators
 

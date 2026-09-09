@@ -83,14 +83,10 @@ http {
             add_header Content-Type application/json;
         }
 
-        # Block agent access to scoring-only endpoint (returns full product docs)
-        location /search/get_product_raw {
-            return 403 '{"error": "forbidden"}\n';
-            add_header Content-Type application/json;
-        }
-
-        # Route /search/* requests to search-server
-        location /search/ {
+        # Route only the two agent-facing search operations. Keeping this an
+        # allowlist prevents alternate spellings or newly-added search-server
+        # endpoints from exposing scoring/private product data by default.
+        location ~ ^/search/(find_product|view_product_information)$ {
             limit_req zone=agent burst=50 nodelay;
 
             # Re-resolve Docker DNS on every request so container IP changes
@@ -116,6 +112,23 @@ http {
             limit_req zone=agent burst=50 nodelay;
             client_body_buffer_size 1m;
             js_content validate_model.validate;
+        }
+
+        # Stateful actions terminate in the validator process. Session
+        # creation and verdict endpoints are intentionally not exposed.
+        location = /environment/call {
+            limit_req zone=agent burst=50 nodelay;
+
+            resolver 127.0.0.11 valid=10s;
+            set $session_upstream http://${SESSION_RUNTIME_HOST}:${SESSION_RUNTIME_PORT};
+            proxy_pass $session_upstream/v1/session/call;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout ${SESSION_CALL_TIMEOUT};
+            proxy_read_timeout ${SESSION_CALL_TIMEOUT};
         }
 
         # Internal location: fetch the allowed-models list from the ORO Backend

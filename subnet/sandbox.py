@@ -202,6 +202,8 @@ def build_sandbox_command(
             "/tmp:rw,noexec,nosuid,size=256m",
             "-e",
             "SANDBOX_PROXY_URL=http://proxy:80",
+            "-e",
+            "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json",
         ]
     )
 

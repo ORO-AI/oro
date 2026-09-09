@@ -85,8 +85,8 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
-          build-args: |
-            ${{ matrix.image == 'validator' && format('HF_TOKEN={0}', secrets.HF_TOKEN) || '' }}
+          secrets: |
+            ${{ matrix.image == 'validator' && format('hf_token={0}', secrets.HF_TOKEN) || '' }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=registry,ref=${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:cache-${{ env.PLATFORM_PAIR }}
           cache-to: type=registry,ref=${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:cache-${{ env.PLATFORM_PAIR }},mode=max

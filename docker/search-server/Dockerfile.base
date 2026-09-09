@@ -9,17 +9,39 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY docker/search-server/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps pyserini==1.0.0 && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Pre-built indexes (~3GB) — this is why the base image exists.
-# Rebuild with: ./scripts/publish-search-server-base.sh
+# Pyserini's package initializers eagerly import dense-search implementations,
+# pulling in Torch, CUDA, Transformers, ONNX, and OpenAI. This image uses only
+# the pinned Lucene BM25 classes, so remove those eager imports and verify the
+# exact sparse entry point before adding the index.
+COPY docker/search-server/patch_pyserini.py /tmp/patch_pyserini.py
+RUN python /tmp/patch_pyserini.py && \
+    rm /tmp/patch_pyserini.py && \
+    python -c 'from pyserini.search.lucene import LuceneSearcher; print(LuceneSearcher.__name__)'
+
+# Pre-built index and its immutable identity receipt. The manual
+# publication workflow verifies and stages both before this build starts.
 COPY indexes /app/indexes
+COPY lucene_manifest.json /app/lucene_manifest.json
 
-# Columnar filter sidecar (~65MB), built from the same documents.jsonl as the
-# index (see src/search_engine/build_sidecar.py). The publish-base script MUST
-# run `python -m src.search_engine.build_sidecar <documents.jsonl> sidecar`
-# before this build — a missing source directory fails `COPY`. The runtime
-# fallback is separate: at container start the server drops to the decode path
-# if the directory is absent or its doc count does not match the index, so a
-# stale or unset SIDECAR_DIR never serves wrong results.
+# A sealed index records the JDK used to build it. Refuse a later rebuild if
+# the selected Temurin tag has moved to a different Java release.
+RUN python - <<'PY'
+import json
+import subprocess
+
+with open("lucene_manifest.json") as manifest_file:
+    expected = json.load(manifest_file)["java_version"]
+actual = subprocess.check_output(
+    ["java", "-version"], stderr=subprocess.STDOUT, text=True
+).splitlines()[0]
+if actual != expected:
+    raise SystemExit(f"Lucene index requires {expected!r}, image provides {actual!r}")
+PY
+
+# Optional columnar filter sidecar for the legacy /find_product path. The
+# generated-index workflow supplies an empty directory, selecting the server's
+# existing decode fallback; pure /internal/bm25 does not use this sidecar.
 COPY sidecar /app/sidecar

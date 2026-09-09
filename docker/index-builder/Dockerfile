@@ -17,4 +17,6 @@ ENTRYPOINT ["python", "-m", "pyserini.index.lucene", \
     "--index", "/data/indexes", \
     "--generator", "DefaultLuceneDocumentGenerator", \
     "--threads", "1", \
+    "--fields", "catalog_brand", "catalog_candidate", "catalog_category", \
+    "catalog_price", "catalog_source", "catalog_source_variant", \
     "--storePositions", "--storeDocvectors", "--storeRaw"]
