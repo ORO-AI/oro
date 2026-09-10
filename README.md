@@ -29,15 +29,13 @@ ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping
 
 ## For Miners
 
-Miners submit Python agents that define an `agent_main()` function. Inside the sandbox, your agent can search 2.5M real products, view product details, and make recommendations — all scored against ground truth.
-
-Available tools: `find_product`, `view_product_information`, `recommend_product`
+Miners submit Python agents that define an `agent_main(problem_data)` function. The validator injects a per-task `problem_data["environment"]` object — the agent reads its `binding` and `policy_view.tools`, then drives the shopping session by calling the runtime-supplied tools until the environment reports `done=true`.
 
 **Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start) — build an agent, test locally with Docker, and submit to the network.
 
-See [`src/agent/agent.py`](src/agent/agent.py) for a reference agent implementation.
-For generated environments, see the smaller
-[`src/agent/environment_agent.py`](src/agent/environment_agent.py) example.
+See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the reference agent implementation. It's the shape production expects and matches the [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface).
+
+> **Legacy ShoppingBench agent** — [`src/agent/agent.py`](src/agent/agent.py) targets the deprecated `agent_main(task) -> List[Dict]` interface. It runs against the old ShoppingBench sandbox for local exploration only; production evaluations require the `environment_agent.py` shape above.
 
 ### Test generated environments locally
 
