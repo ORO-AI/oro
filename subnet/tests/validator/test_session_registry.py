@@ -871,6 +871,37 @@ def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) 
     session.search.capture_retry_trace.assert_called_once_with()
 
 
+def test_timeout_trace_keeps_completed_search_retries(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retry_trace = []
+    entered = threading.Event()
+    release = threading.Event()
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.01) as registry:
+        _start(registry)
+        session = registry._sessions["session-1"].session
+        session.search.capture_retry_trace = MagicMock(
+            return_value=nullcontext(retry_trace)
+        )
+
+        def blocked_step(_action: dict) -> None:
+            retry_trace.append({"attempt": 1, "outcome": "retry"})
+            entered.set()
+            assert release.wait(5), "test must release the timed-out worker"
+
+        monkeypatch.setattr(session, "step", blocked_step)
+        try:
+            with pytest.raises(HarnessTimeoutError, match="session quarantined"):
+                registry.call(_call_envelope(registry))
+            assert entered.is_set()
+            trace = registry.finalized_results()[0]["call_trace"][0]
+            assert trace["search_retries"] == [
+                {"attempt": 1, "outcome": "retry"}
+            ]
+        finally:
+            release.set()
+
+
 def test_timeout_finalization_and_close_do_not_wait_for_tool_worker(
     loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
 ) -> None:

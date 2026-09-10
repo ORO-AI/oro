@@ -487,6 +487,8 @@ class SessionRegistry:
             search_retry_trace: list[dict[str, Any]] = []
 
             def execute_tool_call() -> Any:
+                nonlocal search_retry_trace
+
                 def execute() -> Any:
                     if is_group:
                         return state.session.step_parallel(actions)
@@ -496,10 +498,8 @@ class SessionRegistry:
                 if not callable(capture):
                     return execute()
                 with capture() as trace:
-                    try:
-                        return execute()
-                    finally:
-                        search_retry_trace.extend(trace)
+                    search_retry_trace = trace
+                    return execute()
 
             future = self._executor.submit(execute_tool_call)
             try:
