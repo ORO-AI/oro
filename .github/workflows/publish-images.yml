@@ -39,7 +39,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [proxy, sandbox, validator, search-server]
+        # The search image is pack-bound because it contains the catalog and
+        # Lucene index. It is published separately after that index is built;
+        # a source-only build must never replace the indexed `latest` image.
+        image: [proxy, sandbox, validator]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -52,14 +55,7 @@ jobs:
             file: docker/sandbox/Dockerfile
           - image: validator
             file: docker/validator/Dockerfile
-          - image: search-server
-            file: docker/search-server/Dockerfile
-
     steps:
-      - name: Free disk space (search-server base image is ~7GB)
-        if: matrix.image == 'search-server'
-        run: sudo rm -rf /usr/share/dotnet
-
       - name: Prepare platform pair
         run: |
           platform=${{ matrix.platform }}
@@ -189,7 +185,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [proxy, sandbox, validator, search-server]
+        image: [proxy, sandbox, validator]
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
