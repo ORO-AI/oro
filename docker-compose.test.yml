@@ -5,6 +5,33 @@
 # case (`docker compose --profile tools up`) is unchanged — this file
 # is only loaded when explicitly passed via `-f`.
 services:
+  # The isolation suite verifies network topology and proxy routing, not search
+  # relevance. Avoid loading the ~15 GB production search image on a standard
+  # GitHub runner; return the empty result the existing assertion already permits.
+  search-server:
+    build:
+      dockerfile: tests/integration/search-server.Dockerfile
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1:5632/health || exit 1"]
+
+  session-runtime:
+    build:
+      context: .
+      dockerfile: tests/integration/session-runtime.Dockerfile
+    container_name: shoppingbench-session-runtime
+    networks:
+      - main
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:9101/health').read()\""]
+
+  proxy:
+    environment:
+      - SESSION_RUNTIME_HOST=session-runtime
+      - SESSION_RUNTIME_PORT=9101
+    depends_on:
+      session-runtime:
+        condition: service_healthy
+
   sandbox:
     container_name: shoppingbench-sandbox
     profiles: []

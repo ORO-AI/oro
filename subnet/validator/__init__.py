@@ -17,6 +17,13 @@ Modules:
     models: Local domain models
 """
 
+import sys
+
+if sys.version_info < (3, 11):
+    import tomli
+
+    sys.modules.setdefault("tomllib", tomli)
+
 # Lazy imports to avoid triggering bittensor at import time
 # Use: from validator.backend_client import BackendClient
 # Or:  from validator.main import Validator

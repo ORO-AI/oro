@@ -8,6 +8,10 @@ on:
       - 'docker/search-server/**'
       - 'docker/proxy/**'
       - 'docker/sandbox/**'
+      - 'subnet/validator/session_registry.py'
+      - 'subnet/validator/session_errors.py'
+      - 'subnet/validator/session_service.py'
+      - 'subnet/validator/environment_preflight*.py'
       - 'src/search_engine/**'
       - 'src/sandbox/**'
       - 'tests/integration/**'
@@ -18,20 +22,12 @@ on:
 jobs:
   integration-tests:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.test.yml
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -40,7 +36,7 @@ jobs:
 
       - name: Build services
         run: |
-          docker compose build search-server proxy sandbox
+          docker compose build search-server session-runtime proxy sandbox
 
       - name: Start search server
         run: |
@@ -54,7 +50,7 @@ jobs:
 
       - name: Start sandbox (persistent, test-mode)
         run: |
-          docker compose -f docker-compose.yml -f docker-compose.test.yml up -d sandbox
+          docker compose up -d sandbox
           docker ps --filter name=shoppingbench-sandbox --format '{{.Names}} {{.Status}}'
 
       - name: Install test dependencies
@@ -69,6 +65,7 @@ jobs:
         if: failure()
         run: |
           docker compose logs --tail 50 search-server
+          docker compose logs --tail 50 session-runtime
           docker compose logs --tail 50 proxy
 
       - name: Cleanup

@@ -1,6 +1,10 @@
-pyserini==1.0.0
 Flask==3.1.3
-ujson==5.13.0
-waitress==3.0.2
 gunicorn==23.0.0
 numpy==1.26.4
+pandas==2.3.3
+pyjnius==1.7.0
+PyYAML==6.0.3
+requests==2.34.2
+tqdm==4.70.0
+ujson==5.13.0
+waitress==3.0.2

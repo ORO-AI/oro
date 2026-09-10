@@ -13,6 +13,7 @@ FAST = str(FIXTURES / "fast_agent.py")
 SLOW = str(FIXTURES / "slow_agent.py")
 CRASH = str(FIXTURES / "crashing_agent.py")
 FROZEN_DC = str(FIXTURES / "frozen_dataclass_agent.py")
+LARGE_RESULT = str(FIXTURES / "large_result_agent.py")
 
 
 def test_successful_execution():
@@ -22,6 +23,19 @@ def test_successful_execution():
     assert result.success
     assert result.result["answer"] == "hello"
     assert result.problem_id == "p1"
+
+
+def test_large_result_is_received_before_child_exit():
+    """A result larger than the queue pipe must not make a finished agent time out."""
+    result = execute_single_problem(
+        {"query": "large result", "id": "p-large"},
+        timeout=2.0,
+        agent_file=LARGE_RESULT,
+    )
+
+    assert result.success
+    assert result.result == {"answer": "x" * 2_000_000}
+    assert result.status.value == "SUCCESS"
 
 
 def test_timeout_kills_process():

@@ -15,8 +15,7 @@ exclude = ["subnet.tests*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "subnet/tests"]
-# `subnet` and `src/agent` on the path so bare `validator.X` / `agent.X`
-# imports in tests resolve without per-file sys.path manipulation.
+# Resolve bare validator/agent imports used by the existing test layout.
 pythonpath = [".", "subnet", "src/agent"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]

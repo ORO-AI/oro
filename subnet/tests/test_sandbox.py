@@ -117,6 +117,9 @@ class TestBuildSandboxCommand:
         assert "/tmp/problems.jsonl" in cmd
         assert "--output" in cmd
         assert "/app/logs/output.jsonl" in cmd
+        assert (
+            "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json" in cmd
+        )
 
     def test_no_enable_scoring_flag(self):
         cmd = build_sandbox_command(

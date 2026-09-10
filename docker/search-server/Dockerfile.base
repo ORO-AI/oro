@@ -9,17 +9,68 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY docker/search-server/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --no-deps pyserini==1.0.0 && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Pre-built indexes (~3GB) — this is why the base image exists.
-# Rebuild with: ./scripts/publish-search-server-base.sh
-COPY indexes /app/indexes
+# Pyserini's package initializers eagerly import dense-search implementations,
+# pulling in Torch, CUDA, Transformers, ONNX, and OpenAI. This image uses only
+# the pinned Lucene BM25 classes, so remove those eager imports and verify the
+# exact sparse entry point before adding the index.
+COPY docker/search-server/patch_pyserini.py /tmp/patch_pyserini.py
+RUN python /tmp/patch_pyserini.py && \
+    rm /tmp/patch_pyserini.py && \
+    python -c 'from pyserini.search.lucene import LuceneSearcher; print(LuceneSearcher.__name__)'
 
-# Columnar filter sidecar (~65MB), built from the same documents.jsonl as the
-# index (see src/search_engine/build_sidecar.py). The publish-base script MUST
-# run `python -m src.search_engine.build_sidecar <documents.jsonl> sidecar`
-# before this build — a missing source directory fails `COPY`. The runtime
-# fallback is separate: at container start the server drops to the decode path
-# if the directory is absent or its doc count does not match the index, so a
-# stale or unset SIDECAR_DIR never serves wrong results.
-COPY sidecar /app/sidecar
+# Keep the large archive compressed in the build context. ADD expands it into
+# one image layer, avoiding a second host copy of the full Lucene index.
+ADD index.tar.gz /app/
+
+# Validate every expanded index file before this base image can be published.
+RUN test -d /app/index && \
+    ln -s /app/index /app/indexes && \
+    mkdir /app/sidecar && \
+    python - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+
+manifest = json.loads(Path("lucene_manifest.json").read_text())
+expected = manifest["files"]
+actual = {
+    path.name
+    for path in Path("index").iterdir()
+    if path.is_file() and not path.is_symlink()
+}
+if actual != set(expected):
+    raise SystemExit("Lucene index file set does not match its manifest")
+for name, identity in expected.items():
+    path = Path("index", name)
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"Lucene index member is not a regular file: {name}")
+    if path.stat().st_size != identity["size_bytes"]:
+        raise SystemExit(f"Lucene index size mismatch: {name}")
+    digest = hashlib.sha256()
+    with path.open("rb") as index_file:
+        for chunk in iter(lambda: index_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != identity["sha256"]:
+        raise SystemExit(f"Lucene index digest mismatch: {name}")
+PY
+
+# A sealed index records the JDK used to build it. Refuse a later rebuild if
+# the selected Temurin tag has moved to a different Java release.
+RUN python - <<'PY'
+import json
+import subprocess
+
+with open("lucene_manifest.json") as manifest_file:
+    expected = json.load(manifest_file)["java_version"]
+actual = subprocess.check_output(
+    ["java", "-version"], stderr=subprocess.STDOUT, text=True
+).splitlines()[0]
+if actual != expected:
+    raise SystemExit(f"Lucene index requires {expected!r}, image provides {actual!r}")
+PY
+
+# The empty sidecar selects the server's existing decode fallback. Pure
+# /internal/bm25 does not use this sidecar.
