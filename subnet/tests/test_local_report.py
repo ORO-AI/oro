@@ -46,6 +46,7 @@ def _summary() -> dict:
         ],
         "aggregate_score": 0.375,
         "pack_task_count": 35,
+        "selection_mode": "random_sample",
         "selection_seed": 4821993,
     }
 
@@ -75,22 +76,51 @@ def test_console_report_names_run_models_and_versions() -> None:
     assert "nemotron" not in report
 
 
-def test_console_report_names_the_sample_and_how_to_repeat_it() -> None:
-    assert "problems    4 of 35, sampled, repeat with --seed 4821993" in _report()
-
-    full = _summary()
-    full["pack_task_count"] = len(full["tasks"])
-    full["selection_seed"] = None
-    report = local_report.render_console_report(
-        full,
+def _render(summary: dict) -> str:
+    return local_report.render_console_report(
+        summary,
         artifact_dir=Path("/x"),
         report_path=None,
         provider="openrouter",
         agent_model="m",
         color=False,
     )
+
+
+def test_console_report_names_the_sample_and_how_to_repeat_it() -> None:
+    assert "problems    4 of 35, sampled, repeat with --seed 4821993" in _report()
+
+    full = _summary()
+    full["pack_task_count"] = len(full["tasks"])
+    full["selection_mode"] = "qualifying_roster"
+    full["selection_seed"] = None
+    report = _render(full)
     assert "problems    all 4" in report
     assert "--seed" not in report
+
+
+def test_console_report_does_not_call_the_qualifying_roster_a_sample() -> None:
+    # A larger override pack still runs the deterministic qualifying roster; it
+    # has no seed, so calling it "sampled" would be untrue and unreplayable.
+    summary = _summary()
+    summary["pack_task_count"] = 525
+    summary["selection_mode"] = "qualifying_roster"
+    summary["selection_seed"] = None
+
+    report = _render(summary)
+
+    assert "problems    4 of 525, qualifying roster" in report
+    assert "sampled" not in report
+    assert "--seed" not in report
+
+
+def test_console_report_qualifies_the_agent_model_it_prints() -> None:
+    report = _report()
+    # SANDBOX_MODEL is a request, not a record: the proxy maps it per provider and
+    # a custom agent may never read it.
+    assert "SANDBOX_MODEL" in report
+    assert "mapped per provider" in report
+    assert "custom agents choose in code" in report
 
 
 def test_console_report_groups_tasks_by_family_with_means() -> None:

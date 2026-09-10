@@ -56,8 +56,13 @@ def stdout_supports_color() -> bool:
 
 def _problem_line(summary: dict[str, Any], selected: int) -> str:
     available = int(summary.get("pack_task_count") or selected)
-    if selected >= available:
-        return f"all {available}"
+    # Without --problems the roster is the qualifying selection, deterministic and
+    # seedless. Only call a run sampled when it actually was, otherwise a larger
+    # override pack reads as sampled when nothing was sampled.
+    if summary.get("selection_mode") != "random_sample":
+        if selected >= available:
+            return f"all {available}"
+        return f"{selected} of {available}, qualifying roster"
     seed = summary.get("selection_seed")
     repeat = "" if seed is None else f", repeat with --seed {seed}"
     return f"{selected} of {available}, sampled{repeat}"
@@ -97,7 +102,10 @@ def render_console_report(
         f"  inference   {provider}",
         (
             f"  agent model {agent_model}  "
-            f"{paint('(reference agent; custom agents choose in code)', _DIM)}"
+            f"{paint('(SANDBOX_MODEL, requested by the reference', _DIM)}"
+        ),
+        (
+            f"              {paint('agent and mapped per provider; custom agents choose in code)', _DIM)}"
         ),
         f"  simulator   {models.get('user_simulator', 'not declared')}",
         f"  judge       {models.get('judge', 'not declared')}",

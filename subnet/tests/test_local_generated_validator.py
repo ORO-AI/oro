@@ -249,6 +249,33 @@ def test_a_short_run_does_not_require_a_full_qualifying_family(tmp_path: Path) -
         validate_local_pack(pack)
 
 
+def test_failed_run_still_writes_the_trajectory_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed run is exactly when a miner needs the trajectories.
+    results = [
+        _episode(index, family)
+        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+    ]
+    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
+    monkeypatch.setattr(
+        local_generated_validator,
+        "aggregate_results",
+        lambda _results: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    with pytest.raises(
+        local_generated_validator.LocalGeneratedValidatorError
+    ) as excinfo:
+        run_local_generated_validator(_config(tmp_path))
+
+    report = excinfo.value.report_path
+    assert report is not None and report.is_file()
+    assert "TF" in report.read_text() or "episode" in report.read_text()
+    summary = json.loads(excinfo.value.summary_path.read_text())
+    assert summary["status"] == "failed"
+
+
 def test_summary_averages_rewards_within_each_family(tmp_path: Path) -> None:
     family = min(GENERATED_FAMILIES)
     path = tmp_path / "summary.json"

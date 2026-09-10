@@ -127,8 +127,11 @@ Trajectories     ./logs/environment-runs/local-.../trajectories.html  (open in a
 
 Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
 that off. The simulator and judge models are sealed in the pack. The agent
-model line shows `SANDBOX_MODEL`, which only the included reference agent
-reads. A completed task can still have a zero reward if its verifier verdict is
+model line shows `SANDBOX_MODEL`, which is a request rather than a record: only
+the included reference agent reads it, and the proxy maps it to the active
+provider's name for that model, so an OpenRouter run of the default sends
+`deepseek/deepseek-v3.2`. A custom agent chooses its own models in code. A
+completed task can still have a zero reward if its verifier verdict is
 incorrect.
 
 Open `trajectories.html` in any browser to step through every episode: the

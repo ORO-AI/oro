@@ -96,11 +96,13 @@ class LocalGeneratedValidatorError(RuntimeError):
         classification: str,
         artifact_dir: Path,
         summary_path: Path,
+        report_path: Path | None = None,
     ) -> None:
         super().__init__(message)
         self.classification = classification
         self.artifact_dir = artifact_dir
         self.summary_path = summary_path
+        self.report_path = report_path
 
 
 def _sample_problem_ids(pack: LoadedPack, count: int, seed: int | None) -> list[str]:
@@ -290,6 +292,7 @@ def _write_summary(
         "task_count": len(results),
         "task_roster": task_ids,
         "pack_task_count": len(pack.task_ids) if pack is not None else len(results),
+        "selection_mode": "random_sample" if seed is not None else "qualifying_roster",
         "selection_seed": seed,
         "models": (
             {
@@ -716,6 +719,17 @@ def run_local_generated_validator(
             )
         except Exception:  # noqa: BLE001, S110
             pass
+        # A failed run is where trajectories matter most, so emit the viewer for
+        # whatever episodes were finalized before the failure.
+        if results:
+            try:
+                run_error.report_path = local_report.write_trajectory_report(
+                    artifact_dir.resolve() / "trajectories.html",
+                    [build_episode_artifact(result) for result in results],
+                    run_id=run_id,
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
         if caught_error is run_error:
             raise run_error
         raise run_error from caught_error
@@ -816,10 +830,13 @@ def main(arguments: list[str] | None = None) -> int:
     try:
         result = run_local_generated_validator(config)
     except LocalGeneratedValidatorError as error:
-        print(
-            f"Error [{error.classification}]: {error}\nSummary: {error.summary_path}",
-            file=sys.stderr,
-        )
+        lines = [
+            f"Error [{error.classification}]: {error}",
+            f"Summary: {error.summary_path}",
+        ]
+        if error.report_path is not None:
+            lines.append(f"Trajectories: {error.report_path}")
+        print("\n".join(lines), file=sys.stderr)
         return 1
     print(
         local_report.render_console_report(
