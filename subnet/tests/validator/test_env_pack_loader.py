@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import httpx
 import pytest
+from oro_env_runtime.delivery import build_delivery_subset_archive
 
 from validator import env_pack_loader
 from validator.env_pack_loader import (
@@ -26,6 +27,7 @@ from validator.env_pack_loader import (
 pytest_plugins = ("tests.compat_fixture",)
 
 _REAL_VALIDATE_EPOCH = env_pack_loader.validate_epoch
+_REAL_VALIDATE_DELIVERY_BINDING = env_pack_loader.validate_delivery_binding
 
 
 def _run_async(test: Callable[..., Any]) -> Callable[..., None]:
@@ -148,6 +150,8 @@ def _metadata(pack_sha256: str, artifact: bytes, **updates: object) -> dict:
         "download_url_sha256": hashlib.sha256(artifact).hexdigest(),
         "download_url_size_bytes": len(artifact),
         "artifact_signature": None,
+        "delivery_scope": "qualifying",
+        "delivery_task_ids": ["TF2-retrieval_recall-1"],
         "contract_version": env_pack_loader.ENV_CONTRACT_VERSION,
         "runtime_version": env_pack_loader.RUNTIME_VERSION,
         "tool_contract_version": env_pack_loader.TOOL_CONTRACT_VERSION,
@@ -256,6 +260,11 @@ def _stub_auth_and_epoch_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         env_pack_loader, "validate_epoch", lambda _path: {"status": "pass"}
     )
+    monkeypatch.setattr(
+        env_pack_loader,
+        "validate_delivery_binding",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 @_run_async
@@ -311,7 +320,6 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
         "archive_download",
         "archive_extract",
         "archive_sha256",
-        "artifact_signature",
         "backend_metadata",
         "cache_validated_epoch",
         "pack_contents_load",
@@ -380,6 +388,13 @@ async def test_loads_generator_compatibility_fixture_and_executes(
         artifact,
         task_count=14,
         family_counts=family_counts,
+        delivery_task_ids=[
+            json.loads(line)["task_id"]
+            for line in (compiled_epoch / "data/tasks/private_tasks.jsonl")
+            .read_text()
+            .splitlines()
+            if line.strip()
+        ],
     )
     async with _client(metadata, artifact) as client:
         loaded = await fetch_and_validate_pack(
@@ -404,6 +419,69 @@ async def test_loads_generator_compatibility_fixture_and_executes(
     assert step["error"] is None
     assert step["done"] is False
     loaded.close()
+
+
+@_run_async
+async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
+    compiled_epoch: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(env_pack_loader, "validate_epoch", _REAL_VALIDATE_EPOCH)
+    monkeypatch.setattr(
+        env_pack_loader,
+        "validate_delivery_binding",
+        _REAL_VALIDATE_DELIVERY_BINDING,
+    )
+    source = (compiled_epoch.parent / f"{compiled_epoch.name}.tar.gz").read_bytes()
+    parent_sha = hashlib.sha256(source).hexdigest()
+    source_rows = [
+        json.loads(line)
+        for line in (compiled_epoch / "data/tasks/private_tasks.jsonl")
+        .read_text()
+        .splitlines()
+        if line.strip()
+    ]
+    selected_by_family = {row["task"]["family"]: row["task_id"] for row in source_rows}
+    selected_ids = list(selected_by_family.values())[:3]
+    delivery = build_delivery_subset_archive(
+        source,
+        selected_ids,
+        scope="qualifying",
+        parent_pack_sha256=parent_sha,
+    )
+    metadata = _metadata(
+        parent_sha,
+        delivery.body,
+        delivery_task_ids=selected_ids,
+        task_count=3,
+        family_counts=delivery.family_counts,
+    )
+
+    async with _client(metadata, delivery.body) as client:
+        loaded = await fetch_and_validate_pack(
+            parent_sha,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path / "accepted",
+            http_client=client,
+        )
+    assert loaded is not None
+    loaded.close()
+
+    unauthorized_id = next(
+        row["task_id"] for row in source_rows if row["task_id"] not in selected_ids
+    )
+    metadata["delivery_task_ids"] = [*selected_ids[:-1], unauthorized_id]
+    async with _client(metadata, delivery.body) as client:
+        rejected = await fetch_and_validate_pack(
+            parent_sha,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path / "rejected",
+            http_client=client,
+        )
+    assert rejected is None
 
 
 @_run_async
@@ -492,6 +570,33 @@ async def test_rejects_oversized_declared_artifact_before_fetch(tmp_path: Path) 
     assert loaded is None
     assert len(requests) == 1
     assert list(tmp_path.iterdir()) == []
+
+
+@_run_async
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"delivery_scope": "race"},
+        {"delivery_task_ids": []},
+        {"delivery_task_ids": ["task-1", "task-1"], "task_count": 2},
+        {"task_count": 2},
+        {"family_counts": {"retrieval_recall": 2}},
+    ],
+)
+async def test_rejects_invalid_delivery_metadata_before_fetch(
+    tmp_path: Path,
+    updates: dict[str, object],
+) -> None:
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    requests: list[httpx.Request] = []
+
+    loaded = await _fetch_pack(
+        _metadata(pack_sha256, artifact, **updates), artifact, tmp_path, requests
+    )
+
+    assert loaded is None
+    assert len(requests) == 1
 
 
 @_run_async
@@ -636,26 +741,10 @@ async def test_version_mismatch_skips_without_downloading(
 
 
 @_run_async
-async def test_signed_pack_requires_and_uses_verifier(tmp_path: Path) -> None:
+async def test_qualifying_delivery_rejects_parent_signature(tmp_path: Path) -> None:
     artifact = _archive_bytes()
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
     metadata = _metadata(pack_sha256, artifact, artifact_signature="base64-signature")
-
-    async with _client(metadata, artifact) as client:
-        missing_verifier = await fetch_and_validate_pack(
-            pack_sha256,
-            "https://backend.test",
-            object(),
-            scratch_root=tmp_path,
-            http_client=client,
-        )
-    assert missing_verifier is None
-
-    verified: list[tuple[Path, str]] = []
-
-    def verifier(path: Path, signature: str) -> bool:
-        verified.append((path, signature))
-        return True
 
     async with _client(metadata, artifact) as client:
         loaded = await fetch_and_validate_pack(
@@ -664,12 +753,8 @@ async def test_signed_pack_requires_and_uses_verifier(tmp_path: Path) -> None:
             object(),
             scratch_root=tmp_path,
             http_client=client,
-            artifact_signature_verifier=verifier,
         )
-
-    assert loaded is not None
-    assert verified[0][1] == "base64-signature"
-    loaded.close()
+    assert loaded is None
 
 
 @_run_async
@@ -730,6 +815,10 @@ def _race_metadata(
         "catalog_sha256": "1" * 64,
         "search_index_epoch": None,
         "search_index_sha256": None,
+        "delivery_scope": "race",
+        "delivery_task_ids": ["TF2-retrieval_recall-1"],
+        "task_count": 1,
+        "family_counts": {"retrieval_recall": 1},
     }
     result.update(updates)
     return result

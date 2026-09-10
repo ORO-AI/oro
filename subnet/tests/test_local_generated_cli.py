@@ -100,7 +100,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "0.2.9"
+    assert version("oro-env-runtime") == "0.2.10"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
@@ -119,8 +119,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     family_counts = manifest["epoch"]["family_counts"]
     assert set(family_counts) == local.GENERATED_FAMILIES
     assert all(
-        count >= local.QUALIFYING_TASKS_PER_FAMILY
-        for count in family_counts.values()
+        count >= local.QUALIFYING_TASKS_PER_FAMILY for count in family_counts.values()
     )
     assert manifest["epoch"]["tasks"] == sum(family_counts.values())
 
