@@ -53,6 +53,17 @@ function pairCalls(trace) {
   }));
 }
 
+// The runtime hands the agent one string: the shopper's goal, then a "Task rules"
+// block carrying the family's system prompt. Only the goal belongs in the header.
+function splitQuery(query) {
+  const marker = query.indexOf("\n\nTask rules:");
+  if (marker === -1) return { query, taskRules: "" };
+  return {
+    query: query.slice(0, marker).trim(),
+    taskRules: query.slice(marker + "\n\nTask rules:".length).trim(),
+  };
+}
+
 export function normalizeOroEpisode(input, sourceName = "trajectory.json") {
   const episode = requireEpisode(input, sourceName);
   const ledger = Array.isArray(episode.ledger) ? episode.ledger : [];
@@ -66,7 +77,7 @@ export function normalizeOroEpisode(input, sourceName = "trajectory.json") {
       id: episode.task_id ?? "Unknown task",
       family: episode.family ?? "unknown",
     },
-    query: episode.bootstrap?.policy_view?.query ?? "",
+    ...splitQuery(episode.bootstrap?.policy_view?.query ?? ""),
     correct: typeof episode.verdict?.correct === "boolean" ? episode.verdict.correct : null,
     reward: episode.verdict?.paid_reward ?? null,
     terminalReason: episode.terminal_reason ?? episode.outcome ?? "unknown",

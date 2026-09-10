@@ -134,3 +134,28 @@ test("dispatches supported formats and names malformed inputs", async () => {
     /future-atif\.json: unsupported schema_version ATIF-v1\.8/,
   );
 });
+
+test("splits the shopper goal from the task rules the runtime appends", async () => {
+  const [{ value }] = await loadSamples();
+  const episode = structuredClone(value);
+  episode.episode.bootstrap.policy_view.query =
+    'find an in-stock listing under 693.00 PHP, and buy one\n\nTask rules:\nYou are a shopping agent. Search the catalog.\nCategory: Groceries';
+
+  const trajectory = normalizeOroEpisode(episode, "task-rules.json");
+
+  assert.equal(trajectory.query, "find an in-stock listing under 693.00 PHP, and buy one");
+  assert.match(trajectory.taskRules, /^You are a shopping agent\./);
+  assert.match(trajectory.taskRules, /Category: Groceries$/);
+  assert.ok(!trajectory.query.includes("Task rules"));
+});
+
+test("keeps the whole query when the runtime appends no task rules", async () => {
+  const [{ value }] = await loadSamples();
+  const episode = structuredClone(value);
+  episode.episode.bootstrap.policy_view.query = "Want a gaming monitor around 12599 PHP.";
+
+  const trajectory = normalizeOroEpisode(episode, "plain.json");
+
+  assert.equal(trajectory.query, "Want a gaming monitor around 12599 PHP.");
+  assert.equal(trajectory.taskRules, "");
+});

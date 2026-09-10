@@ -26,9 +26,13 @@ function selectedTrajectory() {
 }
 
 function renderHeader(trajectory) {
+  const rules = trajectory.taskRules
+    ? `<details class="task-rules"><summary>Task rules given to the agent</summary><p>${escapeHtml(trajectory.taskRules)}</p></details>`
+    : "";
   return `<p class="kicker">${escapeHtml(trajectory.format)} / ${escapeHtml(trajectory.task.family)}</p>
     <h2>${escapeHtml(trajectory.task.id)}</h2>
     <blockquote>${escapeHtml(trajectory.query)}</blockquote>
+    ${rules}
     <div class="trajectory-meta"><span>${trajectory.timeline.length} turns</span><span>${escapeHtml(trajectory.sourceName)}</span><span>${escapeHtml(trajectory.terminalReason)}</span></div>`;
 }
 

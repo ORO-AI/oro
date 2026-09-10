@@ -120,6 +120,7 @@ export function normalizeAtifTrajectory(input, sourceName = "trajectory.json") {
       family: oroMetadata.family ?? "ATIF",
     },
     query: firstUserMessage ?? "",
+    taskRules: "",
     correct: typeof oroOutcome.success === "boolean" ? oroOutcome.success : null,
     reward: oroOutcome.reward ?? null,
     terminalReason: oroOutcome.termination_reason ?? "completed",
