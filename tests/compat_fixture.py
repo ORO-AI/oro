@@ -15,8 +15,14 @@ import pytest
 
 from oro_env_runtime import contracts
 from oro_env_runtime.pack import write_checksums
+from oro_env_runtime.reward import (
+    TF4_RELEASE_GATE_PATH,
+    tf4_release_gate_fingerprint,
+    tf4_release_gate_passed,
+)
 from oro_env_runtime.search_index import source_listing_id
 from oro_env_runtime.schema import TaskSpec
+from oro_env_runtime.tf4_judge_contract import judge_contract
 from validator.env_pack_loader import LoadedPack
 
 COMPAT_ARCHIVE = Path(__file__).with_name("fixtures") / "oro_env_runtime_compat_v1.tar.gz"
@@ -103,6 +109,16 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     manifest["contracts"]["runtime"] = contracts.RUNTIME_VERSION
     manifest["contracts"]["tools"] = contracts.TOOL_CONTRACT_VERSION
     manifest["contracts"]["verifier"] = contracts.VERIFIER_VERSION
+    gate_path = epoch / "tf4_hybrid_release_gate.json"
+    shutil.copy2(TF4_RELEASE_GATE_PATH, gate_path)
+    gate = json.loads(gate_path.read_text())
+    tf4_contract = judge_contract(manifest["models"]["judge"])
+    tf4_reward = manifest["reward"]["preference_reasoning"]
+    tf4_reward["release_gate_fingerprint"] = tf4_release_gate_fingerprint(gate)
+    tf4_reward["judge_contract"] = tf4_contract
+    gate_active = tf4_release_gate_passed(gate_path, judge_contract=tf4_contract)
+    tf4_reward["active"] = gate_active
+    tf4_reward["status"] = "active" if gate_active else "shadow"
     (epoch / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     write_checksums(epoch)
     shutil.make_archive(str(epoch), "gztar", root_dir=tmp_path, base_dir="epoch")

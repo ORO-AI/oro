@@ -11,9 +11,12 @@ search server, and sandbox. It does not compile tasks or fetch evaluation work
 from the Backend. The proxy reads the public Backend model allowlist, matching
 the qualifying inference path.
 
-The exact release EnvPack is included at `data/local-test/env-pack.tar.gz`
-using Git LFS. The local runner verifies the pack, its runtime contracts, and
-the matching search-index identity before it starts the agent sandbox.
+The exact qualifying EnvPack is included at `data/local-test/env-pack.tar.gz`
+using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.9, runtime
+contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
+`9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a`.
+The local runner verifies the pack, its runtime contracts, and the matching
+search-index identity before it starts the agent sandbox.
 Your agent file must define a synchronous callable
 `agent_main()`. From the repository root, use the existing command:
 
@@ -51,9 +54,14 @@ git lfs pull
 docker compose build test test-proxy sandbox
 ```
 
-The `test-search-server` service uses the same promoted `stable` image as
-production validators. Docker downloads it on the first run. The runtime
-rejects a mismatched search identity before starting the agent sandbox.
+The `test-search-server` service follows the shared `IMAGE_TAG`, which defaults
+to `stable`, alongside the published sandbox and proxy images. The validator
+is built from the checkout. Set `IMAGE_TAG=latest` to test prerelease
+dependencies. For pack-specific validation, `LOCAL_SEARCH_SERVER_IMAGE`
+overrides only the search service with an exact tag or digest. Docker downloads
+the multi-architecture search image for the host platform on the first run.
+Reserve at least 16 GB of free disk space for the image and runtime data. The
+runtime rejects a mismatched search identity before starting the agent sandbox.
 
 Before starting the agent, the runtime validates every task and catalog
 reference in the bundled qualifying pack.

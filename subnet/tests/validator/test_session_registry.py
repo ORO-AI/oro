@@ -836,6 +836,44 @@ def test_timeout_quarantines_session_and_blocks_verdict(
         assert result["call_trace"][0]["latency_ms"] == timing["total"]
 
 
+def test_finalization_waits_for_timed_out_tool_worker(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.01) as registry:
+        _start(registry)
+        session = registry._sessions["session-1"].session
+        original = session.step
+
+        def blocked_step(action: dict) -> dict:
+            entered.set()
+            assert release.wait(5), "test must release the timed-out worker"
+            return original(action)
+
+        monkeypatch.setattr(session, "step", blocked_step)
+        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
+            registry.call(_call_envelope(registry))
+        assert entered.is_set()
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            finalization = executor.submit(registry.finalized_results)
+            try:
+                time.sleep(0.03)
+                assert not finalization.done(), "receipt must wait for timed-out work"
+            finally:
+                release.set()
+            result = finalization.result(timeout=5)[0]
+
+        assert result["outcome"] == "environment_error"
+        assert result["step_count"] == 1
+        assert [entry["kind"] for entry in result["ledger"]] == [
+            "model_action",
+            "observation",
+        ]
+        assert result["terminal_state_hash"] is None
+
+
 def test_http_bridge_exposes_calls_but_not_private_operations(
     registry: SessionRegistry,
 ) -> None:

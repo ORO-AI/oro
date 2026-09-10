@@ -21,10 +21,41 @@ RUN python /tmp/patch_pyserini.py && \
     rm /tmp/patch_pyserini.py && \
     python -c 'from pyserini.search.lucene import LuceneSearcher; print(LuceneSearcher.__name__)'
 
-# Pre-built index and its immutable identity receipt. The manual
-# publication workflow verifies and stages both before this build starts.
-COPY indexes /app/indexes
-COPY lucene_manifest.json /app/lucene_manifest.json
+# Keep the large archive compressed in the build context. ADD expands it into
+# one image layer, avoiding a second host copy of the full Lucene index.
+ADD index.tar.gz /app/
+
+# Validate every expanded index file before this base image can be published.
+RUN test -d /app/index && \
+    ln -s /app/index /app/indexes && \
+    mkdir /app/sidecar && \
+    python - <<'PY'
+import hashlib
+import json
+from pathlib import Path
+
+manifest = json.loads(Path("lucene_manifest.json").read_text())
+expected = manifest["files"]
+actual = {
+    path.name
+    for path in Path("index").iterdir()
+    if path.is_file() and not path.is_symlink()
+}
+if actual != set(expected):
+    raise SystemExit("Lucene index file set does not match its manifest")
+for name, identity in expected.items():
+    path = Path("index", name)
+    if path.is_symlink() or not path.is_file():
+        raise SystemExit(f"Lucene index member is not a regular file: {name}")
+    if path.stat().st_size != identity["size_bytes"]:
+        raise SystemExit(f"Lucene index size mismatch: {name}")
+    digest = hashlib.sha256()
+    with path.open("rb") as index_file:
+        for chunk in iter(lambda: index_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != identity["sha256"]:
+        raise SystemExit(f"Lucene index digest mismatch: {name}")
+PY
 
 # A sealed index records the JDK used to build it. Refuse a later rebuild if
 # the selected Temurin tag has moved to a different Java release.
@@ -41,7 +72,5 @@ if actual != expected:
     raise SystemExit(f"Lucene index requires {expected!r}, image provides {actual!r}")
 PY
 
-# Optional columnar filter sidecar for the legacy /find_product path. The
-# generated-index workflow supplies an empty directory, selecting the server's
-# existing decode fallback; pure /internal/bm25 does not use this sidecar.
-COPY sidecar /app/sidecar
+# The empty sidecar selects the server's existing decode fallback. Pure
+# /internal/bm25 does not use this sidecar.

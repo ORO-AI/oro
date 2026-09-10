@@ -115,6 +115,9 @@ class _SessionState:
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
+    pending_futures: set[concurrent.futures.Future[Any]] = field(
+        default_factory=set, repr=False
+    )
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -469,6 +472,7 @@ class SessionRegistry:
                 future = self._executor.submit(state.session.step_parallel, actions)
             else:
                 future = self._executor.submit(state.session.step, actions[0])
+            state.pending_futures.add(future)
             try:
                 raw_observations = future.result(timeout=self.tool_timeout_s)
                 observations = raw_observations if is_group else [raw_observations]
@@ -489,6 +493,7 @@ class SessionRegistry:
                 raise HarnessExecutionError(
                     f"{state.quarantined_reason}; session quarantined"
                 ) from exc
+            state.pending_futures.discard(future)
             tool_latency_ms = _elapsed_ms(tool_started)
 
             public_observations = [
@@ -573,6 +578,7 @@ class SessionRegistry:
                     turn,
                     message_sent,
                 )
+                state.pending_futures.add(future)
                 try:
                     decisions = future.result(timeout=self.simulator_timeout_s)
                 except concurrent.futures.TimeoutError as exc:
@@ -594,6 +600,7 @@ class SessionRegistry:
                     raise HarnessExecutionError(
                         f"{state.quarantined_reason}; session quarantined"
                     ) from exc
+                state.pending_futures.discard(future)
                 simulator_latency_ms = _elapsed_ms(simulator_started)
                 contents = []
                 for decision, decision_signal in decisions:
@@ -735,6 +742,9 @@ class SessionRegistry:
         results: list[dict[str, Any]] = []
         for session_id, state in states:
             with state.lock:
+                if state.pending_futures:
+                    concurrent.futures.wait(state.pending_futures)
+                    state.pending_futures.clear()
                 if state.final_result is not None:
                     results.append(copy.deepcopy(state.final_result))
                     continue
