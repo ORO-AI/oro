@@ -467,6 +467,7 @@ class SessionRegistry:
                         ),
                         "latency_ms": timing["total"],
                         "timing_ms": timing,
+                        "search_retries": copy.deepcopy(search_retry_trace),
                         "simulator": (
                             {
                                 "latency_ms": simulator_latency_ms,
@@ -483,10 +484,24 @@ class SessionRegistry:
             tool_started = time.perf_counter()
             event_before_group = state.session.env.applied_event
             tool_snapshot = self._session_snapshot(state)
-            if is_group:
-                future = self._executor.submit(state.session.step_parallel, actions)
-            else:
-                future = self._executor.submit(state.session.step, actions[0])
+            search_retry_trace: list[dict[str, Any]] = []
+
+            def execute_tool_call() -> Any:
+                nonlocal search_retry_trace
+
+                def execute() -> Any:
+                    if is_group:
+                        return state.session.step_parallel(actions)
+                    return state.session.step(actions[0])
+
+                capture = getattr(state.session.search, "capture_retry_trace", None)
+                if not callable(capture):
+                    return execute()
+                with capture() as trace:
+                    search_retry_trace = trace
+                    return execute()
+
+            future = self._executor.submit(execute_tool_call)
             try:
                 raw_observations = future.result(timeout=self.tool_timeout_s)
                 observations = raw_observations if is_group else [raw_observations]
@@ -697,6 +712,7 @@ class SessionRegistry:
                     "state_hash_after": state_hash_after,
                     "latency_ms": timing["total"],
                     "timing_ms": timing,
+                    "search_retries": copy.deepcopy(search_retry_trace),
                     "simulator": simulator_evidence(),
                     "error": None,
                 }
