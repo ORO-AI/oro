@@ -7,11 +7,12 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import stat
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,8 @@ class LocalGeneratedConfig:
     inference_base_url: str
     model: str
     pack_sha256: str | None = None
-    tasks_per_family: int = QUALIFYING_TASKS_PER_FAMILY
+    problem_count: int | None = None
+    seed: int | None = None
     max_workers: int = 7
     timeout: float = 1800.0
     session_host: str = "0.0.0.0"
@@ -101,29 +103,62 @@ class LocalGeneratedValidatorError(RuntimeError):
         self.summary_path = summary_path
 
 
+def _sample_problem_ids(pack: LoadedPack, count: int, seed: int | None) -> list[str]:
+    """Pick ``count`` task ids at random, spread as evenly across families as possible."""
+
+    rng = random.Random(seed)
+    by_family: dict[str, list[int]] = defaultdict(list)
+    for index, task in enumerate(pack.task_specs):
+        by_family[task.family].append(index)
+
+    families = sorted(by_family)
+    rng.shuffle(families)
+    for indexes in by_family.values():
+        rng.shuffle(indexes)
+
+    chosen: list[int] = []
+    deepest = max(len(indexes) for indexes in by_family.values())
+    for depth in range(deepest):
+        for family in families:
+            indexes = by_family[family]
+            if depth < len(indexes):
+                chosen.append(indexes[depth])
+                if len(chosen) == count:
+                    return [pack.task_ids[index] for index in sorted(chosen)]
+    return [pack.task_ids[index] for index in sorted(chosen)]
+
+
 def validate_local_pack(
     pack: LoadedPack,
     expected_families: frozenset[str] = GENERATED_FAMILIES,
     tasks_per_family: int = QUALIFYING_TASKS_PER_FAMILY,
+    *,
+    problem_count: int | None = None,
+    seed: int | None = None,
 ) -> list[str]:
-    """Validate the family roster and select the qualifying task count."""
+    """Validate the family roster, then choose which problems to run.
 
-    if tasks_per_family <= 0:
+    Without ``problem_count`` this selects the qualifying roster: the first
+    ``tasks_per_family`` of every family, in archive order. With it, that many
+    problems are sampled at random and spread across families, so a short run
+    still covers as many of TF1 through TF7 as it has room for.
+    """
+
+    if problem_count is None and tasks_per_family <= 0:
         raise ValueError("tasks_per_family must be positive")
 
     counts = Counter(task.family for task in pack.task_specs)
     missing = sorted(expected_families - set(counts))
     unexpected = sorted(set(counts) - expected_families)
-    insufficient = sorted(
-        f"{family}:{counts[family]}"
-        for family in expected_families
-        if counts[family] < tasks_per_family
-    )
-    if insufficient and not missing and not unexpected:
-        raise ValueError(
-            f"pack has fewer than {tasks_per_family} tasks in "
-            f"{','.join(insufficient)}; lower LOCAL_TASKS_PER_FAMILY"
+    insufficient = (
+        []
+        if problem_count is not None
+        else sorted(
+            f"{family}:{counts[family]}"
+            for family in expected_families
+            if counts[family] < tasks_per_family
         )
+    )
     if missing or unexpected or insufficient:
         details = [f"task_count={len(pack.task_specs)}"]
         if missing:
@@ -134,13 +169,19 @@ def validate_local_pack(
             details.append(f"insufficient={','.join(insufficient)}")
         raise ValueError("invalid local generated pack: " + "; ".join(details))
 
-    selected: list[str] = []
-    selected_counts: Counter[str] = Counter()
-    for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True):
-        if selected_counts[task.family] < tasks_per_family:
-            selected.append(task_id)
-            selected_counts[task.family] += 1
-    return selected
+    if problem_count is None:
+        selected: list[str] = []
+        selected_counts: Counter[str] = Counter()
+        for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True):
+            if selected_counts[task.family] < tasks_per_family:
+                selected.append(task_id)
+                selected_counts[task.family] += 1
+        return selected
+
+    available = len(pack.task_ids)
+    if not 1 <= problem_count <= available:
+        raise ValueError(f"--problems must be between 1 and {available}")
+    return _sample_problem_ids(pack, problem_count, seed)
 
 
 def _sha256(path: Path) -> str:
@@ -227,6 +268,7 @@ def _write_summary(
     results: list[dict[str, Any]],
     aggregate_score: float | None,
     status: str,
+    seed: int | None = None,
     error: LocalGeneratedValidatorError | None = None,
 ) -> dict[str, Any]:
     task_rows = _summary_tasks(results)
@@ -247,6 +289,8 @@ def _write_summary(
         ),
         "task_count": len(results),
         "task_roster": task_ids,
+        "pack_task_count": len(pack.task_ids) if pack is not None else len(results),
+        "selection_seed": seed,
         "models": (
             {
                 str(role): str(model)
@@ -444,7 +488,9 @@ def run_local_generated_validator(
         pack = load_local_pack(config.pack_path, config.pack_sha256)
 
         phase = "pack_validation"
-        task_ids = validate_local_pack(pack, tasks_per_family=config.tasks_per_family)
+        task_ids = validate_local_pack(
+            pack, problem_count=config.problem_count, seed=config.seed
+        )
 
         phase = "session_setup"
         registry = SessionRegistry(
@@ -611,6 +657,7 @@ def run_local_generated_validator(
             results=results,
             aggregate_score=aggregate_score,
             status="completed",
+            seed=config.seed,
         )
         report_path = local_report.write_trajectory_report(
             artifact_dir.resolve() / "trajectories.html",
@@ -664,6 +711,7 @@ def run_local_generated_validator(
                 results=results,
                 aggregate_score=aggregate_score,
                 status="failed",
+                seed=config.seed,
                 error=run_error,
             )
         except Exception:  # noqa: BLE001, S110
@@ -693,7 +741,29 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         description="Run the bundled generated EnvPack locally."
     )
     parser.add_argument("--agent-file", default="src/agent/environment_agent.py")
+    parser.add_argument(
+        "--problems",
+        type=int,
+        default=None,
+        help=(
+            "How many problems to run, sampled at random and spread across the "
+            "seven families. Defaults to the full qualifying roster."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Reuse a previous run's selection seed to repeat its problems.",
+    )
     args = parser.parse_args(arguments)
+    if args.problems is not None and args.problems <= 0:
+        raise ValueError("--problems must be positive")
+    # A fresh sample each run avoids tuning against one lucky subset; the seed is
+    # reported so any run can be repeated exactly.
+    seed = args.seed
+    if args.problems is not None and seed is None:
+        seed = random.randrange(2**31)
     agent = Path(args.agent_file).expanduser()
     workspace_agent = Path("/workspace") / agent
     if not agent.is_absolute() and workspace_agent.is_file():
@@ -709,13 +779,8 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         raise ValueError("SANDBOX_MODEL contains unsupported characters")
     max_workers = int(os.environ.get("LOCAL_MAX_WORKERS") or "7")
     timeout = float(os.environ.get("LOCAL_TIMEOUT") or "1800")
-    tasks_per_family = int(
-        os.environ.get("LOCAL_TASKS_PER_FAMILY") or QUALIFYING_TASKS_PER_FAMILY
-    )
     if max_workers <= 0:
         raise ValueError("LOCAL_MAX_WORKERS must be positive")
-    if tasks_per_family <= 0:
-        raise ValueError("LOCAL_TASKS_PER_FAMILY must be positive")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("LOCAL_TIMEOUT must be finite and positive")
     root = Path(__file__).resolve().parents[1]
@@ -734,7 +799,8 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
         or "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a",
-        tasks_per_family=tasks_per_family,
+        problem_count=args.problems,
+        seed=seed,
         max_workers=max_workers,
         timeout=timeout,
         session_host="127.0.0.1",

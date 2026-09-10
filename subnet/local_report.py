@@ -54,6 +54,15 @@ def stdout_supports_color() -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
+def _problem_line(summary: dict[str, Any], selected: int) -> str:
+    available = int(summary.get("pack_task_count") or selected)
+    if selected >= available:
+        return f"all {available}"
+    seed = summary.get("selection_seed")
+    repeat = "" if seed is None else f", repeat with --seed {seed}"
+    return f"{selected} of {available}, sampled{repeat}"
+
+
 def render_console_report(
     summary: dict[str, Any],
     *,
@@ -79,7 +88,8 @@ def render_console_report(
     pack_sha256 = str(summary["pack_sha256"])
     lines = [
         f"{paint('ORO Bench local run', _BOLD)}  {paint(str(summary['run_id']), _CYAN)}",
-        f"  pack        {pack_sha256[:8]}…{pack_sha256[-4:]}  ({len(tasks)} tasks)",
+        f"  pack        {pack_sha256[:8]}…{pack_sha256[-4:]}",
+        f"  problems    {_problem_line(summary, len(tasks))}",
         (
             f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}"
             f"  verifier {PACK_VERSION_IDENTITIES['verifier_version']}"

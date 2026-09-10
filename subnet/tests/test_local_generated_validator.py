@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -86,7 +87,7 @@ def _config(tmp_path: Path, *, timeout: float = 120.0) -> LocalGeneratedConfig:
         inference_base_url="https://openrouter.test/api/v1",
         model="vendor/test-model",
         pack_sha256="a" * 64,
-        tasks_per_family=1,
+        problem_count=7,
         max_workers=7,
         timeout=timeout,
     )
@@ -183,21 +184,69 @@ def test_local_pack_selects_first_five_tasks_from_each_generated_family() -> Non
     with pytest.raises(ValueError, match="unexpected="):
         validate_local_pack(_pack(unexpected))
 
-    with pytest.raises(ValueError, match="lower LOCAL_TASKS_PER_FAMILY"):
+    with pytest.raises(ValueError, match="insufficient="):
         validate_local_pack(_pack(families * 4))
 
-    with pytest.raises(ValueError, match="insufficient="):
-        validate_local_pack(_pack(families * 4 + ["unsupported"]))
 
-
-def test_local_pack_can_select_one_task_from_each_generated_family() -> None:
+def test_problem_count_samples_across_every_family_it_can_reach() -> None:
     families = sorted(GENERATED_FAMILIES)
-    pack = _pack([family for family in families for _ in range(6)])
+    pack = _pack([family for family in families for _ in range(5)])
+    family_of = {
+        f"task-{index}": family
+        for index, family in enumerate(family for family in families for _ in range(5))
+    }
 
-    selected = validate_local_pack(pack, tasks_per_family=1)
+    seven = validate_local_pack(pack, problem_count=7, seed=1)
+    assert len(seven) == 7
+    assert sorted(family_of[task] for task in seven) == families
 
-    assert selected == [f"task-{index * 6}" for index in range(7)]
-    assert len(selected) == 7
+    three = validate_local_pack(pack, problem_count=3, seed=1)
+    assert len(three) == 3
+    assert len({family_of[task] for task in three}) == 3
+
+    ten = validate_local_pack(pack, problem_count=10, seed=1)
+    assert len(ten) == 10
+    assert sorted(Counter(family_of[task] for task in ten).values()) == [
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+    ]
+
+    assert validate_local_pack(pack, problem_count=35, seed=1) == pack.task_ids
+    # Archive order, so problems.jsonl and the roster stay readable.
+    assert seven == sorted(seven, key=lambda task: int(task.removeprefix("task-")))
+
+
+def test_problem_selection_repeats_only_for_a_repeated_seed() -> None:
+    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+
+    assert validate_local_pack(pack, problem_count=7, seed=7) == validate_local_pack(
+        pack, problem_count=7, seed=7
+    )
+    assert validate_local_pack(pack, problem_count=7, seed=7) != validate_local_pack(
+        pack, problem_count=7, seed=8
+    )
+
+
+def test_problem_count_outside_the_pack_names_the_bounds() -> None:
+    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+
+    for count in (0, 36):
+        with pytest.raises(ValueError, match="--problems must be between 1 and 35"):
+            validate_local_pack(pack, problem_count=count)
+
+
+def test_a_short_run_does_not_require_a_full_qualifying_family(tmp_path: Path) -> None:
+    # The per-family minimum is a qualifying rule; a sampled run should not inherit it.
+    pack = _pack(sorted(GENERATED_FAMILIES))
+
+    assert len(validate_local_pack(pack, problem_count=3, seed=1)) == 3
+    with pytest.raises(ValueError, match="insufficient="):
+        validate_local_pack(pack)
 
 
 def test_summary_averages_rewards_within_each_family(tmp_path: Path) -> None:

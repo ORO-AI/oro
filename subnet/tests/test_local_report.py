@@ -45,6 +45,8 @@ def _summary() -> dict:
             _task("TF6-recovery-1", "recovery", 0.0, outcome="environment_error"),
         ],
         "aggregate_score": 0.375,
+        "pack_task_count": 35,
+        "selection_seed": 4821993,
     }
 
 
@@ -71,6 +73,24 @@ def test_console_report_names_run_models_and_versions() -> None:
     assert "deepseek/deepseek-v4-flash-0731" in report
     # The generator's solver is not a model the miner's run used.
     assert "nemotron" not in report
+
+
+def test_console_report_names_the_sample_and_how_to_repeat_it() -> None:
+    assert "problems    4 of 35, sampled, repeat with --seed 4821993" in _report()
+
+    full = _summary()
+    full["pack_task_count"] = len(full["tasks"])
+    full["selection_seed"] = None
+    report = local_report.render_console_report(
+        full,
+        artifact_dir=Path("/x"),
+        report_path=None,
+        provider="openrouter",
+        agent_model="m",
+        color=False,
+    )
+    assert "problems    all 4" in report
+    assert "--seed" not in report
 
 
 def test_console_report_groups_tasks_by_family_with_means() -> None:

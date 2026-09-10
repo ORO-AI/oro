@@ -35,7 +35,6 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOCAL_ENV_PACK_PATH",
         "LOCAL_ENV_PACK_SHA256",
         "LOCAL_OUTPUT_ROOT",
-        "LOCAL_TASKS_PER_FAMILY",
         "LOCAL_MAX_WORKERS",
         "LOCAL_TIMEOUT",
     ):
@@ -140,7 +139,6 @@ def test_invalid_model_cannot_reach_proxy_configuration(
     ("name", "value"),
     [
         ("LOCAL_MAX_WORKERS", "0"),
-        ("LOCAL_TASKS_PER_FAMILY", "0"),
         ("LOCAL_TIMEOUT", "-1"),
         ("LOCAL_TIMEOUT", "nan"),
     ],
@@ -156,19 +154,37 @@ def test_invalid_limits_fail_before_evaluation(
         local.parse_config(["--agent-file", str(agent)])
 
 
-def test_tasks_per_family_defaults_to_the_qualifying_count(
+def test_problems_flag_selects_a_subset_and_reports_a_repeatable_seed(
     monkeypatch, tmp_path
 ) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
     monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
 
-    assert local.parse_config(["--agent-file", str(agent)]).tasks_per_family == 5
+    full = local.parse_config(["--agent-file", str(agent)])
+    assert full.problem_count is None
+    assert full.seed is None
 
-    monkeypatch.setenv("LOCAL_TASKS_PER_FAMILY", "1")
-    config = local.parse_config(["--agent-file", str(agent)])
-    assert config.tasks_per_family == 1
-    assert config.max_workers == 7
+    short = local.parse_config(["--agent-file", str(agent), "--problems", "7"])
+    assert short.problem_count == 7
+    assert short.seed is not None
+    assert short.max_workers == 7
+
+    # A fresh sample per run unless the seed is handed back.
+    other = local.parse_config(["--agent-file", str(agent), "--problems", "7"])
+    assert other.seed != short.seed
+    repeated = local.parse_config(
+        ["--agent-file", str(agent), "--problems", "7", "--seed", str(short.seed)]
+    )
+    assert repeated.seed == short.seed
+
+
+def test_problems_flag_rejects_a_non_positive_count(monkeypatch, tmp_path) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    with pytest.raises(ValueError, match="--problems must be positive"):
+        local.parse_config(["--agent-file", str(agent), "--problems", "0"])
 
 
 def test_missing_credentials_fail_without_running_agent(tmp_path) -> None:

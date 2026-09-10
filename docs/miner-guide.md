@@ -79,17 +79,18 @@ reference in the bundled qualifying pack.
 available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
 
-`LOCAL_TASKS_PER_FAMILY` selects how many tasks to run from each of the seven
-families, in archive order. It defaults to 5, the qualifying count, for 35
-tasks. Set it to 1 for a 7-task smoke run that finishes in one wave of the
-default 7 workers:
+`--problems` runs a subset while you iterate. Pass any number from 1 to 35.
+The problems are sampled at random and spread across the seven families, so a
+short run still covers as many of TF1 through TF7 as it has room for:
 
 ```bash
-LOCAL_TASKS_PER_FAMILY=1 docker compose run test --agent-file my_agent.py
+docker compose run test --agent-file my_agent.py --problems 7
 ```
 
-A shorter run still exercises every family, verifier, and reward path. Scores
-from it are not comparable to qualifying, which always uses all 35.
+Each run samples afresh, so repeated runs do not tune the agent against one
+lucky subset. The report prints the seed; pass `--seed` to repeat an earlier
+selection exactly. Scores from a subset are not comparable to qualifying,
+which always runs all 35.
 Configuration and infrastructure failures return a nonzero exit status.
 
 Local tests use a dedicated search server and proxy. The proxy fetches the live
