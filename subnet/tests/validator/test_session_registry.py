@@ -7,6 +7,7 @@ import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import pytest
@@ -834,6 +835,40 @@ def test_timeout_quarantines_session_and_blocks_verdict(
         assert timing["tool"] >= 1
         assert timing["simulator"] is None
         assert result["call_trace"][0]["latency_ms"] == timing["total"]
+
+
+def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) -> None:
+    _start(registry)
+    session = registry._sessions["session-1"].session
+    retry_trace = [
+        {
+            "attempt": 1,
+            "method": "GET",
+            "outcome": "retry",
+            "error_type": "HTTPError",
+            "status_code": 503,
+            "backoff_seconds": 0.1,
+        },
+        {
+            "attempt": 2,
+            "method": "GET",
+            "outcome": "recovered",
+            "error_type": None,
+            "status_code": 200,
+            "backoff_seconds": 0.0,
+        },
+    ]
+
+    session.search.capture_retry_trace = MagicMock(
+        return_value=nullcontext(retry_trace)
+    )
+
+    response = registry.call(_call_envelope(registry))
+    trace = registry._sessions["session-1"].call_trace[0]
+
+    assert "search_retries" not in response
+    assert trace["search_retries"] == retry_trace
+    session.search.capture_retry_trace.assert_called_once_with()
 
 
 def test_timeout_finalization_and_close_do_not_wait_for_tool_worker(
