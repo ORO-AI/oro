@@ -34,6 +34,7 @@ from oro_env_runtime.contracts import (
     TOOL_CONTRACT_VERSION,
     VERIFIER_VERSION,
 )
+from oro_env_runtime.delivery import DeliverySubsetError, validate_delivery_binding
 from oro_env_runtime.pack import sha256_file
 from oro_env_runtime.runtime import (
     TaskSession,
@@ -67,8 +68,6 @@ PACK_LOAD_METRICS_SCHEMA_VERSION = "oro.validator.pack_load.v2"
 # ``validate_epoch`` on a stale cache hit.
 _VALIDATED_PACKS: set[str] = set()
 _VALIDATED_PACKS_LOCK = threading.Lock()
-
-ArtifactSignatureVerifier = Callable[[Path, str], bool]
 
 
 @dataclass
@@ -237,13 +236,36 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
             "download_url_size_bytes must be a positive integer no greater than "
             f"{MAX_ARTIFACT_SIZE_BYTES}"
         )
+    if metadata.get("artifact_signature") is not None:
+        raise PackValidationError(
+            "qualifying delivery must not reuse the parent artifact_signature"
+        )
+    _require_delivery_roster(metadata, "qualifying")
+    return metadata
+
+
+def _require_delivery_roster(metadata: dict[str, Any], scope: str) -> None:
+    if metadata.get("delivery_scope") != scope:
+        raise PackValidationError(f"delivery_scope must be {scope!r}")
+    task_ids = metadata.get("delivery_task_ids")
+    if (
+        not isinstance(task_ids, list)
+        or not task_ids
+        or any(not isinstance(task_id, str) or not task_id for task_id in task_ids)
+        or len(task_ids) != len(set(task_ids))
+    ):
+        raise PackValidationError("delivery_task_ids must be unique nonempty strings")
     task_count = metadata.get("task_count")
     if (
         not isinstance(task_count, int)
         or isinstance(task_count, bool)
-        or task_count < 0
+        or task_count < 1
     ):
-        raise PackValidationError("task_count must be a non-negative integer")
+        raise PackValidationError("task_count must be a positive integer")
+    if task_count != len(task_ids):
+        raise PackValidationError(
+            "task_count must equal the authorized delivery roster size"
+        )
     family_counts = metadata.get("family_counts")
     if not isinstance(family_counts, dict) or any(
         not isinstance(name, str)
@@ -255,12 +277,8 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
         raise PackValidationError(
             "family_counts must map family names to non-negative integers"
         )
-    signature = metadata.get("artifact_signature")
-    if signature is not None and (not isinstance(signature, str) or not signature):
-        raise PackValidationError(
-            "artifact_signature must be null or a non-empty string"
-        )
-    return metadata
+    if sum(family_counts.values()) != task_count:
+        raise PackValidationError("family_counts must sum to task_count")
 
 
 def _require_race_metadata(
@@ -318,6 +336,7 @@ def _require_race_metadata(
             "download_url_size_bytes must be a positive integer no greater than "
             f"{MAX_ARTIFACT_SIZE_BYTES}"
         )
+    _require_delivery_roster(metadata, "race")
     return metadata
 
 
@@ -450,24 +469,25 @@ def _load_validated_contents(
                 f"could not load validated pack contents: {exc}"
             ) from exc
 
-        # Race sub-archive metadata (POST /v1/validator/race/{race_id}/pack)
-        # omits task_count / family_counts since the race scope is defined by
-        # RaceProblem rows, not the pack aggregates. Only check when the
-        # qualifying pack fetch supplied them.
-        if "task_count" in metadata:
-            if len(task_specs) != metadata["task_count"]:
-                raise PackValidationError(
-                    "pack task count does not match Backend metadata: "
-                    f"expected {metadata['task_count']}, got {len(task_specs)}"
-                )
-        if "family_counts" in metadata:
-            actual_family_counts = Counter(task.family for task in task_specs)
-            if actual_family_counts != Counter(metadata["family_counts"]):
-                raise PackValidationError(
-                    "pack family counts do not match Backend metadata: "
-                    f"expected {metadata['family_counts']!r}, "
-                    f"got {dict(actual_family_counts)!r}"
-                )
+        try:
+            validate_delivery_binding(
+                manifest,
+                task_ids,
+                scope=metadata["delivery_scope"],
+                scope_id=(str(metadata["race_id"]) if "race_id" in metadata else None),
+                parent_pack_sha256=pack_sha256,
+                expected_task_ids=metadata["delivery_task_ids"],
+            )
+        except DeliverySubsetError as exc:
+            raise PackValidationError(f"delivery subset binding failed: {exc}") from exc
+
+        actual_family_counts = Counter(task.family for task in task_specs)
+        if actual_family_counts != Counter(metadata["family_counts"]):
+            raise PackValidationError(
+                "pack family counts do not match Backend metadata: "
+                f"expected {metadata['family_counts']!r}, "
+                f"got {dict(actual_family_counts)!r}"
+            )
     return pack_dir, manifest, task_specs, task_ids, cache_hit
 
 
@@ -555,7 +575,6 @@ async def fetch_and_validate_pack(
     scratch_root: str | Path | None = None,
     timeout: float = 60.0,
     http_client: httpx.AsyncClient | None = None,
-    artifact_signature_verifier: ArtifactSignatureVerifier | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> LoadedPack | None:
     """Fetch, validate, and load a sealed pack, returning ``None`` on rejection.
@@ -614,28 +633,6 @@ async def fetch_and_validate_pack(
                 raise PackValidationError(
                     "delivered archive sha256 mismatch: "
                     f"expected {expected_sha256}, got {actual_sha256}"
-                )
-
-        current_stage = "artifact_signature"
-        with _record_timing(timings, current_stage):
-            signature = metadata.get("artifact_signature")
-            if signature is not None:
-                if artifact_signature_verifier is None:
-                    # Wire the compiler signing public key once its
-                    # detached-signature trust contract is published.
-                    raise PackValidationError(
-                        "signed pack cannot be verified: "
-                        "no artifact signature verifier configured"
-                    )
-                verified = await asyncio.to_thread(
-                    artifact_signature_verifier, archive_path, signature
-                )
-                if verified is not True:
-                    raise PackValidationError("artifact signature verification failed")
-            else:
-                logger.warning(
-                    "Pack %s is unsigned; accepting during the pre-enforcement rollout",
-                    pack_sha256,
                 )
 
         current_stage = "archive_processing"
@@ -731,7 +728,7 @@ async def fetch_and_validate_race_pack(
     race. Returns ``None`` on any validation/fetch failure so the caller can
     fail the run cleanly instead of crashing the loop.
 
-    The returned :class:`LoadedPack` carries the race's 60 task specs — a
+    The returned :class:`LoadedPack` carries the race's selected task specs — a
     strict subset of the parent pack the caller previously loaded via
     :func:`fetch_and_validate_pack`. Callers pointing sessions at race task
     ids should use this pack, not the qualifying one.
@@ -876,7 +873,6 @@ __all__ = [
     "MAX_ARTIFACT_SIZE_BYTES",
     "MAX_EXTRACTED_SIZE_BYTES",
     "RESULT_SCHEMA_VERSION",
-    "ArtifactSignatureVerifier",
     "LoadedPack",
     "PackValidationError",
     "fetch_and_validate_pack",
