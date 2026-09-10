@@ -60,6 +60,7 @@ class LocalGeneratedConfig:
     inference_base_url: str
     model: str
     pack_sha256: str | None = None
+    tasks_per_family: int = QUALIFYING_TASKS_PER_FAMILY
     max_workers: int = 7
     timeout: float = 1800.0
     session_host: str = "0.0.0.0"
@@ -118,6 +119,11 @@ def validate_local_pack(
         for family in expected_families
         if counts[family] < tasks_per_family
     )
+    if insufficient and not missing and not unexpected:
+        raise ValueError(
+            f"pack has fewer than {tasks_per_family} tasks in "
+            f"{','.join(insufficient)}; lower LOCAL_TASKS_PER_FAMILY"
+        )
     if missing or unexpected or insufficient:
         details = [f"task_count={len(pack.task_specs)}"]
         if missing:
@@ -438,9 +444,7 @@ def run_local_generated_validator(
         pack = load_local_pack(config.pack_path, config.pack_sha256)
 
         phase = "pack_validation"
-        task_ids = validate_local_pack(
-            pack, tasks_per_family=QUALIFYING_TASKS_PER_FAMILY
-        )
+        task_ids = validate_local_pack(pack, tasks_per_family=config.tasks_per_family)
 
         phase = "session_setup"
         registry = SessionRegistry(
@@ -705,8 +709,13 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         raise ValueError("SANDBOX_MODEL contains unsupported characters")
     max_workers = int(os.environ.get("LOCAL_MAX_WORKERS") or "7")
     timeout = float(os.environ.get("LOCAL_TIMEOUT") or "1800")
+    tasks_per_family = int(
+        os.environ.get("LOCAL_TASKS_PER_FAMILY") or QUALIFYING_TASKS_PER_FAMILY
+    )
     if max_workers <= 0:
         raise ValueError("LOCAL_MAX_WORKERS must be positive")
+    if tasks_per_family <= 0:
+        raise ValueError("LOCAL_TASKS_PER_FAMILY must be positive")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("LOCAL_TIMEOUT must be finite and positive")
     root = Path(__file__).resolve().parents[1]
@@ -725,6 +734,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
         or "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a",
+        tasks_per_family=tasks_per_family,
         max_workers=max_workers,
         timeout=timeout,
         session_host="127.0.0.1",

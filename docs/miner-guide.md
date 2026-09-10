@@ -78,6 +78,18 @@ reference in the bundled qualifying pack.
 `LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be
 available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
+
+`LOCAL_TASKS_PER_FAMILY` selects how many tasks to run from each of the seven
+families, in archive order. It defaults to 5, the qualifying count, for 35
+tasks. Set it to 1 for a 7-task smoke run that finishes in one wave of the
+default 7 workers:
+
+```bash
+LOCAL_TASKS_PER_FAMILY=1 docker compose run test --agent-file my_agent.py
+```
+
+A shorter run still exercises every family, verifier, and reward path. Scores
+from it are not comparable to qualifying, which always uses all 35.
 Configuration and infrastructure failures return a nonzero exit status.
 
 Local tests use a dedicated search server and proxy. The proxy fetches the live

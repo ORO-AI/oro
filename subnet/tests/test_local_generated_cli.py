@@ -35,6 +35,7 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOCAL_ENV_PACK_PATH",
         "LOCAL_ENV_PACK_SHA256",
         "LOCAL_OUTPUT_ROOT",
+        "LOCAL_TASKS_PER_FAMILY",
         "LOCAL_MAX_WORKERS",
         "LOCAL_TIMEOUT",
     ):
@@ -137,7 +138,12 @@ def test_invalid_model_cannot_reach_proxy_configuration(
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("LOCAL_MAX_WORKERS", "0"), ("LOCAL_TIMEOUT", "-1"), ("LOCAL_TIMEOUT", "nan")],
+    [
+        ("LOCAL_MAX_WORKERS", "0"),
+        ("LOCAL_TASKS_PER_FAMILY", "0"),
+        ("LOCAL_TIMEOUT", "-1"),
+        ("LOCAL_TIMEOUT", "nan"),
+    ],
 )
 def test_invalid_limits_fail_before_evaluation(
     monkeypatch, tmp_path, name, value
@@ -148,6 +154,21 @@ def test_invalid_limits_fail_before_evaluation(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=name):
         local.parse_config(["--agent-file", str(agent)])
+
+
+def test_tasks_per_family_defaults_to_the_qualifying_count(
+    monkeypatch, tmp_path
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+
+    assert local.parse_config(["--agent-file", str(agent)]).tasks_per_family == 5
+
+    monkeypatch.setenv("LOCAL_TASKS_PER_FAMILY", "1")
+    config = local.parse_config(["--agent-file", str(agent)])
+    assert config.tasks_per_family == 1
+    assert config.max_workers == 7
 
 
 def test_missing_credentials_fail_without_running_agent(tmp_path) -> None:
