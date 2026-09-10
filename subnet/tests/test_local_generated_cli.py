@@ -99,6 +99,21 @@ def test_model_flag_is_not_required(monkeypatch, tmp_path) -> None:
     assert config.max_workers == 7
 
 
+def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> None:
+    # Every other parse_config test runs against the fixture's temp pack so the
+    # suite does not depend on this checkout's LFS state. That hides the default
+    # path, so pin it here with the pointer probe stubbed out.
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.delenv("LOCAL_ENV_PACK_PATH", raising=False)
+    monkeypatch.setattr(local, "_is_git_lfs_pointer", lambda path: False)
+
+    config = local.parse_config(["--agent-file", str(agent)])
+
+    assert config.pack_path == ROOT / "data" / "local-test" / "env-pack.tar.gz"
+
+
 def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
@@ -180,6 +195,9 @@ def test_lfs_pointer_pack_is_a_configuration_error(
     )
     monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(pointer))
+    # Point the run directory somewhere observable: the default is CWD-relative,
+    # so asserting on tmp_path without this would pass whether or not a run started.
+    monkeypatch.setenv("LOCAL_OUTPUT_ROOT", str(tmp_path / "logs"))
 
     assert local.main(["--agent-file", str(agent)]) == 2
     err = capsys.readouterr().err
