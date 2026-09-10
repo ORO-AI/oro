@@ -5,7 +5,6 @@ import json
 import tarfile
 from importlib.metadata import version
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from oro_env_runtime import (
@@ -171,9 +170,11 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         local,
         "run_local_generated_validator",
-        lambda config: SimpleNamespace(
+        lambda config: local.LocalGeneratedResult(
+            run_id="local-test",
             results=[
                 {
+                    "task_id": "TF6-recovery-1",
                     "family": "recovery",
                     "outcome": "completed",
                     "verdict": {
@@ -184,10 +185,34 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
             ],
             aggregate_score=0.5,
             artifact_dir=tmp_path / "results",
+            summary_path=tmp_path / "results" / "summary.json",
+            summary={
+                "run_id": "local-test",
+                "pack_sha256": "9e5d" + "0" * 60,
+                "aggregate_score": 0.5,
+                "models": {"user_simulator": "vendor/sim", "judge": "vendor/judge"},
+                "tasks": [
+                    {
+                        "task_id": "TF6-recovery-1",
+                        "family": "recovery",
+                        "outcome": "completed",
+                        "correct": True,
+                        "reward": 0.5,
+                        "error_classification": None,
+                        "error_detail": None,
+                    }
+                ],
+            },
+            report_path=tmp_path / "results" / "trajectories.html",
         ),
     )
     assert local.main(["--agent-file", str(agent)]) == 0
     output = capsys.readouterr().out
-    assert "recovery: completed, reward=0.500000" in output
-    assert "Aggregate score: 0.500000" in output
-    assert f"Artifacts: {tmp_path / 'results'}" in output
+    assert "local-test" in output
+    assert "TF6-recovery-1" in output and "0.50" in output
+    assert "vendor/sim" in output and "vendor/judge" in output
+    assert "deepseek-ai/DeepSeek-V3.2-TEE" in output
+    assert "Aggregate score  0.500000" in output
+    assert str(tmp_path / "results") in output
+    assert str(tmp_path / "results" / "trajectories.html") in output
+    assert "\x1b[" not in output

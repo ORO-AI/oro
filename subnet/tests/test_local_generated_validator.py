@@ -29,6 +29,7 @@ def _pack(families: list[str]) -> SimpleNamespace:
         task_specs=[SimpleNamespace(family=family) for family in families],
         task_ids=[f"task-{index}" for index in range(len(families))],
         pack_sha256="a" * 64,
+        manifest={"models": {"user_simulator": "vendor/sim"}},
         metadata={"search_index_sha256": "b" * 64},
         close=MagicMock(),
     )
@@ -546,6 +547,7 @@ def test_run_composes_generated_components_and_writes_per_family_summary(
         "task_id": "task-0",
         "family": families[0],
         "outcome": "completed",
+        "correct": False,
         "reward": 0.0,
         "error_classification": None,
         "error_detail": None,

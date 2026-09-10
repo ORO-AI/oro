@@ -53,8 +53,9 @@ live Backend allowlist. Run from the repository root:
 docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-The command prints family rewards, the aggregate, and an artifact directory
-under `logs/environment-runs/`. Generated agents use the environment's dynamic
+The command prints per-family rewards, the models in play, the aggregate, and
+an artifact directory under `logs/environment-runs/` that includes a
+self-contained `trajectories.html` for stepping through every episode. Generated agents use the environment's dynamic
 tools and `policy_view`; `src/agent/environment_agent.py` is the reference.
 See [the miner guide](docs/miner-guide.md#local-testing) for image setup,
 configuration, and outputs.

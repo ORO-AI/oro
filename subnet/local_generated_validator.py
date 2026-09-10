@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
 from subnet.validator.env_pack_loader import (
@@ -72,6 +73,8 @@ class LocalGeneratedResult:
     results: list[dict[str, Any]]
     artifact_dir: Path
     summary_path: Path
+    summary: dict[str, Any]
+    report_path: Path | None = None
 
     @property
     def score(self) -> float:
@@ -199,6 +202,7 @@ def _summary_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "task_id": str(result.get("task_id") or ""),
                 "family": result.get("family"),
                 "outcome": result.get("outcome"),
+                "correct": correct,
                 "reward": float(verdict.get("paid_reward") or 0) if correct else 0.0,
                 "error_classification": _error_classification(result),
                 "error_detail": result.get("error_detail"),
@@ -218,7 +222,7 @@ def _write_summary(
     aggregate_score: float | None,
     status: str,
     error: LocalGeneratedValidatorError | None = None,
-) -> None:
+) -> dict[str, Any]:
     task_rows = _summary_tasks(results)
     family_counts: Counter[str] = Counter()
     family_totals: Counter[str] = Counter()
@@ -237,6 +241,14 @@ def _write_summary(
         ),
         "task_count": len(results),
         "task_roster": task_ids,
+        "models": (
+            {
+                str(role): str(model)
+                for role, model in pack.manifest.get("models", {}).items()
+            }
+            if pack is not None
+            else {}
+        ),
         "aggregate_score": aggregate_score,
         "tasks": task_rows,
         "family_rewards": {
@@ -256,6 +268,7 @@ def _write_summary(
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+    return summary
 
 
 def _run_failure_classification(results: list[dict[str, Any]]) -> str:
@@ -585,7 +598,7 @@ def run_local_generated_validator(
 
         assert aggregate_score is not None
         phase = "summary"
-        _write_summary(
+        summary = _write_summary(
             summary_path,
             run_id=run_id,
             pack=pack,
@@ -595,12 +608,19 @@ def run_local_generated_validator(
             aggregate_score=aggregate_score,
             status="completed",
         )
+        report_path = local_report.write_trajectory_report(
+            artifact_dir.resolve() / "trajectories.html",
+            [build_episode_artifact(result) for result in results],
+            run_id=run_id,
+        )
         completed_result = LocalGeneratedResult(
             run_id=run_id,
             aggregate_score=aggregate_score,
             results=results,
             artifact_dir=artifact_dir.resolve(),
             summary_path=summary_path.resolve(),
+            summary=summary,
+            report_path=report_path,
         )
     except Exception as exc:  # noqa: BLE001
         caught_error = exc
@@ -725,14 +745,16 @@ def main(arguments: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    for task in result.results:
-        verdict = task.get("verdict") or {}
-        reward = (
-            float(verdict.get("paid_reward") or 0) if verdict.get("correct") else 0.0
+    print(
+        local_report.render_console_report(
+            result.summary,
+            artifact_dir=result.artifact_dir,
+            report_path=result.report_path,
+            provider=config.inference_provider,
+            agent_model=config.model,
+            color=local_report.stdout_supports_color(),
         )
-        print(f"{task.get('family')}: {task.get('outcome')}, reward={reward:.6f}")
-    print(f"Aggregate score: {result.aggregate_score:.6f}")
-    print(f"Artifacts: {result.artifact_dir}")
+    )
     return 0
 
 
