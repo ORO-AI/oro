@@ -18,16 +18,24 @@ contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
 The local runner verifies the pack, its runtime contracts, and the matching
 search-index identity before it starts the agent sandbox.
 Your agent file must define a synchronous callable
-`agent_main()`. From the repository root, use the existing command:
+`agent_main(problem_data)` that drives the environment session via
+`problem_data["environment"]["binding"]` and `policy_view`. See the [agent
+interface docs](https://docs.oroagents.com/docs/miners/agent-interface) for the
+full contract.
+
+Start from the bundled reference:
 
 ```bash
-docker compose run test --agent-file my_agent.py
+docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-For a reference agent, pass `--agent-file src/agent/environment_agent.py`.
-It reads `problem_data["environment"]["policy_view"]`, uses the supplied dynamic
-tools via `/environment/call`, and continues until `done=true`. Legacy
-ShoppingBench agents need to adopt this generated-environment contract.
+Once you have your own file (started from a copy of `environment_agent.py`),
+swap it in with `--agent-file my_agent.py`.
+
+> **Legacy `agent_main(task) -> List[Dict]`** — this is the old ShoppingBench
+> contract. Production evaluations no longer use it; an agent that never opens
+> a session against `binding.session_id` terminates as `agent_error` on every
+> task with zero score. Migrate to `agent_main(problem_data)` before submitting.
 
 ### Setup and configuration
 
