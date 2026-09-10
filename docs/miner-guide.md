@@ -12,7 +12,7 @@ from the Backend. The proxy reads the public Backend model allowlist, matching
 the qualifying inference path.
 
 The exact qualifying EnvPack is included at `data/local-test/env-pack.tar.gz`
-using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.10, runtime
+using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.11, runtime
 contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
 `9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a`.
 The local runner verifies the pack, its runtime contracts, and the matching
