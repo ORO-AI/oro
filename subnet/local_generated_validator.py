@@ -664,6 +664,16 @@ __all__ = [
 ]
 
 
+# What a checkout holds at the LFS-tracked pack path when the object was never
+# fetched: no `git lfs install`, a GitHub zip download, or `git archive`.
+_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+
+
+def _is_git_lfs_pointer(path: Path) -> bool:
+    with path.open("rb") as handle:
+        return handle.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX
+
+
 def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
     parser = argparse.ArgumentParser(
         description="Run the bundled generated EnvPack locally."
@@ -677,6 +687,18 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
     if not agent.is_file():
         raise ValueError(f"agent file does not exist: {args.agent_file}")
 
+    root = Path(__file__).resolve().parents[1]
+    pack_path = Path(
+        os.environ.get("LOCAL_ENV_PACK_PATH")
+        or root / "data/local-test/env-pack.tar.gz"
+    )
+    if pack_path.is_file() and _is_git_lfs_pointer(pack_path):
+        raise ValueError(
+            f"{pack_path} is a Git LFS pointer, not the pack; "
+            "in a git clone run `git lfs install && git lfs pull` "
+            "(GitHub zip downloads never include LFS objects, clone instead)"
+        )
+
     key, provider, base_url = resolve_inference_credentials()
     if not key or not provider or not base_url:
         raise ValueError("set OPENROUTER_API_KEY or CHUTES_API_KEY in .env")
@@ -689,13 +711,9 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         raise ValueError("LOCAL_MAX_WORKERS must be positive")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("LOCAL_TIMEOUT must be finite and positive")
-    root = Path(__file__).resolve().parents[1]
     return LocalGeneratedConfig(
         agent_path=agent.resolve(),
-        pack_path=Path(
-            os.environ.get("LOCAL_ENV_PACK_PATH")
-            or root / "data/local-test/env-pack.tar.gz"
-        ),
+        pack_path=pack_path,
         output_root=Path(
             os.environ.get("LOCAL_OUTPUT_ROOT") or "logs/environment-runs"
         ),

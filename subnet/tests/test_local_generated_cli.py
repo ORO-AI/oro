@@ -27,7 +27,7 @@ EXPECTED_PACK_SHA256 = (
 
 
 @pytest.fixture(autouse=True)
-def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def inference_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in (
         "OPENROUTER_API_KEY",
         "CHUTES_API_KEY",
@@ -40,6 +40,9 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOCAL_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Keep parse_config tests independent of whether this checkout has the
+    # LFS pack; test_bundled_pack_matches_released_runtime_contracts covers it.
+    monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(tmp_path / "env-pack.tar.gz"))
 
 
 @pytest.mark.parametrize(
@@ -162,6 +165,27 @@ def test_missing_agent_is_a_configuration_error(monkeypatch, tmp_path, capsys) -
     monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     assert local.main(["--agent-file", str(tmp_path / "missing.py")]) == 2
     assert "agent file does not exist" in capsys.readouterr().err
+
+
+def test_lfs_pointer_pack_is_a_configuration_error(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.write_text("def agent_main(problem_data):\n    return {}\n")
+    pointer = tmp_path / "env-pack.tar.gz"
+    pointer.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:" + "9" * 64 + "\n"
+        "size 6304798\n"
+    )
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(pointer))
+
+    assert local.main(["--agent-file", str(agent)]) == 2
+    err = capsys.readouterr().err
+    assert "Git LFS pointer" in err
+    assert "git lfs pull" in err
+    assert not (tmp_path / "logs").exists()
 
 
 def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
