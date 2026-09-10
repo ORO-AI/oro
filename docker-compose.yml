@@ -162,10 +162,9 @@ services:
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - ORO_SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
       - ORO_SESSION_SIMULATOR_TIMEOUT=${ORO_SESSION_SIMULATOR_TIMEOUT:-60}
-      # Default-off gate for the sealed environment path. Supply an immutable
-      # pack hash when enabling it.
+      # Optional startup preflight for an operator-selected immutable pack.
+      # Pack-bound claimed work selects the generated evaluator automatically.
       - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}
-      - ORO_EVALUATION_MODE=${ORO_EVALUATION_MODE:-legacy}
       - ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256=${ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256:-}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS

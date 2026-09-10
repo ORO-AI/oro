@@ -319,15 +319,6 @@ class Validator:
             ),
         )
         parser.add_argument(
-            "--evaluation-mode",
-            choices=("legacy", "generated"),
-            default=os.environ.get("ORO_EVALUATION_MODE", "legacy"),
-            help=(
-                "Select the evaluation implementation once per claimed run "
-                "(env: ORO_EVALUATION_MODE, default: legacy)."
-            ),
-        )
-        parser.add_argument(
             "--environment-preflight-pack-sha256",
             default=os.environ.get("ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256", ""),
             help=(
@@ -1251,11 +1242,11 @@ class Validator:
         inference_provider: str,
         inference_base_url: str,
     ) -> _EvaluationCompletion | None:
-        """Select the evaluation implementation once, at the loop boundary."""
+        """Select the evaluator from the immutable contract on claimed work."""
 
         runner = (
             self._run_generated_evaluation
-            if getattr(self.config, "evaluation_mode", "legacy") == "generated"
+            if _claim_environment_binding(work) is not None
             else self._run_legacy_evaluation
         )
         return runner(
