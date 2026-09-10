@@ -57,7 +57,14 @@ _COMPACT_TIMEZONE_RE = re.compile(r"([+-]\d{2})(\d{2})$")
 _DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 MAX_ARTIFACT_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_EXTRACTED_SIZE_BYTES = 4 * MAX_ARTIFACT_SIZE_BYTES
-PACK_LOAD_METRICS_SCHEMA_VERSION = "oro.validator.pack_load.v1"
+# Bumped from v1 → v2 when ``artifact_size_bytes`` was renamed to
+# ``download_url_size_bytes``. Downstream metrics consumers keyed on the old
+# field name should follow the schema-version pin.
+PACK_LOAD_METRICS_SCHEMA_VERSION = "oro.validator.pack_load.v2"
+# The dedup key is the delivered-bytes SHA, not the parent pack SHA.
+# Qualifying + race sub-archives share a parent pack_sha256 but ship distinct
+# byte streams; keying by parent would let the second (distinct) archive skip
+# ``validate_epoch`` on a stale cache hit.
 _VALIDATED_PACKS: set[str] = set()
 _VALIDATED_PACKS_LOCK = threading.Lock()
 
@@ -135,7 +142,7 @@ def _pack_load_metrics(
         "timings_seconds": dict(timings),
     }
     if metadata is not None:
-        metrics["artifact_size_bytes"] = metadata.get("artifact_size_bytes")
+        metrics["download_url_size_bytes"] = metadata.get("download_url_size_bytes")
         metrics["declared_task_count"] = metadata.get("task_count")
     if task_count is not None:
         metrics["loaded_task_count"] = task_count
@@ -145,19 +152,27 @@ def _pack_load_metrics(
 
 
 def _validate_portable_once(
-    pack_sha256: str, pack_dir: Path
+    archive_sha256: str, pack_dir: Path
 ) -> tuple[dict[str, Any], bool]:
-    """Validate identical archive bytes once per validator process."""
+    """Validate identical archive bytes once per validator process.
+
+    Keyed by the delivered-bytes ``archive_sha256`` (the response's
+    ``download_url_sha256``), not the parent ``pack_sha256``. The qualifying
+    sub-archive and every race sub-archive derived from the same pack share
+    the parent sha but are distinct byte streams — each must be independently
+    validated at the loader stage, not silently skipped on a stale cache hit.
+    """
 
     # The caller verifies the downloaded archive SHA before reaching this point.
-    # Holding the lock through validation prevents duplicate work when the same pack
-    # is claimed concurrently; distinct packs are rare and validation is CPU-bound.
+    # Holding the lock through validation prevents duplicate work when the same
+    # archive is claimed concurrently; distinct archives are rare and validation
+    # is CPU-bound.
     with _VALIDATED_PACKS_LOCK:
-        if pack_sha256 in _VALIDATED_PACKS:
+        if archive_sha256 in _VALIDATED_PACKS:
             return {"status": "pass"}, True
         validation = validate_epoch(pack_dir)
         if validation.get("status") == "pass":
-            _VALIDATED_PACKS.add(pack_sha256)
+            _VALIDATED_PACKS.add(archive_sha256)
         return validation, False
 
 
@@ -169,7 +184,9 @@ def _parse_expiry(value: Any) -> datetime:
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise PackValidationError("download_url_expires_at is not valid ISO-8601") from exc
+        raise PackValidationError(
+            "download_url_expires_at is not valid ISO-8601"
+        ) from exc
     if parsed.tzinfo is None:
         raise PackValidationError("download_url_expires_at must include a timezone")
     return parsed.astimezone(timezone.utc)
@@ -179,7 +196,9 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         raise PackValidationError("pack fetch response must be a JSON object")
     if metadata.get("pack_sha256") != requested_sha256:
-        raise PackValidationError("pack fetch response hash does not match the requested hash")
+        raise PackValidationError(
+            "pack fetch response hash does not match the requested hash"
+        )
 
     for field_name, expected in PACK_VERSION_IDENTITIES.items():
         actual = metadata.get(field_name)
@@ -191,10 +210,23 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
     download_url = metadata.get("download_url")
     if not isinstance(download_url, str) or not download_url:
         raise PackValidationError("download_url must be a non-empty string")
-    if _parse_expiry(metadata.get("download_url_expires_at")) <= datetime.now(timezone.utc):
+    if _parse_expiry(metadata.get("download_url_expires_at")) <= datetime.now(
+        timezone.utc
+    ):
         raise PackValidationError("pack download URL is expired")
 
-    artifact_size = metadata.get("artifact_size_bytes")
+    # The Backend now presigns a qualifying-only sub-archive rather
+    # than the sealed pack tarball, so integrity is verified against
+    # ``download_url_sha256`` (bytes-hash of what the URL delivers) instead of
+    # ``pack_sha256`` (parent pack identity, still returned for join keys).
+    download_url_sha256 = metadata.get("download_url_sha256")
+    if not isinstance(download_url_sha256, str) or not _SHA256_RE.fullmatch(
+        download_url_sha256
+    ):
+        raise PackValidationError(
+            "download_url_sha256 must be a 64-character hex sha256"
+        )
+    artifact_size = metadata.get("download_url_size_bytes")
     if (
         not isinstance(artifact_size, int)
         or isinstance(artifact_size, bool)
@@ -202,7 +234,7 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
         or artifact_size > MAX_ARTIFACT_SIZE_BYTES
     ):
         raise PackValidationError(
-            "artifact_size_bytes must be a positive integer no greater than "
+            "download_url_size_bytes must be a positive integer no greater than "
             f"{MAX_ARTIFACT_SIZE_BYTES}"
         )
     task_count = metadata.get("task_count")
@@ -220,10 +252,72 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
         or count < 0
         for name, count in family_counts.items()
     ):
-        raise PackValidationError("family_counts must map family names to non-negative integers")
+        raise PackValidationError(
+            "family_counts must map family names to non-negative integers"
+        )
     signature = metadata.get("artifact_signature")
     if signature is not None and (not isinstance(signature, str) or not signature):
-        raise PackValidationError("artifact_signature must be null or a non-empty string")
+        raise PackValidationError(
+            "artifact_signature must be null or a non-empty string"
+        )
+    return metadata
+
+
+def _require_race_metadata(
+    metadata: Any,
+    requested_race_id: str,
+    requested_pack_sha256: str,
+) -> dict[str, Any]:
+    """Schema-validate ``POST /v1/validator/race/{race_id}/pack`` response.
+
+    Same download-URL fields + integrity hash as :func:`_require_metadata`.
+    The response also echoes the parent pack's contract
+    identity so ``SessionRegistry._provenance()`` finds real values (not
+    ``None``) when it walks ``loaded_pack.metadata`` for race results. The
+    race archive is compiled from the parent pack, so it inherits the
+    parent's contract pins — fast-fail here on any drift.
+    """
+    if not isinstance(metadata, dict):
+        raise PackValidationError("race pack fetch response must be a JSON object")
+    if str(metadata.get("race_id")) != requested_race_id:
+        raise PackValidationError(
+            "race pack fetch response race_id does not match request"
+        )
+    if metadata.get("pack_sha256") != requested_pack_sha256:
+        raise PackValidationError(
+            "race pack fetch response pack_sha256 does not match qualifying pack"
+        )
+    for field_name, expected in PACK_VERSION_IDENTITIES.items():
+        actual = metadata.get(field_name)
+        if actual != expected:
+            raise PackCompatibilityError(
+                f"incompatible {field_name}: expected {expected!r}, got {actual!r}"
+            )
+    download_url = metadata.get("download_url")
+    if not isinstance(download_url, str) or not download_url:
+        raise PackValidationError("download_url must be a non-empty string")
+    if _parse_expiry(metadata.get("download_url_expires_at")) <= datetime.now(
+        timezone.utc
+    ):
+        raise PackValidationError("race pack download URL is expired")
+    download_url_sha256 = metadata.get("download_url_sha256")
+    if not isinstance(download_url_sha256, str) or not _SHA256_RE.fullmatch(
+        download_url_sha256
+    ):
+        raise PackValidationError(
+            "download_url_sha256 must be a 64-character hex sha256"
+        )
+    size = metadata.get("download_url_size_bytes")
+    if (
+        not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 1
+        or size > MAX_ARTIFACT_SIZE_BYTES
+    ):
+        raise PackValidationError(
+            "download_url_size_bytes must be a positive integer no greater than "
+            f"{MAX_ARTIFACT_SIZE_BYTES}"
+        )
     return metadata
 
 
@@ -241,7 +335,7 @@ async def _download(
                 downloaded += len(chunk)
                 if downloaded > expected_size:
                     raise PackValidationError(
-                        "downloaded artifact exceeds declared artifact_size_bytes"
+                        "downloaded artifact exceeds declared download_url_size_bytes"
                     )
                 handle.write(chunk)
     if downloaded != expected_size:
@@ -309,7 +403,9 @@ def _safe_extract(archive_path: Path, scratch_dir: Path) -> Path:
     except PackValidationError:
         raise
     except (EOFError, OSError, tarfile.TarError) as exc:
-        raise PackValidationError(f"invalid pack tarball: {type(exc).__name__}") from exc
+        raise PackValidationError(
+            f"invalid pack tarball: {type(exc).__name__}"
+        ) from exc
 
     pack_dir = scratch_dir / "epoch"
     if not pack_dir.is_dir():
@@ -327,7 +423,12 @@ def _load_validated_contents(
     with _record_timing(timings, "archive_extract"):
         pack_dir = _safe_extract(archive_path, scratch_dir)
     with _record_timing(timings, "portable_validation"):
-        validation, cache_hit = _validate_portable_once(pack_sha256, pack_dir)
+        # Deduplicate on delivered-bytes SHA, not parent pack SHA, so
+        # qualifying and race sub-archives (same parent, distinct bytes) are
+        # each validated independently at the loader stage.
+        validation, cache_hit = _validate_portable_once(
+            metadata["download_url_sha256"], pack_dir
+        )
     if validation.get("status") != "pass":
         detail = json.dumps(validation, sort_keys=True, separators=(",", ":"))
         raise PackValidationError(f"sealed epoch validation failed: {detail}")
@@ -349,18 +450,24 @@ def _load_validated_contents(
                 f"could not load validated pack contents: {exc}"
             ) from exc
 
-        actual_family_counts = Counter(task.family for task in task_specs)
-        if len(task_specs) != metadata["task_count"]:
-            raise PackValidationError(
-                "pack task count does not match Backend metadata: "
-                f"expected {metadata['task_count']}, got {len(task_specs)}"
-            )
-        if actual_family_counts != Counter(metadata["family_counts"]):
-            raise PackValidationError(
-                "pack family counts do not match Backend metadata: "
-                f"expected {metadata['family_counts']!r}, "
-                f"got {dict(actual_family_counts)!r}"
-            )
+        # Race sub-archive metadata (POST /v1/validator/race/{race_id}/pack)
+        # omits task_count / family_counts since the race scope is defined by
+        # RaceProblem rows, not the pack aggregates. Only check when the
+        # qualifying pack fetch supplied them.
+        if "task_count" in metadata:
+            if len(task_specs) != metadata["task_count"]:
+                raise PackValidationError(
+                    "pack task count does not match Backend metadata: "
+                    f"expected {metadata['task_count']}, got {len(task_specs)}"
+                )
+        if "family_counts" in metadata:
+            actual_family_counts = Counter(task.family for task in task_specs)
+            if actual_family_counts != Counter(metadata["family_counts"]):
+                raise PackValidationError(
+                    "pack family counts do not match Backend metadata: "
+                    f"expected {metadata['family_counts']!r}, "
+                    f"got {dict(actual_family_counts)!r}"
+                )
     return pack_dir, manifest, task_specs, task_ids, cache_hit
 
 
@@ -496,15 +603,17 @@ async def fetch_and_validate_pack(
                 client,
                 download_url,
                 archive_path,
-                metadata["artifact_size_bytes"],
+                metadata["download_url_size_bytes"],
             )
 
         current_stage = "archive_sha256"
         with _record_timing(timings, current_stage):
             actual_sha256 = await asyncio.to_thread(sha256_file, archive_path)
-            if actual_sha256 != pack_sha256:
+            expected_sha256 = metadata["download_url_sha256"]
+            if actual_sha256 != expected_sha256:
                 raise PackValidationError(
-                    f"artifact sha256 mismatch: expected {pack_sha256}, got {actual_sha256}"
+                    "delivered archive sha256 mismatch: "
+                    f"expected {expected_sha256}, got {actual_sha256}"
                 )
 
         current_stage = "artifact_signature"
@@ -603,6 +712,163 @@ async def fetch_and_validate_pack(
             await client.aclose()
 
 
+async def fetch_and_validate_race_pack(
+    race_id: str,
+    pack_sha256: str,
+    backend_url: str,
+    validator_keypair: Any,
+    *,
+    scratch_root: str | Path | None = None,
+    timeout: float = 60.0,
+    http_client: httpx.AsyncClient | None = None,
+    download_url_rewriter: Callable[[str], str] | None = None,
+) -> LoadedPack | None:
+    """Fetch, validate, and extract the race-scoped sub-archive.
+
+    Same shape as :func:`fetch_and_validate_pack` but calls the race-scoped
+    endpoint (``POST /v1/validator/race/{race_id}/pack``), which the Backend
+    only presigns to validators holding an active ``EvaluationRun`` on the
+    race. Returns ``None`` on any validation/fetch failure so the caller can
+    fail the run cleanly instead of crashing the loop.
+
+    The returned :class:`LoadedPack` carries the race's 60 task specs — a
+    strict subset of the parent pack the caller previously loaded via
+    :func:`fetch_and_validate_pack`. Callers pointing sessions at race task
+    ids should use this pack, not the qualifying one.
+    """
+    if not isinstance(race_id, str) or not race_id:
+        logger.warning("Skipping empty race_id")
+        return None
+    if not isinstance(pack_sha256, str) or not _SHA256_RE.fullmatch(pack_sha256):
+        logger.warning("Skipping invalid pack hash %r", pack_sha256)
+        return None
+
+    scratch_dir: Path | None = None
+    metadata: dict[str, Any] | None = None
+    timings: dict[str, float] = {}
+    portable_validation_cache_hit: bool | None = None
+    current_stage = "backend_metadata"
+    total_started_at = time.perf_counter()
+    owned_client = http_client is None
+    client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+    try:
+        with _record_timing(timings, current_stage):
+            auth_headers = generate_auth_headers(validator_keypair)
+            auth_headers["Accept-Encoding"] = "identity"
+            fetch_url = f"{backend_url.rstrip('/')}/v1/validator/race/{race_id}/pack"
+            response = await client.post(fetch_url, headers=auth_headers)
+            response.raise_for_status()
+            metadata = _require_race_metadata(response.json(), race_id, pack_sha256)
+
+        scratch_parent = None if scratch_root is None else Path(scratch_root)
+        if scratch_parent is not None:
+            scratch_parent.mkdir(parents=True, exist_ok=True)
+        scratch_dir = Path(
+            tempfile.mkdtemp(prefix=f"oro-race-{race_id[:12]}-", dir=scratch_parent)
+        )
+        archive_path = scratch_dir / "race.tar.gz"
+        download_url = metadata["download_url"]
+        if download_url_rewriter is not None:
+            download_url = download_url_rewriter(download_url)
+        current_stage = "archive_download"
+        with _record_timing(timings, current_stage):
+            await _download(
+                client,
+                download_url,
+                archive_path,
+                metadata["download_url_size_bytes"],
+            )
+
+        current_stage = "archive_sha256"
+        with _record_timing(timings, current_stage):
+            actual_sha256 = await asyncio.to_thread(sha256_file, archive_path)
+            expected_sha256 = metadata["download_url_sha256"]
+            if actual_sha256 != expected_sha256:
+                raise PackValidationError(
+                    "race archive sha256 mismatch: "
+                    f"expected {expected_sha256}, got {actual_sha256}"
+                )
+
+        current_stage = "archive_processing"
+        (
+            pack_dir,
+            manifest,
+            task_specs,
+            task_ids,
+            portable_validation_cache_hit,
+        ) = await asyncio.to_thread(
+            _load_validated_contents,
+            archive_path,
+            scratch_dir,
+            pack_sha256,
+            metadata,
+            timings,
+        )
+        # Cache the validated epoch so the first TaskSession opened on this
+        # race pack does not re-run validate_epoch (matches qualifying path).
+        current_stage = "cache_validated_epoch"
+        with _record_timing(timings, current_stage):
+            await asyncio.to_thread(cache_validated_epoch, pack_dir)
+        timings["total"] = round(time.perf_counter() - total_started_at, 6)
+        metrics = _pack_load_metrics(
+            pack_sha256,
+            "loaded",
+            "complete",
+            timings,
+            metadata,
+            task_count=len(task_specs),
+            portable_validation_cache_hit=portable_validation_cache_hit,
+        )
+        metrics["race_id"] = race_id
+        logger.info(
+            "Race pack load metrics: %s",
+            json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+        )
+        return LoadedPack(
+            pack_dir=pack_dir,
+            manifest=manifest,
+            task_specs=task_specs,
+            task_ids=task_ids,
+            pack_sha256=pack_sha256,
+            metadata=metadata,
+            _scratch_dir=scratch_dir,
+        )
+    except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            error = f"HTTPStatusError status={exc.response.status_code}"
+        elif isinstance(exc, PackCompatibilityError):
+            # Now reachable: _require_race_metadata validates PACK_VERSION_IDENTITIES.
+            error = f"PackValidationError: {exc}"
+        else:
+            error = type(exc).__name__
+        if current_stage == "archive_processing" and timings:
+            current_stage = next(reversed(timings))
+        timings["total"] = round(time.perf_counter() - total_started_at, 6)
+        metrics = _pack_load_metrics(
+            pack_sha256,
+            "rejected",
+            current_stage,
+            timings,
+            metadata,
+            portable_validation_cache_hit=portable_validation_cache_hit,
+        )
+        metrics["race_id"] = race_id
+        logger.warning(
+            "Skipping race pack race=%s pack=%s: %s; metrics=%s",
+            race_id,
+            pack_sha256,
+            error,
+            json.dumps(metrics, sort_keys=True, separators=(",", ":")),
+        )
+        if scratch_dir is not None:
+            evict_epoch_resources(scratch_dir / "epoch")
+            shutil.rmtree(scratch_dir, ignore_errors=True)
+        return None
+    finally:
+        if owned_client:
+            await client.aclose()
+
+
 __all__ = [
     "ENV_CONTRACT_VERSION",
     "PACK_VERSION_IDENTITIES",
@@ -614,5 +880,6 @@ __all__ = [
     "LoadedPack",
     "PackValidationError",
     "fetch_and_validate_pack",
+    "fetch_and_validate_race_pack",
     "load_local_pack",
 ]

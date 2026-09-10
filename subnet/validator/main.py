@@ -45,7 +45,7 @@ from .retry_queue import LocalRetryQueue
 from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
-from .env_pack_loader import fetch_and_validate_pack
+from .env_pack_loader import fetch_and_validate_pack, fetch_and_validate_race_pack
 from .environment_preflight import (
     environment_preflight_run_id,
     run_environment_preflight,
@@ -245,7 +245,9 @@ class Validator:
         parser.add_argument(
             "--sandbox-log-max-bytes",
             type=int,
-            default=int(os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)),
+            default=int(
+                os.environ.get("SANDBOX_LOG_MAX_BYTES") or str(256 * 1024 * 1024)
+            ),
             help=(
                 "Max bytes captured per sandbox stdout/stderr log before truncation "
                 "(env: SANDBOX_LOG_MAX_BYTES, default: 256 MiB). Bounds disk use so a "
@@ -1026,16 +1028,38 @@ class Validator:
         pack_sha256 = _claim_environment_binding(work)
         if pack_sha256 is None:
             raise ValueError("generated evaluation requires a bound env pack")
-        loaded_pack = asyncio.run(
-            fetch_and_validate_pack(
-                pack_sha256,
-                self.config.backend_url,
-                self.wallet.hotkey,
-                download_url_rewriter=_rewrite_localhost_url,
+
+        # Race work items get the race-scoped sub-archive (only the
+        # 60 selected task specs) instead of the pack's qualifying sub-archive.
+        # The race pack is presigned only to validators with an active
+        # EvaluationRun on the race, so this fetch fails cleanly if the run
+        # has expired between claim and load.
+        race_id = _claim_string(work, "race_id")
+        if race_id is not None:
+            loaded_pack = asyncio.run(
+                fetch_and_validate_race_pack(
+                    race_id,
+                    pack_sha256,
+                    self.config.backend_url,
+                    self.wallet.hotkey,
+                    download_url_rewriter=_rewrite_localhost_url,
+                )
             )
-        )
-        if loaded_pack is None:
-            raise RuntimeError(f"environment pack {pack_sha256} failed validation")
+            if loaded_pack is None:
+                raise RuntimeError(
+                    f"race pack race_id={race_id} pack={pack_sha256} failed validation"
+                )
+        else:
+            loaded_pack = asyncio.run(
+                fetch_and_validate_pack(
+                    pack_sha256,
+                    self.config.backend_url,
+                    self.wallet.hotkey,
+                    download_url_rewriter=_rewrite_localhost_url,
+                )
+            )
+            if loaded_pack is None:
+                raise RuntimeError(f"environment pack {pack_sha256} failed validation")
 
         registry: SessionRegistry | None = None
         try:
@@ -1326,8 +1350,7 @@ class Validator:
             )
             return None
         logging.info(
-            "Generated evaluation score: "
-            f"{score:.6f} across {len(results)} tasks"
+            f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
         return _EvaluationCompletion(
             score=score,
@@ -1847,7 +1870,9 @@ class Validator:
                 )
                 return True, ""
             except Exception as exc:
-                logging.warning("Inference token validation error against %s: %s", url, exc)
+                logging.warning(
+                    "Inference token validation error against %s: %s", url, exc
+                )
                 return True, ""
 
         # Unreachable: the loop returns on every path, but keeps mypy happy.

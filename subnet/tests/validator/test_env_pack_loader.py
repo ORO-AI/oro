@@ -19,6 +19,7 @@ from validator import env_pack_loader
 from validator.env_pack_loader import (
     PackValidationError,
     fetch_and_validate_pack,
+    fetch_and_validate_race_pack,
     load_local_pack,
 )
 
@@ -140,7 +141,12 @@ def _metadata(pack_sha256: str, artifact: bytes, **updates: object) -> dict:
         "download_url_expires_at": (
             datetime.now(timezone.utc) + timedelta(hours=1)
         ).isoformat(),
-        "artifact_size_bytes": len(artifact),
+        # The URL points at the qualifying sub-archive whose
+        # bytes are what the validator hashes vs download_url_sha256. The test
+        # feeds the same ``artifact`` bytes to both the URL and the sha, so
+        # the round-trip is byte-exact.
+        "download_url_sha256": hashlib.sha256(artifact).hexdigest(),
+        "download_url_size_bytes": len(artifact),
         "artifact_signature": None,
         "contract_version": env_pack_loader.ENV_CONTRACT_VERSION,
         "runtime_version": env_pack_loader.RUNTIME_VERSION,
@@ -247,7 +253,9 @@ def _stub_auth_and_epoch_validation(monkeypatch: pytest.MonkeyPatch) -> None:
             "X-Signature": "0xsigned",
         },
     )
-    monkeypatch.setattr(env_pack_loader, "validate_epoch", lambda _path: {"status": "pass"})
+    monkeypatch.setattr(
+        env_pack_loader, "validate_epoch", lambda _path: {"status": "pass"}
+    )
 
 
 @_run_async
@@ -262,7 +270,9 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
     evicted: list[Path] = []
     monkeypatch.setattr(env_pack_loader, "evict_epoch_resources", evicted.append)
     with caplog.at_level("INFO", logger=env_pack_loader.__name__):
-        async with _client(_metadata(pack_sha256, artifact), artifact, requests) as client:
+        async with _client(
+            _metadata(pack_sha256, artifact), artifact, requests
+        ) as client:
             loaded = await fetch_and_validate_pack(
                 pack_sha256,
                 "https://backend.test",
@@ -290,10 +300,10 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
         if record.message.startswith("Environment pack load metrics: ")
     )
     metrics = json.loads(metrics_record.message.partition(": ")[2])
-    assert metrics["schema_version"] == "oro.validator.pack_load.v1"
+    assert metrics["schema_version"] == "oro.validator.pack_load.v2"
     assert metrics["outcome"] == "loaded"
     assert metrics["stage"] == "complete"
-    assert metrics["artifact_size_bytes"] == len(artifact)
+    assert metrics["download_url_size_bytes"] == len(artifact)
     assert metrics["declared_task_count"] == 1
     assert metrics["loaded_task_count"] == 1
     assert metrics["portable_validation_cache_hit"] is False
@@ -321,9 +331,7 @@ def test_portable_validation_cache_reuses_only_successful_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    outcomes = iter(
-        ({"status": "pass"}, {"status": "fail"}, {"status": "pass"})
-    )
+    outcomes = iter(({"status": "pass"}, {"status": "fail"}, {"status": "pass"}))
     validation_calls = 0
 
     def validate(_path: Path) -> dict[str, str]:
@@ -399,12 +407,18 @@ async def test_loads_generator_compatibility_fixture_and_executes(
 
 
 @_run_async
-async def test_rejects_content_hash_mismatch_and_removes_scratch(tmp_path: Path) -> None:
+async def test_rejects_content_hash_mismatch_and_removes_scratch(
+    tmp_path: Path,
+) -> None:
+    # Integrity is verified against ``download_url_sha256`` from the
+    # response, not the parent ``pack_sha256``. A response that claims the
+    # bytes hash to X but actually delivers Y must still be rejected.
     artifact = _archive_bytes()
-    requested_sha256 = "0" * 64
-    async with _client(_metadata(requested_sha256, artifact), artifact) as client:
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    metadata = _metadata(pack_sha256, artifact, download_url_sha256="f" * 64)
+    async with _client(metadata, artifact) as client:
         loaded = await fetch_and_validate_pack(
-            requested_sha256,
+            pack_sha256,
             "https://backend.test",
             object(),
             scratch_root=tmp_path,
@@ -471,7 +485,7 @@ async def test_rejects_oversized_declared_artifact_before_fetch(tmp_path: Path) 
     metadata = _metadata(
         pack_sha256,
         artifact,
-        artifact_size_bytes=env_pack_loader.MAX_ARTIFACT_SIZE_BYTES + 1,
+        download_url_size_bytes=env_pack_loader.MAX_ARTIFACT_SIZE_BYTES + 1,
     )
     loaded = await _fetch_pack(metadata, artifact, tmp_path, requests)
 
@@ -571,7 +585,7 @@ async def test_http_failure_does_not_log_presigned_url(
         record for record in caplog.records if "; metrics=" in record.message
     )
     metrics = json.loads(metrics_record.message.partition("; metrics=")[2])
-    assert metrics["schema_version"] == "oro.validator.pack_load.v1"
+    assert metrics["schema_version"] == "oro.validator.pack_load.v2"
     assert metrics["outcome"] == "rejected"
     assert metrics["stage"] == "archive_download"
     assert set(metrics["timings_seconds"]) == {
@@ -688,3 +702,139 @@ async def test_rejects_failed_sealed_epoch_validation(
     )
     metrics = json.loads(metrics_record.message.partition("; metrics=")[2])
     assert metrics["stage"] == "portable_validation"
+
+
+def _race_metadata(
+    race_id: str,
+    pack_sha256: str,
+    artifact: bytes,
+    **updates: object,
+) -> dict:
+    """Race-scoped sub-archive fetch response. Includes the parent
+    pack's contract identity so provenance flows through to race results."""
+    result = {
+        "race_id": race_id,
+        "pack_sha256": pack_sha256,
+        "download_url": "https://objects.test/race.tar.gz?signature=secret",
+        "download_url_expires_at": (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat(),
+        "download_url_sha256": hashlib.sha256(artifact).hexdigest(),
+        "download_url_size_bytes": len(artifact),
+        "contract_version": env_pack_loader.ENV_CONTRACT_VERSION,
+        "runtime_version": env_pack_loader.RUNTIME_VERSION,
+        "tool_contract_version": env_pack_loader.TOOL_CONTRACT_VERSION,
+        "verifier_version": env_pack_loader.VERIFIER_VERSION,
+        "result_schema_version": env_pack_loader.RESULT_SCHEMA_VERSION,
+        "catalog_epoch": "test-catalog",
+        "catalog_sha256": "1" * 64,
+        "search_index_epoch": None,
+        "search_index_sha256": None,
+    }
+    result.update(updates)
+    return result
+
+
+def _race_client(
+    metadata: dict,
+    artifact: bytes,
+    requests: list[httpx.Request] | None = None,
+    *,
+    artifact_status: int = 200,
+) -> httpx.AsyncClient:
+    class AsyncBytes(httpx.AsyncByteStream):
+        async def __aiter__(self):  # noqa: ANN201
+            yield artifact
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if requests is not None:
+            requests.append(request)
+        if request.url.host == "backend.test" and request.method == "POST":
+            return httpx.Response(200, json=metadata)
+        if request.url.host in ("objects.test", "host.docker.internal"):
+            if artifact_status != 200:
+                return httpx.Response(artifact_status)
+            return httpx.Response(200, stream=AsyncBytes())
+        return httpx.Response(404)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@_run_async
+async def test_race_pack_fetch_returns_loaded_pack(tmp_path: Path) -> None:
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    race_id = "06aa0000-0000-7000-8000-000000000000"
+    metadata = _race_metadata(race_id, pack_sha256, artifact)
+    async with _race_client(metadata, artifact) as client:
+        loaded = await fetch_and_validate_race_pack(
+            race_id,
+            pack_sha256,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path,
+            http_client=client,
+        )
+    assert loaded is not None
+    assert loaded.pack_sha256 == pack_sha256
+    assert loaded.task_ids == ["TF2-retrieval_recall-1"]
+
+
+@_run_async
+async def test_race_pack_fetch_rejects_content_hash_mismatch(tmp_path: Path) -> None:
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    race_id = "06aa0000-0000-7000-8000-000000000001"
+    metadata = _race_metadata(
+        race_id, pack_sha256, artifact, download_url_sha256="f" * 64
+    )
+    async with _race_client(metadata, artifact) as client:
+        loaded = await fetch_and_validate_race_pack(
+            race_id,
+            pack_sha256,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path,
+            http_client=client,
+        )
+    assert loaded is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@_run_async
+async def test_race_pack_fetch_rejects_pack_sha256_mismatch(tmp_path: Path) -> None:
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    race_id = "06aa0000-0000-7000-8000-000000000002"
+    # Response claims a different parent pack than the caller requested — must reject.
+    metadata = _race_metadata(race_id, "a" * 64, artifact)
+    async with _race_client(metadata, artifact) as client:
+        loaded = await fetch_and_validate_race_pack(
+            race_id,
+            pack_sha256,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path,
+            http_client=client,
+        )
+    assert loaded is None
+
+
+@_run_async
+async def test_race_pack_fetch_rejects_race_id_mismatch(tmp_path: Path) -> None:
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    requested_race_id = "06aa0000-0000-7000-8000-000000000003"
+    metadata = _race_metadata(
+        "06aa0000-0000-7000-8000-000000000099", pack_sha256, artifact
+    )
+    async with _race_client(metadata, artifact) as client:
+        loaded = await fetch_and_validate_race_pack(
+            requested_race_id,
+            pack_sha256,
+            "https://backend.test",
+            object(),
+            scratch_root=tmp_path,
+            http_client=client,
+        )
+    assert loaded is None
