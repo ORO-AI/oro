@@ -4,8 +4,8 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-The local workflow validates the sealed release EnvPack, then selects the
-qualifying set: five tasks from each TF1 through TF7 family. It uses the generated
+The local workflow validates the sealed 35-task qualifying EnvPack, then runs
+all five tasks from each TF1 through TF7 family. It uses the generated
 validator's `oro-env-runtime` sessions, family verifiers, rewards, proxy,
 search server, and sandbox. It does not compile tasks or fetch evaluation work
 from the Backend. The proxy reads the public Backend model allowlist, matching
@@ -55,8 +55,8 @@ The `test-search-server` service uses the same promoted `stable` image as
 production validators. Docker downloads it on the first run. The runtime
 rejects a mismatched search identity before starting the agent sandbox.
 
-Before selecting the qualifying set, the runtime validates every task and
-catalog reference in the bundled pack.
+Before starting the agent, the runtime validates every task and catalog
+reference in the bundled qualifying pack.
 
 `LOCAL_ENV_PACK_PATH` can select another pack for development, and
 `LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be

@@ -41,8 +41,8 @@ For generated environments, see the smaller
 
 ### Test generated environments locally
 
-Local testing validates the bundled release EnvPack, then runs the
-qualifying set—five tasks from each TF1 through TF7 family—through the
+Local testing validates the bundled 35-task qualifying EnvPack, then runs all
+five tasks from each TF1 through TF7 family through the
 generated runtime and family verifiers. The exact release pack is included at
 `data/local-test/env-pack.tar.gz` using Git LFS.
 
