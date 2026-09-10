@@ -115,9 +115,6 @@ class _SessionState:
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
-    pending_futures: set[concurrent.futures.Future[Any]] = field(
-        default_factory=set, repr=False
-    )
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -451,28 +448,45 @@ class SessionRegistry:
                     "exchanges": self._simulator_exchanges(state.simulator),
                 }
 
-            def record_error(error_type: str, detail: str) -> None:
+            def record_error(
+                error_type: str,
+                detail: str,
+                *,
+                snapshot: dict[str, Any] | None = None,
+            ) -> None:
                 timing = timing_ms()
                 state.call_trace.append(
                     {
                         "request": trace_request,
                         "response": None,
                         "state_hash_before": state_hash_before,
-                        "state_hash_after": _state_hash(state.session),
+                        "state_hash_after": (
+                            snapshot["state_hash"]
+                            if snapshot is not None
+                            else _state_hash(state.session)
+                        ),
                         "latency_ms": timing["total"],
                         "timing_ms": timing,
-                        "simulator": simulator_evidence(),
+                        "simulator": (
+                            {
+                                "latency_ms": simulator_latency_ms,
+                                "exchanges": [],
+                            }
+                            if snapshot is not None
+                            and simulator_latency_ms is not None
+                            else simulator_evidence()
+                        ),
                         "error": {"type": error_type, "detail": detail},
                     }
                 )
 
             tool_started = time.perf_counter()
             event_before_group = state.session.env.applied_event
+            tool_snapshot = self._session_snapshot(state)
             if is_group:
                 future = self._executor.submit(state.session.step_parallel, actions)
             else:
                 future = self._executor.submit(state.session.step, actions[0])
-            state.pending_futures.add(future)
             try:
                 raw_observations = future.result(timeout=self.tool_timeout_s)
                 observations = raw_observations if is_group else [raw_observations]
@@ -482,7 +496,19 @@ class SessionRegistry:
                 state.quarantined_reason = (
                     f"tool call exceeded {self.tool_timeout_s:.3f}s"
                 )
-                record_error("HarnessTimeoutError", state.quarantined_reason)
+                record_error(
+                    "HarnessTimeoutError",
+                    state.quarantined_reason,
+                    snapshot=tool_snapshot,
+                )
+                state.final_result = self._result(
+                    session_id,
+                    state,
+                    outcome="environment_error",
+                    verdict=None,
+                    error_detail=state.quarantined_reason,
+                    snapshot=tool_snapshot,
+                )
                 raise HarnessTimeoutError(
                     f"{state.quarantined_reason}; session quarantined"
                 ) from exc
@@ -493,7 +519,6 @@ class SessionRegistry:
                 raise HarnessExecutionError(
                     f"{state.quarantined_reason}; session quarantined"
                 ) from exc
-            state.pending_futures.discard(future)
             tool_latency_ms = _elapsed_ms(tool_started)
 
             public_observations = [
@@ -571,6 +596,7 @@ class SessionRegistry:
                             }
                         )
                 simulator_started = time.perf_counter()
+                simulator_snapshot = self._session_snapshot(state)
                 future = self._executor.submit(
                     self._shopper_turn_decisions,
                     state,
@@ -578,7 +604,6 @@ class SessionRegistry:
                     turn,
                     message_sent,
                 )
-                state.pending_futures.add(future)
                 try:
                     decisions = future.result(timeout=self.simulator_timeout_s)
                 except concurrent.futures.TimeoutError as exc:
@@ -587,7 +612,19 @@ class SessionRegistry:
                     state.quarantined_reason = (
                         f"simulator call exceeded {self.simulator_timeout_s:.3f}s"
                     )
-                    record_error("HarnessTimeoutError", state.quarantined_reason)
+                    record_error(
+                        "HarnessTimeoutError",
+                        state.quarantined_reason,
+                        snapshot=simulator_snapshot,
+                    )
+                    state.final_result = self._result(
+                        session_id,
+                        state,
+                        outcome="environment_error",
+                        verdict=None,
+                        error_detail=state.quarantined_reason,
+                        snapshot=simulator_snapshot,
+                    )
                     raise HarnessTimeoutError(
                         f"{state.quarantined_reason}; session quarantined"
                     ) from exc
@@ -600,7 +637,6 @@ class SessionRegistry:
                     raise HarnessExecutionError(
                         f"{state.quarantined_reason}; session quarantined"
                     ) from exc
-                state.pending_futures.discard(future)
                 simulator_latency_ms = _elapsed_ms(simulator_started)
                 contents = []
                 for decision, decision_signal in decisions:
@@ -702,7 +738,9 @@ class SessionRegistry:
         outcome: str,
         verdict: dict[str, Any] | None,
         error_detail: str | None = None,
+        snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        snapshot = snapshot or self._session_snapshot(state)
         has_terminal_state = outcome in {"completed", "partial", "leakage", "exploit"}
         return {
             "evaluation_run_id": state.evaluation_run_id,
@@ -710,27 +748,41 @@ class SessionRegistry:
             "task_id": state.task_id,
             "session_id": session_id,
             "pack_sha256": self.pack_sha256,
-            "family": state.session.task.family,
+            "family": snapshot["family"],
             "outcome": outcome,
-            "terminal_reason": state.terminal_reason,
+            "terminal_reason": snapshot["terminal_reason"],
             "error_detail": error_detail,
             "verdict": verdict,
             "terminal_state_hash": (
-                _state_hash(state.session) if has_terminal_state else None
+                snapshot["state_hash"] if has_terminal_state else None
             ),
-            "step_count": state.session.step_count,
-            "solver_turn_count": state.session.solver_turn_count,
-            "action_count": state.session.step_count,
-            "render_budget": state.session.render_budget,
+            "step_count": snapshot["step_count"],
+            "solver_turn_count": snapshot["solver_turn_count"],
+            "action_count": snapshot["step_count"],
+            "render_budget": snapshot["render_budget"],
             "bootstrap": copy.deepcopy(state.bootstrap),
             "call_trace": copy.deepcopy(state.call_trace),
+            "ledger": copy.deepcopy(snapshot["ledger"]),
+            "provenance": self._provenance(),
+            "environment_error": outcome == "environment_error",
+            "verifier_error": outcome == "verifier_error",
+        }
+
+    @staticmethod
+    def _session_snapshot(state: _SessionState) -> dict[str, Any]:
+        """Capture receipt fields before work that may outlive its timeout."""
+
+        return {
+            "family": state.session.task.family,
+            "terminal_reason": state.terminal_reason,
+            "state_hash": _state_hash(state.session),
+            "step_count": state.session.step_count,
+            "solver_turn_count": state.session.solver_turn_count,
+            "render_budget": state.session.render_budget,
             "ledger": [
                 entry.model_dump(mode="json")
                 for entry in state.session.env.ledger.entries()
             ],
-            "provenance": self._provenance(),
-            "environment_error": outcome == "environment_error",
-            "verifier_error": outcome == "verifier_error",
         }
 
     def _results(
@@ -742,9 +794,6 @@ class SessionRegistry:
         results: list[dict[str, Any]] = []
         for session_id, state in states:
             with state.lock:
-                if state.pending_futures:
-                    concurrent.futures.wait(state.pending_futures)
-                    state.pending_futures.clear()
                 if state.final_result is not None:
                     results.append(copy.deepcopy(state.final_result))
                     continue
@@ -809,7 +858,7 @@ class SessionRegistry:
         for state in states:
             with state.lock:
                 state.quarantined_reason = "registry closed"
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._executor.shutdown(wait=False, cancel_futures=True)
         self.loaded_pack.close()
 
     def __enter__(self) -> SessionRegistry:
