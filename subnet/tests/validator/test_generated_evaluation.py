@@ -80,24 +80,42 @@ def test_duplicate_task_result_is_rejected() -> None:
         )
 
 
-@pytest.mark.parametrize("mode", ["legacy", "generated"])
-def test_validator_selects_the_evaluation_implementation_once(mode) -> None:
+@pytest.mark.parametrize(
+    ("pack_sha256", "expected"),
+    [(None, "legacy"), ("a" * 64, "generated")],
+)
+def test_validator_selects_evaluator_from_claim_binding(
+    pack_sha256: str | None, expected: str
+) -> None:
     validator = Validator.__new__(Validator)
-    validator.config = SimpleNamespace(evaluation_mode=mode)
     validator._run_legacy_evaluation = MagicMock(return_value="legacy")
     validator._run_generated_evaluation = MagicMock(return_value="generated")
+    work = SimpleNamespace(env_pack_sha256=pack_sha256)
 
     result = validator._run_claimed_evaluation(
-        MagicMock(),
+        work,
         MagicMock(),
         inference_access_token="token",
         inference_provider="openrouter",
         inference_base_url="https://example.test/v1",
     )
 
-    assert result == mode
-    selected = getattr(validator, f"_run_{mode}_evaluation")
+    assert result == expected
+    selected = getattr(validator, f"_run_{expected}_evaluation")
     selected.assert_called_once()
+
+
+def test_validator_rejects_invalid_claim_binding() -> None:
+    validator = Validator.__new__(Validator)
+
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        validator._run_claimed_evaluation(
+            SimpleNamespace(env_pack_sha256="invalid"),
+            MagicMock(),
+            inference_access_token="token",
+            inference_provider="openrouter",
+            inference_base_url="https://example.test/v1",
+        )
 
 
 @pytest.mark.parametrize(
