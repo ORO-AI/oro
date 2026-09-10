@@ -26,7 +26,7 @@ EXPECTED_PACK_SHA256 = (
 
 
 @pytest.fixture(autouse=True)
-def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def inference_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     for name in (
         "OPENROUTER_API_KEY",
         "CHUTES_API_KEY",
@@ -39,6 +39,9 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOCAL_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Keep parse_config tests independent of whether this checkout has the
+    # LFS pack; test_bundled_pack_matches_released_runtime_contracts covers it.
+    monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(tmp_path / "env-pack.tar.gz"))
 
 
 @pytest.mark.parametrize(
@@ -95,11 +98,26 @@ def test_model_flag_is_not_required(monkeypatch, tmp_path) -> None:
     assert config.max_workers == 7
 
 
+def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> None:
+    # Every other parse_config test runs against the fixture's temp pack so the
+    # suite does not depend on this checkout's LFS state. That hides the default
+    # path, so pin it here with the pointer probe stubbed out.
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.delenv("LOCAL_ENV_PACK_PATH", raising=False)
+    monkeypatch.setattr(local, "_is_git_lfs_pointer", lambda path: False)
+
+    config = local.parse_config(["--agent-file", str(agent)])
+
+    assert config.pack_path == ROOT / "data" / "local-test" / "env-pack.tar.gz"
+
+
 def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "0.2.10"
+    assert version("oro-env-runtime") == "0.2.11"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
@@ -198,6 +216,30 @@ def test_missing_agent_is_a_configuration_error(monkeypatch, tmp_path, capsys) -
     monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     assert local.main(["--agent-file", str(tmp_path / "missing.py")]) == 2
     assert "agent file does not exist" in capsys.readouterr().err
+
+
+def test_lfs_pointer_pack_is_a_configuration_error(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.write_text("def agent_main(problem_data):\n    return {}\n")
+    pointer = tmp_path / "env-pack.tar.gz"
+    pointer.write_text(
+        "version https://git-lfs.github.com/spec/v1\n"
+        "oid sha256:" + "9" * 64 + "\n"
+        "size 6304798\n"
+    )
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(pointer))
+    # Point the run directory somewhere observable: the default is CWD-relative,
+    # so asserting on tmp_path without this would pass whether or not a run started.
+    monkeypatch.setenv("LOCAL_OUTPUT_ROOT", str(tmp_path / "logs"))
+
+    assert local.main(["--agent-file", str(agent)]) == 2
+    err = capsys.readouterr().err
+    assert "Git LFS pointer" in err
+    assert "git lfs pull" in err
+    assert not (tmp_path / "logs").exists()
 
 
 def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
