@@ -36,9 +36,7 @@ from oro_sdk.models.complete_run_request import CompleteRunRequest
 from oro_sdk.models.complete_run_response import CompleteRunResponse
 from oro_sdk.models.at_capacity_error import AtCapacityError
 from oro_sdk.models.eval_run_not_found_error import EvalRunNotFoundError
-from oro_sdk.models.invalid_problem_id_error import InvalidProblemIdError
 from oro_sdk.models.lease_expired_error import LeaseExpiredError
-from oro_sdk.models.missing_score_error import MissingScoreError
 from oro_sdk.models.not_run_owner_error import NotRunOwnerError
 from oro_sdk.models.run_already_complete_error import RunAlreadyCompleteError
 from oro_sdk.models.heartbeat_request import HeartbeatRequest as SdkHeartbeatRequest
@@ -164,14 +162,6 @@ class BackendError(Exception):
     @property
     def is_eval_run_not_found(self) -> bool:
         return self.is_error(EvalRunNotFoundError)
-
-    @property
-    def is_invalid_problem_id(self) -> bool:
-        return self.is_error(InvalidProblemIdError)
-
-    @property
-    def is_missing_score(self) -> bool:
-        return self.is_error(MissingScoreError)
 
     def __str__(self) -> str:
         return self.message
