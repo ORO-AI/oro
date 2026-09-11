@@ -38,6 +38,7 @@ COPY src/__init__.py /app/src/
 
 # Copy data files (test problems for local testing)
 COPY data/ /app/data/
+COPY trajectory-viewer/ /app/trajectory-viewer/
 
 ENV PYTHONPATH=/app
 

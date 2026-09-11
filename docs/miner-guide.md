@@ -78,6 +78,19 @@ reference in the bundled qualifying pack.
 `LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be
 available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
+
+`--problems` runs a subset while you iterate. Pass any number from 1 to 35.
+The problems are sampled at random and spread across the seven families, so a
+short run still covers as many of TF1 through TF7 as it has room for:
+
+```bash
+docker compose run test --agent-file my_agent.py --problems 7
+```
+
+Each run samples afresh, so repeated runs do not tune the agent against one
+lucky subset. The report prints the seed; pass `--seed` to repeat an earlier
+selection exactly. Scores from a subset are not comparable to qualifying,
+which always runs all 35.
 Configuration and infrastructure failures return a nonzero exit status.
 
 Local tests use a dedicated search server and proxy. The proxy fetches the live
@@ -91,24 +104,47 @@ them with `docker compose --profile test down` when finished.
 
 ### Output
 
-The command prints 35 finalized task results followed by the aggregate and
-artifact location:
+The command prints a run header, the 35 finalized tasks grouped by family with
+a per-family mean, the aggregate, and where the artifacts are:
 
 ```text
-intent_decomposition: completed, reward=...
-intent_decomposition: completed, reward=...
-... 33 more task rows ...
-Aggregate score: ...
-Artifacts: /app/logs/environment-runs/local-...
+ORO Bench local run  local-...
+  pack        9e5d11c6…c73a  (35 tasks)
+  runtime     0.3.2  verifier 0.3.4
+  inference   openrouter
+  agent model deepseek-ai/DeepSeek-V3.2-TEE  (reference agent; custom agents choose in code)
+  simulator   mistralai/mistral-small-2603
+  judge       deepseek/deepseek-v4-flash-0731
+
+intent_decomposition               mean 0.80  4/5 passed
+  TF1-intent_decomposition-...     completed         1.00
+  ...
+
+Aggregate score  0.363515
+Artifacts        ./logs/environment-runs/local-...
+Trajectories     ./logs/environment-runs/local-.../trajectories.html  (open in a browser)
 ```
 
-The family names correspond to TF1 through TF7 in the order shown. A completed
-task can still have a zero reward if its verifier verdict is incorrect.
+Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
+that off. The simulator and judge models are sealed in the pack. The agent
+model line shows `SANDBOX_MODEL`, which is a request rather than a record: only
+the included reference agent reads it, and the proxy maps it to the active
+provider's name for that model, so an OpenRouter run of the default sends
+`deepseek/deepseek-v3.2`. A custom agent chooses its own models in code. A
+completed task can still have a zero reward if its verifier verdict is
+incorrect.
+
+Open `trajectories.html` in any browser to step through every episode: the
+shopper request, your agent's messages and tool calls, observations, simulator
+events, the verdict checks, and the reward. It is a single self-contained file,
+so you can copy it off a remote host. The viewer source lives in
+`trajectory-viewer/`.
 
 Each run directory contains:
 
 - `summary.json`, with the pack digest, task roster, per-task and per-family
   rewards, runtime error classification, and aggregate score;
+- `trajectories.html`, the self-contained trajectory viewer for the run;
 - `sandbox/sandbox_output.jsonl`, with the untrusted sandbox trajectory output;
 - `episode_results.jsonl`, with finalized runtime receipts including verifier
   verdicts, call traces, ledgers, and provenance;

@@ -141,7 +141,6 @@ def load_agent_from_file(file_path: str) -> Callable:
     if not callable(agent_main):
         raise ImportError(f"'agent_main' in {file_path} is not callable")
 
-    logger.info(f"Succesfully loaded agent from {file_path}")
     return agent_main
 
 

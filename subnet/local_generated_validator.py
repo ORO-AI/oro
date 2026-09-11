@@ -7,16 +7,18 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import stat
 import subprocess
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
 from subnet.validator.env_pack_loader import (
@@ -59,6 +61,8 @@ class LocalGeneratedConfig:
     inference_base_url: str
     model: str
     pack_sha256: str | None = None
+    problem_count: int | None = None
+    seed: int | None = None
     max_workers: int = 7
     timeout: float = 1800.0
     session_host: str = "0.0.0.0"
@@ -72,6 +76,8 @@ class LocalGeneratedResult:
     results: list[dict[str, Any]]
     artifact_dir: Path
     summary_path: Path
+    summary: dict[str, Any]
+    report_path: Path | None = None
 
     @property
     def score(self) -> float:
@@ -90,30 +96,70 @@ class LocalGeneratedValidatorError(RuntimeError):
         classification: str,
         artifact_dir: Path,
         summary_path: Path,
+        report_path: Path | None = None,
     ) -> None:
         super().__init__(message)
         self.classification = classification
         self.artifact_dir = artifact_dir
         self.summary_path = summary_path
+        self.report_path = report_path
+
+
+def _sample_problem_ids(pack: LoadedPack, count: int, seed: int | None) -> list[str]:
+    """Pick ``count`` task ids at random, spread as evenly across families as possible."""
+
+    rng = random.Random(seed)
+    by_family: dict[str, list[int]] = defaultdict(list)
+    for index, task in enumerate(pack.task_specs):
+        by_family[task.family].append(index)
+
+    families = sorted(by_family)
+    rng.shuffle(families)
+    for indexes in by_family.values():
+        rng.shuffle(indexes)
+
+    chosen: list[int] = []
+    deepest = max(len(indexes) for indexes in by_family.values())
+    for depth in range(deepest):
+        for family in families:
+            indexes = by_family[family]
+            if depth < len(indexes):
+                chosen.append(indexes[depth])
+                if len(chosen) == count:
+                    return [pack.task_ids[index] for index in sorted(chosen)]
+    return [pack.task_ids[index] for index in sorted(chosen)]
 
 
 def validate_local_pack(
     pack: LoadedPack,
     expected_families: frozenset[str] = GENERATED_FAMILIES,
     tasks_per_family: int = QUALIFYING_TASKS_PER_FAMILY,
+    *,
+    problem_count: int | None = None,
+    seed: int | None = None,
 ) -> list[str]:
-    """Validate the family roster and select the qualifying task count."""
+    """Validate the family roster, then choose which problems to run.
 
-    if tasks_per_family <= 0:
+    Without ``problem_count`` this selects the qualifying roster: the first
+    ``tasks_per_family`` of every family, in archive order. With it, that many
+    problems are sampled at random and spread across families, so a short run
+    still covers as many of TF1 through TF7 as it has room for.
+    """
+
+    if problem_count is None and tasks_per_family <= 0:
         raise ValueError("tasks_per_family must be positive")
 
     counts = Counter(task.family for task in pack.task_specs)
     missing = sorted(expected_families - set(counts))
     unexpected = sorted(set(counts) - expected_families)
-    insufficient = sorted(
-        f"{family}:{counts[family]}"
-        for family in expected_families
-        if counts[family] < tasks_per_family
+    insufficient = (
+        []
+        if problem_count is not None
+        else sorted(
+            f"{family}:{counts[family]}"
+            for family in expected_families
+            if counts[family] < tasks_per_family
+        )
     )
     if missing or unexpected or insufficient:
         details = [f"task_count={len(pack.task_specs)}"]
@@ -125,13 +171,19 @@ def validate_local_pack(
             details.append(f"insufficient={','.join(insufficient)}")
         raise ValueError("invalid local generated pack: " + "; ".join(details))
 
-    selected: list[str] = []
-    selected_counts: Counter[str] = Counter()
-    for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True):
-        if selected_counts[task.family] < tasks_per_family:
-            selected.append(task_id)
-            selected_counts[task.family] += 1
-    return selected
+    if problem_count is None:
+        selected: list[str] = []
+        selected_counts: Counter[str] = Counter()
+        for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True):
+            if selected_counts[task.family] < tasks_per_family:
+                selected.append(task_id)
+                selected_counts[task.family] += 1
+        return selected
+
+    available = len(pack.task_ids)
+    if not 1 <= problem_count <= available:
+        raise ValueError(f"--problems must be between 1 and {available}")
+    return _sample_problem_ids(pack, problem_count, seed)
 
 
 def _sha256(path: Path) -> str:
@@ -199,6 +251,7 @@ def _summary_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "task_id": str(result.get("task_id") or ""),
                 "family": result.get("family"),
                 "outcome": result.get("outcome"),
+                "correct": correct,
                 "reward": float(verdict.get("paid_reward") or 0) if correct else 0.0,
                 "error_classification": _error_classification(result),
                 "error_detail": result.get("error_detail"),
@@ -217,8 +270,9 @@ def _write_summary(
     results: list[dict[str, Any]],
     aggregate_score: float | None,
     status: str,
+    seed: int | None = None,
     error: LocalGeneratedValidatorError | None = None,
-) -> None:
+) -> dict[str, Any]:
     task_rows = _summary_tasks(results)
     family_counts: Counter[str] = Counter()
     family_totals: Counter[str] = Counter()
@@ -237,6 +291,17 @@ def _write_summary(
         ),
         "task_count": len(results),
         "task_roster": task_ids,
+        "pack_task_count": len(pack.task_ids) if pack is not None else len(results),
+        "selection_mode": "random_sample" if seed is not None else "qualifying_roster",
+        "selection_seed": seed,
+        "models": (
+            {
+                str(role): str(model)
+                for role, model in pack.manifest.get("models", {}).items()
+            }
+            if pack is not None
+            else {}
+        ),
         "aggregate_score": aggregate_score,
         "tasks": task_rows,
         "family_rewards": {
@@ -256,6 +321,7 @@ def _write_summary(
         json.dumps(summary, indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+    return summary
 
 
 def _run_failure_classification(results: list[dict[str, Any]]) -> str:
@@ -426,7 +492,7 @@ def run_local_generated_validator(
 
         phase = "pack_validation"
         task_ids = validate_local_pack(
-            pack, tasks_per_family=QUALIFYING_TASKS_PER_FAMILY
+            pack, problem_count=config.problem_count, seed=config.seed
         )
 
         phase = "session_setup"
@@ -585,7 +651,7 @@ def run_local_generated_validator(
 
         assert aggregate_score is not None
         phase = "summary"
-        _write_summary(
+        summary = _write_summary(
             summary_path,
             run_id=run_id,
             pack=pack,
@@ -594,6 +660,12 @@ def run_local_generated_validator(
             results=results,
             aggregate_score=aggregate_score,
             status="completed",
+            seed=config.seed,
+        )
+        report_path = local_report.write_trajectory_report(
+            artifact_dir.resolve() / "trajectories.html",
+            [build_episode_artifact(result) for result in results],
+            run_id=run_id,
         )
         completed_result = LocalGeneratedResult(
             run_id=run_id,
@@ -601,6 +673,8 @@ def run_local_generated_validator(
             results=results,
             artifact_dir=artifact_dir.resolve(),
             summary_path=summary_path.resolve(),
+            summary=summary,
+            report_path=report_path,
         )
     except Exception as exc:  # noqa: BLE001
         caught_error = exc
@@ -640,10 +714,22 @@ def run_local_generated_validator(
                 results=results,
                 aggregate_score=aggregate_score,
                 status="failed",
+                seed=config.seed,
                 error=run_error,
             )
         except Exception:  # noqa: BLE001, S110
             pass
+        # A failed run is where trajectories matter most, so emit the viewer for
+        # whatever episodes were finalized before the failure.
+        if results:
+            try:
+                run_error.report_path = local_report.write_trajectory_report(
+                    artifact_dir.resolve() / "trajectories.html",
+                    [build_episode_artifact(result) for result in results],
+                    run_id=run_id,
+                )
+            except Exception:  # noqa: BLE001, S110
+                pass
         if caught_error is run_error:
             raise run_error
         raise run_error from caught_error
@@ -679,7 +765,29 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         description="Run the bundled generated EnvPack locally."
     )
     parser.add_argument("--agent-file", default="src/agent/environment_agent.py")
+    parser.add_argument(
+        "--problems",
+        type=int,
+        default=None,
+        help=(
+            "How many problems to run, sampled at random and spread across the "
+            "seven families. Defaults to the full qualifying roster."
+        ),
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Reuse a previous run's selection seed to repeat its problems.",
+    )
     args = parser.parse_args(arguments)
+    if args.problems is not None and args.problems <= 0:
+        raise ValueError("--problems must be positive")
+    # A fresh sample each run avoids tuning against one lucky subset; the seed is
+    # reported so any run can be repeated exactly.
+    seed = args.seed
+    if args.problems is not None and seed is None:
+        seed = random.randrange(2**31)
     agent = Path(args.agent_file).expanduser()
     workspace_agent = Path("/workspace") / agent
     if not agent.is_absolute() and workspace_agent.is_file():
@@ -723,6 +831,8 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
         or "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a",
+        problem_count=args.problems,
+        seed=seed,
         max_workers=max_workers,
         timeout=timeout,
         session_host="127.0.0.1",
@@ -738,19 +848,24 @@ def main(arguments: list[str] | None = None) -> int:
     try:
         result = run_local_generated_validator(config)
     except LocalGeneratedValidatorError as error:
-        print(
-            f"Error [{error.classification}]: {error}\nSummary: {error.summary_path}",
-            file=sys.stderr,
-        )
+        lines = [
+            f"Error [{error.classification}]: {error}",
+            f"Summary: {error.summary_path}",
+        ]
+        if error.report_path is not None:
+            lines.append(f"Trajectories: {error.report_path}")
+        print("\n".join(lines), file=sys.stderr)
         return 1
-    for task in result.results:
-        verdict = task.get("verdict") or {}
-        reward = (
-            float(verdict.get("paid_reward") or 0) if verdict.get("correct") else 0.0
+    print(
+        local_report.render_console_report(
+            result.summary,
+            artifact_dir=result.artifact_dir,
+            report_path=result.report_path,
+            provider=config.inference_provider,
+            agent_model=config.model,
+            color=local_report.stdout_supports_color(),
         )
-        print(f"{task.get('family')}: {task.get('outcome')}, reward={reward:.6f}")
-    print(f"Aggregate score: {result.aggregate_score:.6f}")
-    print(f"Artifacts: {result.artifact_dir}")
+    )
     return 0
 
 

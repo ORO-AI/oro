@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -29,6 +30,7 @@ def _pack(families: list[str]) -> SimpleNamespace:
         task_specs=[SimpleNamespace(family=family) for family in families],
         task_ids=[f"task-{index}" for index in range(len(families))],
         pack_sha256="a" * 64,
+        manifest={"models": {"user_simulator": "vendor/sim"}},
         metadata={"search_index_sha256": "b" * 64},
         close=MagicMock(),
     )
@@ -85,6 +87,7 @@ def _config(tmp_path: Path, *, timeout: float = 120.0) -> LocalGeneratedConfig:
         inference_base_url="https://openrouter.test/api/v1",
         model="vendor/test-model",
         pack_sha256="a" * 64,
+        problem_count=7,
         max_workers=7,
         timeout=timeout,
     )
@@ -96,9 +99,6 @@ def _install_runtime_fakes(
     *,
     results: list[dict],
 ) -> tuple[SimpleNamespace, MagicMock, list[list[str]], SessionRuntime, MagicMock]:
-    monkeypatch.setattr(
-        local_generated_validator, "QUALIFYING_TASKS_PER_FAMILY", 1
-    )
     pack = _pack(sorted(GENERATED_FAMILIES))
     registry = MagicMock()
     registry.start.side_effect = [
@@ -186,6 +186,94 @@ def test_local_pack_selects_first_five_tasks_from_each_generated_family() -> Non
 
     with pytest.raises(ValueError, match="insufficient="):
         validate_local_pack(_pack(families * 4))
+
+
+def test_problem_count_samples_across_every_family_it_can_reach() -> None:
+    families = sorted(GENERATED_FAMILIES)
+    pack = _pack([family for family in families for _ in range(5)])
+    family_of = {
+        f"task-{index}": family
+        for index, family in enumerate(family for family in families for _ in range(5))
+    }
+
+    seven = validate_local_pack(pack, problem_count=7, seed=1)
+    assert len(seven) == 7
+    assert sorted(family_of[task] for task in seven) == families
+
+    three = validate_local_pack(pack, problem_count=3, seed=1)
+    assert len(three) == 3
+    assert len({family_of[task] for task in three}) == 3
+
+    ten = validate_local_pack(pack, problem_count=10, seed=1)
+    assert len(ten) == 10
+    assert sorted(Counter(family_of[task] for task in ten).values()) == [
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+    ]
+
+    assert validate_local_pack(pack, problem_count=35, seed=1) == pack.task_ids
+    # Archive order, so problems.jsonl and the roster stay readable.
+    assert seven == sorted(seven, key=lambda task: int(task.removeprefix("task-")))
+
+
+def test_problem_selection_repeats_only_for_a_repeated_seed() -> None:
+    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+
+    assert validate_local_pack(pack, problem_count=7, seed=7) == validate_local_pack(
+        pack, problem_count=7, seed=7
+    )
+    assert validate_local_pack(pack, problem_count=7, seed=7) != validate_local_pack(
+        pack, problem_count=7, seed=8
+    )
+
+
+def test_problem_count_outside_the_pack_names_the_bounds() -> None:
+    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+
+    for count in (0, 36):
+        with pytest.raises(ValueError, match="--problems must be between 1 and 35"):
+            validate_local_pack(pack, problem_count=count)
+
+
+def test_a_short_run_does_not_require_a_full_qualifying_family(tmp_path: Path) -> None:
+    # The per-family minimum is a qualifying rule; a sampled run should not inherit it.
+    pack = _pack(sorted(GENERATED_FAMILIES))
+
+    assert len(validate_local_pack(pack, problem_count=3, seed=1)) == 3
+    with pytest.raises(ValueError, match="insufficient="):
+        validate_local_pack(pack)
+
+
+def test_failed_run_still_writes_the_trajectory_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A failed run is exactly when a miner needs the trajectories.
+    results = [
+        _episode(index, family)
+        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+    ]
+    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
+    monkeypatch.setattr(
+        local_generated_validator,
+        "aggregate_results",
+        lambda _results: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    with pytest.raises(
+        local_generated_validator.LocalGeneratedValidatorError
+    ) as excinfo:
+        run_local_generated_validator(_config(tmp_path))
+
+    report = excinfo.value.report_path
+    assert report is not None and report.is_file()
+    assert "TF" in report.read_text() or "episode" in report.read_text()
+    summary = json.loads(excinfo.value.summary_path.read_text())
+    assert summary["status"] == "failed"
 
 
 def test_summary_averages_rewards_within_each_family(tmp_path: Path) -> None:
@@ -293,7 +381,9 @@ def test_timeout_retries_container_removal_after_failed_forced_removal(
     # This test fixes the roster to one task per family; the fixture has two.
     selected = {
         task.family: (task_id, task)
-        for task_id, task in zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True)
+        for task_id, task in zip(
+            loaded_pack.task_ids, loaded_pack.task_specs, strict=True
+        )
     }
     loaded_pack.task_ids = [task_id for task_id, _ in selected.values()]
     loaded_pack.task_specs = [task for _, task in selected.values()]
@@ -381,10 +471,7 @@ def test_sandbox_failure_takes_precedence_when_receipt_roster_is_incomplete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     families = sorted(GENERATED_FAMILIES)
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(families[:-1])
-    ]
+    results = [_episode(index, family) for index, family in enumerate(families[:-1])]
     _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch, tmp_path, results=results
     )
@@ -546,6 +633,7 @@ def test_run_composes_generated_components_and_writes_per_family_summary(
         "task_id": "task-0",
         "family": families[0],
         "outcome": "completed",
+        "correct": False,
         "reward": 0.0,
         "error_classification": None,
         "error_detail": None,
@@ -989,9 +1077,7 @@ def test_problem_execution_timeout_uses_one_budget_across_worker_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        local_generated_validator, "QUALIFYING_TASKS_PER_FAMILY", 1
-    )
+    monkeypatch.setattr(local_generated_validator, "QUALIFYING_TASKS_PER_FAMILY", 1)
     results = [
         _episode(index, family)
         for index, family in enumerate(sorted(GENERATED_FAMILIES))
