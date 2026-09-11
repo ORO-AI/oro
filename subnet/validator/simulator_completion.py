@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from src.agent.proxy_client import ProxyClient
@@ -12,15 +13,23 @@ logger = logging.getLogger(__name__)
 
 # The shopper-simulator LLM call is a single-shot dependency in the middle
 # of a task episode; a lone transient (429, 5xx, socket reset, empty body)
-# used to trip ``environment_error`` on the task, and once eight of a
-# 90-task race pack tripped, ``generated_evaluation.aggregate_results``
-# sank the whole run. Prod on 2026-09-10 lost dozens of pack runs to this
-# pattern (see ORO-2189). Retry a bounded number of times with
-# exponential backoff before we escalate — the provider almost always
-# recovers on the next attempt.
-_MAX_ATTEMPTS = 3
-_INITIAL_BACKOFF_S = 0.5
-_BACKOFF_MULTIPLIER = 2.0
+# used to trip ``environment_error`` on the task. Retry a bounded number
+# of times before we escalate — the provider usually recovers.
+#
+# Backoff shape (5s, 10s, 20s) is sized to step through a real provider
+# rate-limit window (typically 30-60s) so the last attempt lands outside
+# it. Shorter waits would repeatedly hit the same closed window.
+#
+# Wall budget: request latency counts against ``simulator_timeout_s``
+# (60s at session_registry), not just the sleeps. Skip further retries
+# once the projected wall (elapsed + next backoff + a safety margin for
+# the next request) would exceed the budget, so we surface a clean
+# ``InferenceProviderError`` instead of getting quarantined mid-sleep by
+# the outer future's ``TimeoutError``.
+_MAX_ATTEMPTS = 4
+_RETRY_BACKOFFS_S = (5.0, 10.0, 20.0)
+_WALL_BUDGET_S = 55.0
+_NEXT_ATTEMPT_HEADROOM_S = 3.0
 
 
 class InferenceProviderError(RuntimeError):
@@ -87,7 +96,7 @@ class SimulatorCompletion:
         # attribute (see ORO-2191 review): a single ProxyClient shared by
         # concurrent sessions would let session B's failure overwrite
         # session A's just before A reads it, corrupting A's ledger.
-        backoff_s = _INITIAL_BACKOFF_S
+        started = time.monotonic()
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             result = self._client.post_verbose(
                 "/inference/chat/completions",
@@ -143,15 +152,32 @@ class SimulatorCompletion:
                     status=upstream_status,
                     body=upstream_body,
                 )
+            backoff_s = _RETRY_BACKOFFS_S[attempt - 1]
+            projected_s = (
+                (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
+            )
+            if projected_s > _WALL_BUDGET_S:
+                logger.error(
+                    "user simulator inference wall budget exhausted "
+                    "after %d attempts (%s); projected=%.2fs budget=%.2fs",
+                    attempt,
+                    log_detail,
+                    projected_s,
+                    _WALL_BUDGET_S,
+                )
+                raise InferenceProviderError(
+                    status=upstream_status,
+                    body=upstream_body,
+                )
             logger.warning(
-                "user simulator inference failed on attempt %d/%d (%s); retrying in %.2fs",
+                "user simulator inference failed on attempt %d/%d (%s); "
+                "retrying in %.2fs",
                 attempt,
                 _MAX_ATTEMPTS,
                 log_detail,
                 backoff_s,
             )
             await asyncio.sleep(backoff_s)
-            backoff_s *= _BACKOFF_MULTIPLIER
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

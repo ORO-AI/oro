@@ -89,6 +89,65 @@ def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
     assert client.post_verbose.call_count == simulator_completion._MAX_ATTEMPTS
 
 
+def test_backoff_walks_full_schedule_before_giving_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successive failures sleep through the configured backoff schedule."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _record)
+    client = MagicMock()
+    client.post_verbose.return_value = _err(503, "still down")
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(InferenceProviderError):
+        asyncio.run(completion("model", []))
+
+    assert slept == list(
+        simulator_completion._RETRY_BACKOFFS_S[: simulator_completion._MAX_ATTEMPTS - 1]
+    )
+
+
+def test_bails_out_early_when_wall_budget_would_be_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow first attempt must not let the next backoff push the total
+    wall past ``simulator_timeout_s``. The retry loop bails cleanly
+    instead of letting the outer future time out mid-sleep and
+    quarantine an about-to-recover session."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _record)
+    # Fake ``time.monotonic`` so we can pin elapsed wall without waiting.
+    now = [0.0]
+    original_post = _err(429, "rate limited")
+
+    def slow_post(*_args, **_kwargs):
+        # Every request "takes" 30s of wall time.
+        now[0] += 30.0
+        return original_post
+
+    monkeypatch.setattr(simulator_completion.time, "monotonic", lambda: now[0])
+    client = MagicMock()
+    client.post_verbose.side_effect = slow_post
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("model", []))
+
+    # After attempt 1 (30s elapsed) + backoff 5s + 3s headroom = 38s < 55s → sleeps.
+    # After attempt 2 (60s elapsed) + backoff 10s + 3s headroom = 73s > 55s → bail.
+    assert slept == [simulator_completion._RETRY_BACKOFFS_S[0]]
+    assert client.post_verbose.call_count == 2
+    assert excinfo.value.status == 429
+
+
 def test_retries_on_transient_upstream_then_recovers() -> None:
     """ORO-2189: a single provider blip (503 body) must not sink the task."""
     good = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
@@ -161,12 +220,8 @@ def test_concurrent_sessions_do_not_race_on_error_signal() -> None:
     # would see the first's error.
     client = MagicMock()
     client.post_verbose.side_effect = [
-        _err(429, "session-A body"),
-        _err(429, "session-A body"),
-        _err(429, "session-A body"),
-        _err(500, "session-B body"),
-        _err(500, "session-B body"),
-        _err(500, "session-B body"),
+        *[_err(429, "session-A body")] * simulator_completion._MAX_ATTEMPTS,
+        *[_err(500, "session-B body")] * simulator_completion._MAX_ATTEMPTS,
     ]
     completion = SimulatorCompletion("miner-token", client=client)
 
