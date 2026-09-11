@@ -99,17 +99,25 @@ def test_default_simulator_evidence_is_private_and_persisted(
         inference_access_token="miner-token",
     ) as registry:
         _start(registry)
-        registry._simulator_completion._client.post = MagicMock(
-            return_value={
-                "choices": [
-                    {
-                        "message": {
-                            "content": '{"action":"clarify","content":"which size?"}'
-                        },
-                        "finish_reason": "stop",
-                    }
-                ]
-            }
+        # SimulatorCompletion switched to ``post_verbose`` (ORO-2191);
+        # patch the new method with a ``PostResult(data=..., error=None)``
+        # equivalent of the old success shape.
+        from src.agent.proxy_client import PostResult
+
+        registry._simulator_completion._client.post_verbose = MagicMock(
+            return_value=PostResult(
+                data={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"action":"clarify","content":"which size?"}'
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+                error=None,
+            )
         )
         response = registry.call(
             _call_envelope(
