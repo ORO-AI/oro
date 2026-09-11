@@ -438,12 +438,18 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     families = sorted(GENERATED_FAMILIES)
+    # Enough verifier_errors to exceed the aggregate's harness tolerance so
+    # receipts truly cannot aggregate; the sandbox exit code must still take
+    # precedence over the aggregate failure.
     results = [
         _episode(0, families[0]),
-        _episode(1, families[1], outcome="verifier_error"),
+        *[
+            _episode(index, family, outcome="verifier_error")
+            for index, family in enumerate(families[1:4], 1)
+        ],
         *[
             _episode(index, family, outcome="agent_error")
-            for index, family in enumerate(families[2:], 2)
+            for index, family in enumerate(families[4:], 4)
         ],
     ]
     _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
@@ -752,14 +758,43 @@ def test_summary_ignores_sandbox_inference_failure_claims(
     assert completed.aggregate_score == pytest.approx(5 / 7)
 
 
-def test_verifier_failure_is_run_failure_and_keeps_diagnostic_summary(
+def test_isolated_verifier_failure_completes_run_scoring_task_as_zero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """One verifier_error among otherwise-good tasks stays inside the
+    aggregate's harness tolerance: the run completes, the failing task
+    counts as zero reward in the average, and the summary still labels
+    the task with an error classification for diagnostics."""
     families = sorted(GENERATED_FAMILIES)
     results = [
         _episode(0, families[0], outcome="verifier_error"),
         *[_episode(index, family) for index, family in enumerate(families[1:], 1)],
+    ]
+    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
+
+    completed = run_local_generated_validator(_config(tmp_path))
+
+    summary = json.loads(completed.summary_path.read_text())
+    assert summary["tasks"][0]["error_classification"] == "verifier"
+    assert completed.aggregate_score == pytest.approx(
+        sum(1.0 for _ in families[1:]) / len(families)
+    )
+
+
+def test_verifier_failures_above_tolerance_still_fail_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Above the aggregate's harness tolerance the whole run still
+    hard-fails and the diagnostic summary marks each failing task."""
+    families = sorted(GENERATED_FAMILIES)
+    results = [
+        *[
+            _episode(index, family, outcome="verifier_error")
+            for index, family in enumerate(families[:3])
+        ],
+        *[_episode(index, family) for index, family in enumerate(families[3:], 3)],
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 

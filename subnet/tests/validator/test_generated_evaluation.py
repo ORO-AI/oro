@@ -65,12 +65,46 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
     assert score == 0.25
 
 
-@pytest.mark.parametrize(
-    "outcome", ["environment_error", "verifier_error", "leakage", "exploit"]
-)
-def test_infrastructure_and_integrity_outcomes_reject_the_run(outcome) -> None:
+@pytest.mark.parametrize("outcome", ["leakage", "exploit"])
+def test_integrity_outcomes_reject_the_run(outcome) -> None:
+    """Cheating still hard-fails the whole pack, at any count."""
     with pytest.raises(ValueError, match=outcome):
         aggregate_results([_result("one", correct=False, outcome=outcome)])
+
+
+@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
+def test_isolated_harness_failure_completes_run_scoring_task_as_zero(outcome) -> None:
+    """One harness failure among many good tasks does not sink the pack;
+    the failing task counts as zero reward in the average."""
+    results = [_result(f"task-{i}", correct=True, reward=1.0) for i in range(9)]
+    results.append(_result("task-9", correct=False, outcome=outcome))
+
+    score = aggregate_results(results)
+
+    # 9 correct tasks × 1.0 reward, averaged over all 10 tasks.
+    assert score == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
+def test_harness_failures_above_tolerance_still_reject_the_run(outcome) -> None:
+    """Above the tolerance threshold the environment is judged too broken
+    to score fairly; whole-pack rejection returns."""
+    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(6)]
+    results.extend(
+        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(4)
+    )
+
+    with pytest.raises(ValueError, match="infrastructure failure"):
+        aggregate_results(results)
+
+
+def test_cheating_outcome_rejects_even_at_low_count() -> None:
+    """A single cheating outcome hard-fails regardless of pack size."""
+    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(9)]
+    results.append(_result("bad", correct=False, outcome="leakage"))
+
+    with pytest.raises(ValueError, match="integrity failure"):
+        aggregate_results(results)
 
 
 def test_duplicate_task_result_is_rejected() -> None:
@@ -276,9 +310,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
         )
 
 
-def test_generated_runner_flush_failure_does_not_change_score(
-    tmp_path, monkeypatch
-):
+def test_generated_runner_flush_failure_does_not_change_score(tmp_path, monkeypatch):
     result = {
         "task_id": "public",
         "family": "right",
