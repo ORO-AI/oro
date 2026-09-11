@@ -58,8 +58,10 @@ def test_post_logs_one_attempt_on_success(client, log_path):
 
 def test_post_logs_attempt_per_retry_on_5xx(client, log_path):
     responses = [_status_response(503), _status_response(503), _ok_response()]
-    with patch("src.agent.proxy_client.requests.post", side_effect=responses), \
-         patch("src.agent.proxy_client.time.sleep"):
+    with (
+        patch("src.agent.proxy_client.requests.post", side_effect=responses),
+        patch("src.agent.proxy_client.time.sleep"),
+    ):
         client.post("/inference/chat", json_data={"messages": []})
 
     attempts = [e for e in _read_jsonl(log_path) if e["kind"] == "attempt"]
@@ -69,10 +71,13 @@ def test_post_logs_attempt_per_retry_on_5xx(client, log_path):
 
 def test_post_records_error_class_on_timeout(client, log_path):
     """A hung HTTP call surfaces as an attempt with error_class=ReadTimeout."""
-    with patch(
-        "src.agent.proxy_client.requests.post",
-        side_effect=requests.exceptions.ReadTimeout("read timed out"),
-    ), patch("src.agent.proxy_client.time.sleep"):
+    with (
+        patch(
+            "src.agent.proxy_client.requests.post",
+            side_effect=requests.exceptions.ReadTimeout("read timed out"),
+        ),
+        patch("src.agent.proxy_client.time.sleep"),
+    ):
         result = client.post("/inference/chat", json_data={"messages": []})
 
     assert result is None
@@ -86,10 +91,13 @@ def test_post_records_error_class_on_timeout(client, log_path):
 
 def test_attempt_duration_ms_present_per_call(client, log_path):
     """Each attempt entry carries its own duration_ms (not a cumulative roll-up)."""
-    with patch(
-        "src.agent.proxy_client.requests.post",
-        side_effect=[_status_response(503), _ok_response()],
-    ), patch("src.agent.proxy_client.time.sleep"):
+    with (
+        patch(
+            "src.agent.proxy_client.requests.post",
+            side_effect=[_status_response(503), _ok_response()],
+        ),
+        patch("src.agent.proxy_client.time.sleep"),
+    ):
         client.post("/search/find_product")
 
     attempts = [e for e in _read_jsonl(log_path) if e["kind"] == "attempt"]
@@ -127,3 +135,78 @@ def test_request_log_disabled_when_no_file(monkeypatch):
     rl.record_attempt("POST", "/inference/chat", 0, 100.0, status_code=200)
     rl.record("POST", "/inference/chat", duration_ms=100.0, status_code=200)
     # No assertions on file content — call must just not raise.
+
+
+def _status_response_with_body(code: int, body: str):
+    r = MagicMock(spec=requests.Response)
+    r.status_code = code
+    r.text = body
+    r.json.return_value = {}
+    return r
+
+
+def test_last_error_captures_upstream_status_and_body_on_non_200(client):
+    """ORO-2191: after all retries exhaust with non-200s, ``last_error`` holds
+    the final status + truncated body so callers (SimulatorCompletion, sandbox
+    tool wrappers) can surface the actual provider reason to the ledger."""
+    body = '{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}'
+    responses = [_status_response_with_body(429, body)] * 3
+    with patch("src.agent.proxy_client.requests.post", side_effect=responses):
+        result = client.post("/inference/chat/completions", json_data={"messages": []})
+
+    assert result is None
+    assert client.last_error is not None
+    assert client.last_error["status"] == 429
+    assert "rate_limit_exceeded" in client.last_error["body"]
+
+
+def test_last_error_cleared_on_success(client):
+    """A successful call must clear a stale ``last_error`` from a prior request
+    so downstream callers don't misread an earlier failure as the current one."""
+    # First: seed a stale error.
+    body = '{"error":"boom"}'
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        side_effect=[_status_response_with_body(500, body)] * 3,
+    ):
+        client.post("/inference/chat/completions", json_data={"messages": []})
+    assert client.last_error is not None
+
+    # Then: a success clears it.
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        return_value=_ok_response({"choices": [{"message": {"content": "ok"}}]}),
+    ):
+        result = client.post("/inference/chat/completions", json_data={"messages": []})
+    assert result is not None
+    assert client.last_error is None
+
+
+def test_last_error_on_network_exception(client):
+    """When every attempt raises (no HTTP response at all), ``last_error``
+    still carries a signal — ``status=None`` with a network-error body — so
+    callers can distinguish "provider returned 500" from "we never reached it"."""
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        side_effect=requests.ConnectionError("connection refused"),
+    ):
+        result = client.post("/inference/chat/completions", json_data={"messages": []})
+
+    assert result is None
+    assert client.last_error == {
+        "status": None,
+        "body": "no response (network error or timeout)",
+    }
+
+
+def test_last_error_body_truncated_to_800_chars(client):
+    """Big HTML error pages must not blow log budgets — body is capped."""
+    huge = "X" * 5000
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        side_effect=[_status_response_with_body(502, huge)] * 3,
+    ):
+        client.post("/inference/chat/completions", json_data={"messages": []})
+
+    assert client.last_error is not None
+    assert len(client.last_error["body"]) == 800

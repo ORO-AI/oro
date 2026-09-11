@@ -106,3 +106,36 @@ def test_retries_on_malformed_body_then_recovers() -> None:
 
     assert result["text"] == "ok"
     assert client.post.call_count == 2
+
+
+def test_terminal_error_message_carries_upstream_status_and_body() -> None:
+    """ORO-2191: on exhaustion the raised RuntimeError must include the
+    upstream provider's status + body so session_registry writes it to the
+    episode ledger's ``error_detail`` and post-hoc triage doesn't need to
+    SSH into the validator to see the reason."""
+    client = MagicMock()
+    client.post.return_value = None
+    client.last_error = {
+        "status": 403,
+        "body": '{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}',
+    }
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(completion("model", []))
+
+    msg = str(excinfo.value)
+    assert "status=403" in msg
+    assert "rate_limit_exceeded" in msg
+
+
+def test_terminal_error_message_survives_client_without_last_error() -> None:
+    """Older ProxyClient shims (or test doubles) may not carry ``last_error``.
+    The failure message must degrade gracefully — no AttributeError — and
+    still name the failure mode."""
+    client = MagicMock(spec=["post"])  # no ``last_error`` attribute
+    client.post.return_value = None
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(RuntimeError, match="proxy non-200"):
+        asyncio.run(completion("model", []))

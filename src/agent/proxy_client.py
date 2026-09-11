@@ -5,7 +5,7 @@ import os
 import logging
 import threading
 import time
-from typing import Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable
 from urllib.parse import urlencode
 
 import requests
@@ -192,6 +192,16 @@ class ProxyClient:
         self.inference_stats = InferenceStats(stats_file)
         request_log_file = os.environ.get("REQUEST_LOG_FILE")
         self.request_log = RequestLog(request_log_file)
+        # Populated after every ``.get()`` / ``.post()`` call. On 2xx it is
+        # cleared to ``None``; on any non-2xx exit (all internal retries
+        # exhausted, or every attempt raised) it carries the final
+        # ``{"status": int|None, "body": str}`` so callers can log or attach
+        # the upstream provider's error message instead of just a bare
+        # ``None`` return. Kept as an attribute rather than a return-shape
+        # change so every existing caller (sandbox tool wrappers,
+        # reasoning judge, envpack judge scoring) keeps working unchanged.
+        # See ORO-2191.
+        self.last_error: Optional[Dict[str, Any]] = None
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -242,6 +252,11 @@ class ProxyClient:
             Response object if successful, None otherwise
         """
         operation_name = f"{method} {path}"
+        # Track the last response we saw across retries. Returned to the
+        # caller on exhaustion so it can surface the upstream status+body
+        # (ORO-2191). Prior behavior returned ``None`` on any non-200 exit,
+        # which erased the provider's error message.
+        response: Optional[requests.Response] = None
         for i in range(self.max_retries):
             attempt_t0 = time.monotonic()
             status_code: Optional[int] = None
@@ -293,7 +308,7 @@ class ProxyClient:
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
-        return None
+        return response
 
     def get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make a GET request to the proxy."""
@@ -305,7 +320,8 @@ class ProxyClient:
         t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
-        result = response.json() if response else None
+        result = response.json() if response and response.status_code == 200 else None
+        self._record_last_error(response, result)
 
         self.request_log.record(
             method="GET",
@@ -345,6 +361,7 @@ class ProxyClient:
         result = None
         if response and response.status_code == 200:
             result = response.json()
+        self._record_last_error(response, result)
 
         self.request_log.record(
             method="POST",
@@ -355,3 +372,35 @@ class ProxyClient:
             duration_ms=duration_ms,
         )
         return result
+
+    def _record_last_error(
+        self,
+        response: Optional[requests.Response],
+        result: Optional[Dict],
+    ) -> None:
+        """Populate ``self.last_error`` when the wrapper is about to return ``None``.
+
+        Callers that want the upstream provider's error message (see
+        ORO-2191 — SimulatorCompletion, sandbox tool wrappers) read this
+        attribute immediately after the ``.get()`` / ``.post()`` call
+        returns. Truncated to 800 chars so a large HTML error page
+        doesn't blow log budgets. Cleared on success so a downstream call
+        can't misread a stale error from a prior request.
+        """
+        if result is not None:
+            self.last_error = None
+            return
+        if response is None:
+            self.last_error = {
+                "status": None,
+                "body": "no response (network error or timeout)",
+            }
+            return
+        try:
+            body_text = response.text
+        except Exception:  # noqa: BLE001 — best effort; body must not throw
+            body_text = "<unreadable body>"
+        self.last_error = {
+            "status": response.status_code,
+            "body": body_text[:800],
+        }

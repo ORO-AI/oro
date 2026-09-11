@@ -85,14 +85,23 @@ class SimulatorCompletion:
                 }
 
             # Distinguish "proxy swallowed a non-200" from "provider returned
-            # 200 with a malformed body" for post-hoc diagnosis. Both are
-            # retriable — the shopper-simulator turn is idempotent — so the
-            # retry loop treats them the same.
-            failure = (
-                "user simulator inference returned no completion (proxy non-200)"
-                if response is None
-                else "user simulator inference returned no completion (malformed body)"
-            )
+            # 200 with a malformed body" for post-hoc diagnosis. On the
+            # non-200 branch include the upstream provider's actual status
+            # and error body via ProxyClient.last_error (ORO-2191) so the
+            # ledger's error_detail carries the reason (rate_limit_exceeded
+            # vs insufficient_credits vs invalid_api_key vs model_unavailable),
+            # not just a generic RuntimeError. Both branches are retriable
+            # since the shopper-simulator turn is idempotent.
+            if response is None:
+                last_error = getattr(self._client, "last_error", None) or {}
+                upstream_status = last_error.get("status")
+                upstream_body = (last_error.get("body") or "").strip()
+                detail = (
+                    f"proxy non-200 status={upstream_status} body={upstream_body!r}"
+                )
+            else:
+                detail = "malformed body"
+            failure = f"user simulator inference returned no completion ({detail})"
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
                     "user simulator inference failed after %d attempts (%s)",

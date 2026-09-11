@@ -473,8 +473,7 @@ class SessionRegistry:
                                 "latency_ms": simulator_latency_ms,
                                 "exchanges": [],
                             }
-                            if snapshot is not None
-                            and simulator_latency_ms is not None
+                            if snapshot is not None and simulator_latency_ms is not None
                             else simulator_evidence()
                         ),
                         "error": {"type": error_type, "detail": detail},
@@ -529,7 +528,17 @@ class SessionRegistry:
                 ) from exc
             except Exception as exc:
                 tool_latency_ms = _elapsed_ms(tool_started)
-                state.quarantined_reason = f"tool call failed: {type(exc).__name__}"
+                # Include the exception message (not just the class name) so
+                # any status+body a caller surfaces (see ORO-2180 + ORO-2191)
+                # reaches the episode ledger's error_detail. Prior form
+                # collapsed every tool-call failure to a bare exception name.
+                exc_message = str(exc).strip()
+                exc_summary = (
+                    f"{type(exc).__name__}: {exc_message}"
+                    if exc_message
+                    else type(exc).__name__
+                )
+                state.quarantined_reason = f"tool call failed: {exc_summary}"
                 record_error("HarnessExecutionError", state.quarantined_reason)
                 raise HarnessExecutionError(
                     f"{state.quarantined_reason}; session quarantined"
@@ -645,9 +654,19 @@ class SessionRegistry:
                     ) from exc
                 except Exception as exc:
                     simulator_latency_ms = _elapsed_ms(simulator_started)
-                    state.quarantined_reason = (
-                        f"user simulator failed: {type(exc).__name__}"
+                    # Include the exception message (not just the class name)
+                    # so the upstream provider's status+body surfaced by
+                    # SimulatorCompletion (ORO-2191) reaches the episode
+                    # ledger's error_detail. Prior form dropped the body and
+                    # left every simulator failure looking like a generic
+                    # "RuntimeError" during triage.
+                    exc_message = str(exc).strip()
+                    exc_summary = (
+                        f"{type(exc).__name__}: {exc_message}"
+                        if exc_message
+                        else type(exc).__name__
                     )
+                    state.quarantined_reason = f"user simulator failed: {exc_summary}"
                     record_error("HarnessExecutionError", state.quarantined_reason)
                     raise HarnessExecutionError(
                         f"{state.quarantined_reason}; session quarantined"
