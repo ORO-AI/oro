@@ -54,6 +54,12 @@ def stdout_supports_color() -> bool:
     return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
 
+def _agent_line(summary: dict[str, Any]) -> str:
+    name = summary.get("agent_file") or "unknown"
+    digest = summary.get("agent_sha256")
+    return name if not digest else f"{name}  sha256 {str(digest)[:12]}…"
+
+
 def _problem_line(summary: dict[str, Any], selected: int) -> str:
     available = int(summary.get("pack_task_count") or selected)
     # Without --problems the roster is the qualifying selection, deterministic and
@@ -100,6 +106,7 @@ def render_console_report(
             f"  verifier {PACK_VERSION_IDENTITIES['verifier_version']}"
         ),
         f"  inference   {provider}",
+        f"  agent       {_agent_line(summary)}",
         (
             f"  agent model {agent_model}  "
             f"{paint('(SANDBOX_MODEL, requested by the reference', _DIM)}"
