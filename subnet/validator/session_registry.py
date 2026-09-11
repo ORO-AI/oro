@@ -26,7 +26,7 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import SimulatorCompletion
+from .simulator_completion import InferenceProviderError, SimulatorCompletion
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
@@ -473,8 +473,7 @@ class SessionRegistry:
                                 "latency_ms": simulator_latency_ms,
                                 "exchanges": [],
                             }
-                            if snapshot is not None
-                            and simulator_latency_ms is not None
+                            if snapshot is not None and simulator_latency_ms is not None
                             else simulator_evidence()
                         ),
                         "error": {"type": error_type, "detail": detail},
@@ -645,9 +644,17 @@ class SessionRegistry:
                     ) from exc
                 except Exception as exc:
                     simulator_latency_ms = _elapsed_ms(simulator_started)
-                    state.quarantined_reason = (
-                        f"user simulator failed: {type(exc).__name__}"
-                    )
+                    # Only surface trusted, provider-sourced status+body via
+                    # ``InferenceProviderError`` — bespoke simulators (test
+                    # doubles, future custom implementations) can raise
+                    # arbitrary exceptions whose message may echo private
+                    # task material (see ORO-1866 disclosure canary). Any
+                    # other exception collapses to its class name only.
+                    if isinstance(exc, InferenceProviderError):
+                        exc_summary = f"upstream status={exc.status} body={exc.body!r}"
+                    else:
+                        exc_summary = type(exc).__name__
+                    state.quarantined_reason = f"user simulator failed: {exc_summary}"
                     record_error("HarnessExecutionError", state.quarantined_reason)
                     raise HarnessExecutionError(
                         f"{state.quarantined_reason}; session quarantined"
