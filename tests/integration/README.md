@@ -40,10 +40,10 @@ Integration tests verify that ShoppingBench services work correctly when running
 
 **Tests skip with "Container not running":**
 - Start all services: `docker compose -f docker-compose.yml -f docker-compose.test.yml up -d search-server proxy session-runtime sandbox`
-- Check status: `docker compose ps`
+- Check status: `docker compose -f docker-compose.yml -f docker-compose.test.yml ps`
 
 **Tests fail with connection errors:**
-- Verify services are healthy: `docker compose ps`
+- Verify services are healthy: `docker compose -f docker-compose.yml -f docker-compose.test.yml ps`
 - Check logs: `docker compose logs <service-name>`
 - Ensure ports are not in use
 
