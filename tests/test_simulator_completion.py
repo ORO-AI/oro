@@ -5,8 +5,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.agent.proxy_client import PostResult
 from validator import simulator_completion
-from validator.simulator_completion import SimulatorCompletion
+from validator.simulator_completion import (
+    InferenceProviderError,
+    SimulatorCompletion,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -19,16 +23,26 @@ def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(simulator_completion.asyncio, "sleep", _instant)
 
 
+def _ok(data: dict) -> PostResult:
+    return PostResult(data=data, error=None)
+
+
+def _err(status: int | None, body: str, kind: str = "upstream") -> PostResult:
+    return PostResult(data=None, error={"kind": kind, "status": status, "body": body})
+
+
 def test_forwards_user_simulator_request_through_inference_proxy() -> None:
     client = MagicMock()
-    client.post.return_value = {
-        "choices": [
-            {
-                "message": {"content": '{"action":"no_op","content":""}'},
-                "finish_reason": "stop",
-            }
-        ]
-    }
+    client.post_verbose.return_value = _ok(
+        {
+            "choices": [
+                {
+                    "message": {"content": '{"action":"no_op","content":""}'},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+    )
     completion = SimulatorCompletion("miner-token", client=client)
     messages = [{"role": "user", "content": "continue?"}]
 
@@ -41,7 +55,7 @@ def test_forwards_user_simulator_request_through_inference_proxy() -> None:
         )
     )
 
-    client.post.assert_called_once_with(
+    client.post_verbose.assert_called_once_with(
         "/inference/chat/completions",
         json_data={
             "model": "mistralai/mistral-small-2603",
@@ -58,84 +72,108 @@ def test_forwards_user_simulator_request_through_inference_proxy() -> None:
     }
 
 
-@pytest.mark.parametrize("response", [None, {}, {"choices": []}])
-def test_raises_after_bounded_retries_exhaust(response) -> None:  # noqa: ANN001
-    """A persistent bad response still raises, but only after retry budget spent."""
+def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
+    """Persistent upstream error → InferenceProviderError with the provider body."""
     client = MagicMock()
-    client.post.return_value = response
+    client.post_verbose.return_value = _err(
+        403, '{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}'
+    )
     completion = SimulatorCompletion("miner-token", client=client)
 
-    with pytest.raises(RuntimeError, match="returned no completion"):
+    with pytest.raises(InferenceProviderError) as excinfo:
         asyncio.run(completion("model", []))
 
-    # Every attempt hits the proxy; the retry loop must not short-circuit
-    # before the budget is spent.
-    assert client.post.call_count == simulator_completion._MAX_ATTEMPTS
+    assert excinfo.value.status == 403
+    assert "rate_limit_exceeded" in excinfo.value.body
+    # Retry budget fully spent before escalating.
+    assert client.post_verbose.call_count == simulator_completion._MAX_ATTEMPTS
 
 
-def test_retries_on_transient_none_then_recovers() -> None:
-    """ProxyClient.post returning None (any non-200) is treated as retriable.
-
-    ORO-2189: prod pattern — miner's OpenRouter/Chutes returns 429/5xx once,
-    ProxyClient swallows the non-200 to None, next attempt succeeds. Must
-    not sink the whole task into environment_error on a single blip.
-    """
-    good = {
-        "choices": [
-            {"message": {"content": "ok"}, "finish_reason": "stop"},
-        ]
-    }
+def test_retries_on_transient_upstream_then_recovers() -> None:
+    """ORO-2189: a single provider blip (503 body) must not sink the task."""
+    good = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
     client = MagicMock()
-    client.post.side_effect = [None, good]
+    client.post_verbose.side_effect = [_err(503, '{"error":"upstream"}'), good]
     completion = SimulatorCompletion("miner-token", client=client)
 
     result = asyncio.run(completion("model", [{"role": "user", "content": "hi"}]))
 
     assert result["text"] == "ok"
-    assert client.post.call_count == 2
+    assert client.post_verbose.call_count == 2
 
 
-def test_retries_on_malformed_body_then_recovers() -> None:
-    """A 200 response with no ``choices[0].message`` also retries (provider quirk)."""
-    good = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+def test_retries_on_network_error_then_recovers() -> None:
+    """A network-error PostResult also retries — kind=network, status=None."""
+    good = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
     client = MagicMock()
-    client.post.side_effect = [{"choices": [{}]}, good]
+    client.post_verbose.side_effect = [
+        _err(None, "no response (network error or timeout)", kind="network"),
+        good,
+    ]
     completion = SimulatorCompletion("miner-token", client=client)
 
     result = asyncio.run(completion("model", []))
 
     assert result["text"] == "ok"
-    assert client.post.call_count == 2
+    assert client.post_verbose.call_count == 2
 
 
-def test_terminal_error_message_carries_upstream_status_and_body() -> None:
-    """ORO-2191: on exhaustion the raised RuntimeError must include the
-    upstream provider's status + body so session_registry writes it to the
-    episode ledger's ``error_detail`` and post-hoc triage doesn't need to
-    SSH into the validator to see the reason."""
+def test_terminal_error_from_network_failure_has_none_status() -> None:
+    """When every attempt is a network error, InferenceProviderError still fires
+    but with ``status=None`` so callers can distinguish "provider said 500"
+    from "we never reached them"."""
     client = MagicMock()
-    client.post.return_value = None
-    client.last_error = {
-        "status": 403,
-        "body": '{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}',
-    }
+    client.post_verbose.return_value = _err(
+        None, "no response (network error or timeout)", kind="network"
+    )
     completion = SimulatorCompletion("miner-token", client=client)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(InferenceProviderError) as excinfo:
         asyncio.run(completion("model", []))
 
-    msg = str(excinfo.value)
-    assert "status=403" in msg
-    assert "rate_limit_exceeded" in msg
+    assert excinfo.value.status is None
+    assert "network" in excinfo.value.body or "no response" in excinfo.value.body
 
 
-def test_terminal_error_message_survives_client_without_last_error() -> None:
-    """Older ProxyClient shims (or test doubles) may not carry ``last_error``.
-    The failure message must degrade gracefully — no AttributeError — and
-    still name the failure mode."""
-    client = MagicMock(spec=["post"])  # no ``last_error`` attribute
-    client.post.return_value = None
+def test_retries_on_malformed_body_then_recovers() -> None:
+    """200 with no ``choices[0].message`` (ORO-2191 non-blocker case) — retries."""
+    good = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+    client = MagicMock()
+    client.post_verbose.side_effect = [_ok({"choices": [{}]}), good]
     completion = SimulatorCompletion("miner-token", client=client)
 
-    with pytest.raises(RuntimeError, match="proxy non-200"):
+    result = asyncio.run(completion("model", []))
+
+    assert result["text"] == "ok"
+    assert client.post_verbose.call_count == 2
+
+
+def test_concurrent_sessions_do_not_race_on_error_signal() -> None:
+    """The whole reason PostResult replaced last_error (ORO-2191 blocker):
+    the failing session's error must be its own, even when another session
+    on the same ProxyClient completes between the failing post and the
+    caller reading the signal. Return-value semantics make this trivially
+    safe; the test just guards against a regression to a shared attribute.
+    """
+    # Simulate two SimulatorCompletion instances sharing one client but
+    # each getting a distinct PostResult on their own call. If a future
+    # refactor accidentally reintroduces shared state, the second caller
+    # would see the first's error.
+    client = MagicMock()
+    client.post_verbose.side_effect = [
+        _err(429, "session-A body"),
+        _err(429, "session-A body"),
+        _err(429, "session-A body"),
+        _err(500, "session-B body"),
+        _err(500, "session-B body"),
+        _err(500, "session-B body"),
+    ]
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(InferenceProviderError) as a:
         asyncio.run(completion("model", []))
+    with pytest.raises(InferenceProviderError) as b:
+        asyncio.run(completion("model", []))
+
+    assert a.value.status == 429 and "session-A" in a.value.body
+    assert b.value.status == 500 and "session-B" in b.value.body

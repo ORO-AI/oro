@@ -23,6 +23,26 @@ _INITIAL_BACKOFF_S = 0.5
 _BACKOFF_MULTIPLIER = 2.0
 
 
+class InferenceProviderError(RuntimeError):
+    """A user-simulator inference call failed with an upstream error body.
+
+    Carries the provider's status + truncated body so ``session_registry``
+    can safely surface a trusted, provider-sourced message into the
+    episode ledger's ``error_detail`` without also whitelisting arbitrary
+    ``str(exc)`` from every simulator failure (which could leak private
+    task material if a bespoke simulator raised an attacker-influenced
+    message — see ORO-1866 disclosure canary).
+    """
+
+    def __init__(self, status: int | None, body: str) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(
+            f"user simulator inference returned no completion "
+            f"(status={status} body={body!r})"
+        )
+
+
 class SimulatorCompletion:
     """Expose the validator proxy as an ``oro-env-runtime`` completion callable."""
 
@@ -62,13 +82,19 @@ class SimulatorCompletion:
         if tools:
             request["tools"] = tools
 
+        # Use ``post_verbose`` — its return value carries the upstream
+        # status+body directly. Callers must not rely on a shared client
+        # attribute (see ORO-2191 review): a single ProxyClient shared by
+        # concurrent sessions would let session B's failure overwrite
+        # session A's just before A reads it, corrupting A's ledger.
         backoff_s = _INITIAL_BACKOFF_S
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            response = self._client.post(
+            result = self._client.post_verbose(
                 "/inference/chat/completions",
                 json_data=request,
             )
-            choices = response.get("choices") if isinstance(response, dict) else None
+            data = result.data
+            choices = data.get("choices") if isinstance(data, dict) else None
             choice = choices[0] if isinstance(choices, list) and choices else None
             message = choice.get("message") if isinstance(choice, dict) else None
             if isinstance(message, dict):
@@ -84,40 +110,48 @@ class SimulatorCompletion:
                     "finish_reason": choice.get("finish_reason"),
                 }
 
-            # Distinguish "proxy swallowed a non-200" from "provider returned
-            # 200 with a malformed body" for post-hoc diagnosis. On the
-            # non-200 branch include the upstream provider's actual status
-            # and error body via ProxyClient.last_error (ORO-2191) so the
-            # ledger's error_detail carries the reason (rate_limit_exceeded
-            # vs insufficient_credits vs invalid_api_key vs model_unavailable),
-            # not just a generic RuntimeError. Both branches are retriable
-            # since the shopper-simulator turn is idempotent.
-            if response is None:
-                last_error = getattr(self._client, "last_error", None) or {}
-                upstream_status = last_error.get("status")
-                upstream_body = (last_error.get("body") or "").strip()
-                detail = (
-                    f"proxy non-200 status={upstream_status} body={upstream_body!r}"
-                )
-            else:
-                detail = "malformed body"
-            failure = f"user simulator inference returned no completion ({detail})"
+            # Extract the upstream signal from this call's own return value —
+            # never from a shared attribute. ``result.error`` describes the
+            # network vs upstream distinction so log labels can be honest
+            # ("network" vs "proxy non-200") instead of collapsing both.
+            error = result.error or {}
+            kind = error.get("kind", "unknown")
+            upstream_status = error.get("status")
+            upstream_body = (error.get("body") or "").strip()
+            if data is None and result.error is None:
+                # ProxyClient returned no data but no error info — treat as
+                # a malformed 200 body (see ORO-2191 non-blocker: a JSON
+                # ``null`` body decodes to None on a 200 response).
+                kind, upstream_status, upstream_body = "malformed", 200, ""
+            failure_label = (
+                "network error"
+                if kind == "network"
+                else "malformed body"
+                if kind == "malformed"
+                else "proxy non-200"
+            )
+            log_detail = (
+                f"{failure_label} status={upstream_status} body={upstream_body!r}"
+            )
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
                     "user simulator inference failed after %d attempts (%s)",
                     _MAX_ATTEMPTS,
-                    failure,
+                    log_detail,
                 )
-                raise RuntimeError(failure)
+                raise InferenceProviderError(
+                    status=upstream_status,
+                    body=upstream_body,
+                )
             logger.warning(
                 "user simulator inference failed on attempt %d/%d (%s); retrying in %.2fs",
                 attempt,
                 _MAX_ATTEMPTS,
-                failure,
+                log_detail,
                 backoff_s,
             )
             await asyncio.sleep(backoff_s)
             backoff_s *= _BACKOFF_MULTIPLIER
 
 
-__all__ = ["SimulatorCompletion"]
+__all__ = ["InferenceProviderError", "SimulatorCompletion"]

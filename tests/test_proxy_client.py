@@ -145,68 +145,117 @@ def _status_response_with_body(code: int, body: str):
     return r
 
 
-def test_last_error_captures_upstream_status_and_body_on_non_200(client):
-    """ORO-2191: after all retries exhaust with non-200s, ``last_error`` holds
-    the final status + truncated body so callers (SimulatorCompletion, sandbox
-    tool wrappers) can surface the actual provider reason to the ledger."""
+def test_post_verbose_returns_upstream_status_and_body_on_non_200(client):
+    """ORO-2191: ``post_verbose`` returns ``PostResult(data=None, error={...})``
+    with the upstream status + truncated body when all retries exhaust with a
+    non-2xx. Error is stack-local so concurrent callers can't race each other."""
     body = '{"error":{"message":"rate limit exceeded","code":"rate_limit_exceeded"}}'
     responses = [_status_response_with_body(429, body)] * 3
     with patch("src.agent.proxy_client.requests.post", side_effect=responses):
-        result = client.post("/inference/chat/completions", json_data={"messages": []})
+        result = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": []}
+        )
 
-    assert result is None
-    assert client.last_error is not None
-    assert client.last_error["status"] == 429
-    assert "rate_limit_exceeded" in client.last_error["body"]
+    assert result.data is None
+    assert not result.ok
+    assert result.error == {
+        "kind": "upstream",
+        "status": 429,
+        "body": body,
+    }
 
 
-def test_last_error_cleared_on_success(client):
-    """A successful call must clear a stale ``last_error`` from a prior request
-    so downstream callers don't misread an earlier failure as the current one."""
-    # First: seed a stale error.
-    body = '{"error":"boom"}'
+def test_post_verbose_returns_data_and_no_error_on_2xx(client):
+    """A successful call returns ``PostResult(data=..., error=None)`` — the
+    caller can trust ``result.ok`` without a stale-error check."""
+    payload = {"choices": [{"message": {"content": "ok"}}]}
     with patch(
         "src.agent.proxy_client.requests.post",
-        side_effect=[_status_response_with_body(500, body)] * 3,
+        return_value=_ok_response(payload),
     ):
-        client.post("/inference/chat/completions", json_data={"messages": []})
-    assert client.last_error is not None
-
-    # Then: a success clears it.
-    with patch(
-        "src.agent.proxy_client.requests.post",
-        return_value=_ok_response({"choices": [{"message": {"content": "ok"}}]}),
-    ):
-        result = client.post("/inference/chat/completions", json_data={"messages": []})
-    assert result is not None
-    assert client.last_error is None
+        result = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": []}
+        )
+    assert result.ok
+    assert result.data == payload
+    assert result.error is None
 
 
-def test_last_error_on_network_exception(client):
-    """When every attempt raises (no HTTP response at all), ``last_error``
-    still carries a signal — ``status=None`` with a network-error body — so
-    callers can distinguish "provider returned 500" from "we never reached it"."""
+def test_post_verbose_distinguishes_network_from_upstream(client):
+    """A network exception (no HTTP response at all) yields
+    ``kind="network", status=None`` so callers can distinguish "provider
+    returned 500" from "we never reached them"."""
     with patch(
         "src.agent.proxy_client.requests.post",
         side_effect=requests.ConnectionError("connection refused"),
     ):
-        result = client.post("/inference/chat/completions", json_data={"messages": []})
+        result = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": []}
+        )
 
-    assert result is None
-    assert client.last_error == {
+    assert result.data is None
+    assert result.error == {
+        "kind": "network",
         "status": None,
         "body": "no response (network error or timeout)",
     }
 
 
-def test_last_error_body_truncated_to_800_chars(client):
+def test_post_verbose_body_truncated_to_800_chars(client):
     """Big HTML error pages must not blow log budgets — body is capped."""
     huge = "X" * 5000
     with patch(
         "src.agent.proxy_client.requests.post",
         side_effect=[_status_response_with_body(502, huge)] * 3,
     ):
-        client.post("/inference/chat/completions", json_data={"messages": []})
+        result = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": []}
+        )
 
-    assert client.last_error is not None
-    assert len(client.last_error["body"]) == 800
+    assert result.error is not None
+    assert len(result.error["body"]) == 800
+
+
+def test_post_verbose_concurrent_calls_do_not_share_error(client):
+    """ORO-2191 blocker: return-value semantics guarantee that concurrent
+    callers on the same client each see their own error. A shared attribute
+    would let one caller overwrite another's signal between write and read."""
+    body_a = '{"error":"session-A"}'
+    body_b = '{"error":"session-B"}'
+    responses = [
+        _status_response_with_body(429, body_a),
+        _status_response_with_body(429, body_a),
+        _status_response_with_body(429, body_a),
+        _status_response_with_body(500, body_b),
+        _status_response_with_body(500, body_b),
+        _status_response_with_body(500, body_b),
+    ]
+    with patch("src.agent.proxy_client.requests.post", side_effect=responses):
+        result_a = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": [{"a": 1}]}
+        )
+        result_b = client.post_verbose(
+            "/inference/chat/completions", json_data={"messages": [{"b": 1}]}
+        )
+    assert result_a.error["status"] == 429 and "session-A" in result_a.error["body"]
+    assert result_b.error["status"] == 500 and "session-B" in result_b.error["body"]
+
+
+def test_post_still_returns_optional_dict_for_existing_callers(client):
+    """The ``.post()`` method's return contract is unchanged for the ~10
+    existing consumers (sandbox tool wrappers, reasoning judge, envpack
+    judge, agent implementations)."""
+    payload = {"answer": "hello"}
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        return_value=_ok_response(payload),
+    ):
+        result = client.post("/inference/chat", json_data={"messages": []})
+    assert result == payload
+
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        side_effect=[_status_response_with_body(500, "boom")] * 3,
+    ):
+        result = client.post("/inference/chat", json_data={"messages": []})
+    assert result is None

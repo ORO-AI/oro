@@ -1,11 +1,12 @@
 """HTTP proxy client for ShoppingBench services."""
 
 import json
-import os
 import logging
+import os
 import threading
 import time
-from typing import Any, Dict, Optional, Callable
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -151,6 +152,24 @@ class InferenceStats:
             pass  # Best-effort; don't crash the agent
 
 
+@dataclass(frozen=True)
+class PostResult:
+    """Return value of ``ProxyClient.post_verbose``.
+
+    Exactly one of ``data`` / ``error`` is populated. Stack-local by
+    construction so concurrent sessions can't overwrite each other's
+    signal — see the ORO-2191 review on the earlier ``last_error``
+    attribute design (which had that race).
+    """
+
+    data: Optional[Dict]
+    error: Optional[Dict[str, Any]]
+
+    @property
+    def ok(self) -> bool:
+        return self.data is not None
+
+
 class ProxyClient:
     """
     Simple client for making HTTP requests to ShoppingBench services via the proxy.
@@ -192,16 +211,6 @@ class ProxyClient:
         self.inference_stats = InferenceStats(stats_file)
         request_log_file = os.environ.get("REQUEST_LOG_FILE")
         self.request_log = RequestLog(request_log_file)
-        # Populated after every ``.get()`` / ``.post()`` call. On 2xx it is
-        # cleared to ``None``; on any non-2xx exit (all internal retries
-        # exhausted, or every attempt raised) it carries the final
-        # ``{"status": int|None, "body": str}`` so callers can log or attach
-        # the upstream provider's error message instead of just a bare
-        # ``None`` return. Kept as an attribute rather than a return-shape
-        # change so every existing caller (sandbox tool wrappers,
-        # reasoning judge, envpack judge scoring) keeps working unchanged.
-        # See ORO-2191.
-        self.last_error: Optional[Dict[str, Any]] = None
 
     def _build_url(self, path: str, params: Optional[Dict] = None) -> str:
         """
@@ -321,7 +330,6 @@ class ProxyClient:
         response = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
         result = response.json() if response and response.status_code == 200 else None
-        self._record_last_error(response, result)
 
         self.request_log.record(
             method="GET",
@@ -361,7 +369,6 @@ class ProxyClient:
         result = None
         if response and response.status_code == 200:
             result = response.json()
-        self._record_last_error(response, result)
 
         self.request_log.record(
             method="POST",
@@ -373,34 +380,82 @@ class ProxyClient:
         )
         return result
 
-    def _record_last_error(
-        self,
-        response: Optional[requests.Response],
-        result: Optional[Dict],
-    ) -> None:
-        """Populate ``self.last_error`` when the wrapper is about to return ``None``.
+    def post_verbose(self, path: str, json_data: Optional[Dict] = None) -> "PostResult":
+        """POST returning both the parsed JSON on success AND the upstream
+        status+body on failure, as a single stack-local return value.
 
-        Callers that want the upstream provider's error message (see
-        ORO-2191 — SimulatorCompletion, sandbox tool wrappers) read this
-        attribute immediately after the ``.get()`` / ``.post()`` call
-        returns. Truncated to 800 chars so a large HTML error page
-        doesn't blow log budgets. Cleared on success so a downstream call
-        can't misread a stale error from a prior request.
+        Companion to ``post()`` — same request, same retry semantics — but
+        exposes the upstream provider's error to callers that need to log
+        or attach it (SimulatorCompletion → episode ledger, see ORO-2191).
+        Return-value semantics deliberately avoid the shared-attribute
+        race that a ``self.last_error`` field would introduce: a single
+        ProxyClient shared by many concurrent SessionRegistry sessions
+        would otherwise let session B's failure overwrite session A's
+        just before A reads it, corrupting A's ledger record with B's
+        provider body.
         """
-        if result is not None:
-            self.last_error = None
-            return
+        url = self._build_url(path)
+        headers: Dict[str, str] = {}
+        if self.api_key and "/inference/" in path:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        def make_request():
+            response = requests.post(
+                url, json=json_data, headers=headers, timeout=self.timeout
+            )
+            if response.status_code == 404:
+                logger.error(f"Resource not found: {path}")
+            return response
+
+        t0 = time.monotonic()
+        response = self._make_request_with_retries(make_request, "POST", path)
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        if "/inference/" in path:
+            if response and response.status_code == 200:
+                self.inference_stats.record_success()
+            else:
+                self.inference_stats.record_failure()
+
+        data: Optional[Dict] = None
+        if response is not None and response.status_code == 200:
+            data = response.json()
+
+        error: Optional[Dict[str, Any]] = None
+        if data is None:
+            error = self._describe_error(response)
+
+        self.request_log.record(
+            method="POST",
+            path=path,
+            json_data=json_data,
+            status_code=response.status_code if response else None,
+            response_body=data,
+            duration_ms=duration_ms,
+        )
+        return PostResult(data=data, error=error)
+
+    @staticmethod
+    def _describe_error(response: Optional[requests.Response]) -> Dict[str, Any]:
+        """Build the ``PostResult.error`` payload from the final HTTP response
+        (or absence of one). Body truncated so a big HTML page can't blow
+        log budgets. Distinguishes:
+
+        - ``kind="network"`` — every attempt raised (DNS/connect/timeout).
+        - ``kind="upstream"`` — got an HTTP response, status != 200.
+        """
         if response is None:
-            self.last_error = {
+            return {
+                "kind": "network",
                 "status": None,
                 "body": "no response (network error or timeout)",
             }
-            return
         try:
             body_text = response.text
         except Exception:  # noqa: BLE001 — best effort; body must not throw
             body_text = "<unreadable body>"
-        self.last_error = {
+        return {
+            "kind": "upstream",
             "status": response.status_code,
             "body": body_text[:800],
         }
