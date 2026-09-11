@@ -1,11 +1,12 @@
 """HTTP proxy client for ShoppingBench services."""
 
 import json
-import os
 import logging
+import os
 import threading
 import time
-from typing import Dict, Optional, Callable
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -151,6 +152,24 @@ class InferenceStats:
             pass  # Best-effort; don't crash the agent
 
 
+@dataclass(frozen=True)
+class PostResult:
+    """Return value of ``ProxyClient.post_verbose``.
+
+    Exactly one of ``data`` / ``error`` is populated. Stack-local by
+    construction so concurrent sessions can't overwrite each other's
+    signal — see the ORO-2191 review on the earlier ``last_error``
+    attribute design (which had that race).
+    """
+
+    data: Optional[Dict]
+    error: Optional[Dict[str, Any]]
+
+    @property
+    def ok(self) -> bool:
+        return self.data is not None
+
+
 class ProxyClient:
     """
     Simple client for making HTTP requests to ShoppingBench services via the proxy.
@@ -242,6 +261,11 @@ class ProxyClient:
             Response object if successful, None otherwise
         """
         operation_name = f"{method} {path}"
+        # Track the last response we saw across retries. Returned to the
+        # caller on exhaustion so it can surface the upstream status+body
+        # (ORO-2191). Prior behavior returned ``None`` on any non-200 exit,
+        # which erased the provider's error message.
+        response: Optional[requests.Response] = None
         for i in range(self.max_retries):
             attempt_t0 = time.monotonic()
             status_code: Optional[int] = None
@@ -293,7 +317,7 @@ class ProxyClient:
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
-        return None
+        return response
 
     def get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make a GET request to the proxy."""
@@ -305,7 +329,7 @@ class ProxyClient:
         t0 = time.monotonic()
         response = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
-        result = response.json() if response else None
+        result = response.json() if response and response.status_code == 200 else None
 
         self.request_log.record(
             method="GET",
@@ -355,3 +379,83 @@ class ProxyClient:
             duration_ms=duration_ms,
         )
         return result
+
+    def post_verbose(self, path: str, json_data: Optional[Dict] = None) -> "PostResult":
+        """POST returning both the parsed JSON on success AND the upstream
+        status+body on failure, as a single stack-local return value.
+
+        Companion to ``post()`` — same request, same retry semantics — but
+        exposes the upstream provider's error to callers that need to log
+        or attach it (SimulatorCompletion → episode ledger, see ORO-2191).
+        Return-value semantics deliberately avoid the shared-attribute
+        race that a ``self.last_error`` field would introduce: a single
+        ProxyClient shared by many concurrent SessionRegistry sessions
+        would otherwise let session B's failure overwrite session A's
+        just before A reads it, corrupting A's ledger record with B's
+        provider body.
+        """
+        url = self._build_url(path)
+        headers: Dict[str, str] = {}
+        if self.api_key and "/inference/" in path:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        def make_request():
+            response = requests.post(
+                url, json=json_data, headers=headers, timeout=self.timeout
+            )
+            if response.status_code == 404:
+                logger.error(f"Resource not found: {path}")
+            return response
+
+        t0 = time.monotonic()
+        response = self._make_request_with_retries(make_request, "POST", path)
+        duration_ms = (time.monotonic() - t0) * 1000
+
+        if "/inference/" in path:
+            if response and response.status_code == 200:
+                self.inference_stats.record_success()
+            else:
+                self.inference_stats.record_failure()
+
+        data: Optional[Dict] = None
+        if response is not None and response.status_code == 200:
+            data = response.json()
+
+        error: Optional[Dict[str, Any]] = None
+        if data is None:
+            error = self._describe_error(response)
+
+        self.request_log.record(
+            method="POST",
+            path=path,
+            json_data=json_data,
+            status_code=response.status_code if response else None,
+            response_body=data,
+            duration_ms=duration_ms,
+        )
+        return PostResult(data=data, error=error)
+
+    @staticmethod
+    def _describe_error(response: Optional[requests.Response]) -> Dict[str, Any]:
+        """Build the ``PostResult.error`` payload from the final HTTP response
+        (or absence of one). Body truncated so a big HTML page can't blow
+        log budgets. Distinguishes:
+
+        - ``kind="network"`` — every attempt raised (DNS/connect/timeout).
+        - ``kind="upstream"`` — got an HTTP response, status != 200.
+        """
+        if response is None:
+            return {
+                "kind": "network",
+                "status": None,
+                "body": "no response (network error or timeout)",
+            }
+        try:
+            body_text = response.text
+        except Exception:  # noqa: BLE001 — best effort; body must not throw
+            body_text = "<unreadable body>"
+        return {
+            "kind": "upstream",
+            "status": response.status_code,
+            "body": body_text[:800],
+        }
