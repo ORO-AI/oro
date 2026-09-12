@@ -46,6 +46,8 @@ def _summary() -> dict:
         ],
         "aggregate_score": 0.375,
         "pack_task_count": 35,
+        "agent_file": "my_agent.py",
+        "agent_sha256": "c" * 64,
         "selection_mode": "random_sample",
         "selection_seed": 4821993,
     }
@@ -121,6 +123,11 @@ def test_console_report_qualifies_the_agent_model_it_prints() -> None:
     assert "SANDBOX_MODEL" in report
     assert "mapped per provider" in report
     assert "custom agents choose in code" in report
+
+
+def test_console_report_names_the_agent_that_ran() -> None:
+    report = _report()
+    assert "agent       my_agent.py  sha256 cccccccccccc…" in report
 
 
 def test_console_report_groups_tasks_by_family_with_means() -> None:

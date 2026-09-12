@@ -270,7 +270,10 @@ def _write_summary(
     results: list[dict[str, Any]],
     aggregate_score: float | None,
     status: str,
+    problem_count: int | None = None,
     seed: int | None = None,
+    agent_file: str | None = None,
+    agent_sha256: str | None = None,
     error: LocalGeneratedValidatorError | None = None,
 ) -> dict[str, Any]:
     task_rows = _summary_tasks(results)
@@ -292,8 +295,13 @@ def _write_summary(
         "task_count": len(results),
         "task_roster": task_ids,
         "pack_task_count": len(pack.task_ids) if pack is not None else len(results),
-        "selection_mode": "random_sample" if seed is not None else "qualifying_roster",
-        "selection_seed": seed,
+        # Derived from the request, not from the seed: a seed alone never samples.
+        "selection_mode": (
+            "random_sample" if problem_count is not None else "qualifying_roster"
+        ),
+        "selection_seed": seed if problem_count is not None else None,
+        "agent_file": agent_file,
+        "agent_sha256": agent_sha256,
         "models": (
             {
                 str(role): str(model)
@@ -467,6 +475,10 @@ def run_local_generated_validator(
     phase = "initialization"
     runtime: SessionRuntime | None = None
     server: SessionServer | None = None
+    # The digest the runtime recorded as agent_version_id. Read once, before the
+    # sandbox starts, so the summary cannot disagree with the episode receipts if
+    # the file is edited or removed mid-run.
+    agent_identity: str | None = None
     try:
         _write_summary(
             summary_path,
@@ -660,7 +672,10 @@ def run_local_generated_validator(
             results=results,
             aggregate_score=aggregate_score,
             status="completed",
+            problem_count=config.problem_count,
             seed=config.seed,
+            agent_file=config.agent_path.name,
+            agent_sha256=agent_identity,
         )
         report_path = local_report.write_trajectory_report(
             artifact_dir.resolve() / "trajectories.html",
@@ -714,7 +729,10 @@ def run_local_generated_validator(
                 results=results,
                 aggregate_score=aggregate_score,
                 status="failed",
+                problem_count=config.problem_count,
                 seed=config.seed,
+                agent_file=config.agent_path.name,
+                agent_sha256=agent_identity,
                 error=run_error,
             )
         except Exception:  # noqa: BLE001, S110
@@ -783,6 +801,8 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
     args = parser.parse_args(arguments)
     if args.problems is not None and args.problems <= 0:
         raise ValueError("--problems must be positive")
+    if args.seed is not None and args.problems is None:
+        raise ValueError("--seed only applies to a --problems sample")
     # A fresh sample each run avoids tuning against one lucky subset; the seed is
     # reported so any run can be repeated exactly.
     seed = args.seed

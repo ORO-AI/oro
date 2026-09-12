@@ -79,7 +79,9 @@ reference in the bundled qualifying pack.
 available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
 
-`--problems` runs a subset while you iterate. Pass any number from 1 to 35.
+`--problems` runs a subset while you iterate. Pass any number from 1 up to the
+number of problems in the pack, which is 35 for the bundled one. `--seed` only
+applies alongside it.
 The problems are sampled at random and spread across the seven families, so a
 short run still covers as many of TF1 through TF7 as it has room for:
 
@@ -90,7 +92,7 @@ docker compose run test --agent-file my_agent.py --problems 7
 Each run samples afresh, so repeated runs do not tune the agent against one
 lucky subset. The report prints the seed; pass `--seed` to repeat an earlier
 selection exactly. Scores from a subset are not comparable to qualifying,
-which always runs all 35.
+which always runs the pack's full qualifying roster.
 Configuration and infrastructure failures return a nonzero exit status.
 
 Local tests use a dedicated search server and proxy. The proxy fetches the live
@@ -104,25 +106,33 @@ them with `docker compose --profile test down` when finished.
 
 ### Output
 
-The command prints a run header, the 35 finalized tasks grouped by family with
+The command prints a run header, the finalized tasks grouped by family with
 a per-family mean, the aggregate, and where the artifacts are:
 
 ```text
-ORO Bench local run  local-...
-  pack        9e5d11c6…c73a  (35 tasks)
+ORO Bench local run  local-7c1f2a
+  pack        9e5d11c6…c73a
+  problems    3 of 35, sampled, repeat with --seed 4821993
   runtime     0.3.2  verifier 0.3.4
   inference   openrouter
-  agent model deepseek-ai/DeepSeek-V3.2-TEE  (reference agent; custom agents choose in code)
+  agent       my_agent.py  sha256 3f9c1d7b0000…
+  agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, requested by the reference
+              agent and mapped per provider; custom agents choose in code)
   simulator   mistralai/mistral-small-2603
   judge       deepseek/deepseek-v4-flash-0731
 
-intent_decomposition               mean 0.80  4/5 passed
-  TF1-intent_decomposition-...     completed         1.00
-  ...
+intent_decomposition               mean 1.00  1/1 passed
+  TF1-intent_decomposition-300003  completed         1.00
 
-Aggregate score  0.363515
-Artifacts        ./logs/environment-runs/local-...
-Trajectories     ./logs/environment-runs/local-.../trajectories.html  (open in a browser)
+retrieval_recall                   mean 0.71  1/1 passed
+  TF2-retrieval_recall-300003      completed         0.71
+
+recovery                           mean 0.00  0/1 passed
+  TF6-recovery-300005              environment_error 0.00  environment: tool call exceeded 10.000s
+
+Aggregate score  0.564286
+Artifacts        logs/environment-runs/local-7c1f2a
+Trajectories     logs/environment-runs/local-7c1f2a/trajectories.html  (open in a browser)
 ```
 
 Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
@@ -138,7 +148,9 @@ Open `trajectories.html` in any browser to step through every episode: the
 shopper request, your agent's messages and tool calls, observations, simulator
 events, the verdict checks, and the reward. It is a single self-contained file,
 so you can copy it off a remote host. The viewer source lives in
-`trajectory-viewer/`.
+`trajectory-viewer/`. A failed run writes it too, covering whatever episodes
+finished before the failure, and names it in the error output. A run that fails
+before any episode finalizes has nothing to show, so it writes no viewer.
 
 Each run directory contains:
 

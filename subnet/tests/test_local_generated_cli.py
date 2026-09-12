@@ -197,6 +197,16 @@ def test_problems_flag_selects_a_subset_and_reports_a_repeatable_seed(
     assert repeated.seed == short.seed
 
 
+def test_seed_without_problems_is_rejected(monkeypatch, tmp_path) -> None:
+    # A seed alone never samples, so accepting it would record a run as sampled
+    # when it ran the full qualifying roster.
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    with pytest.raises(ValueError, match="--seed only applies"):
+        local.parse_config(["--agent-file", str(agent), "--seed", "5"])
+
+
 def test_problems_flag_rejects_a_non_positive_count(monkeypatch, tmp_path) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
