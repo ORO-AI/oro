@@ -174,13 +174,18 @@ class ProgressReporter:
     def get_reasoning_data(self) -> ReasoningSummary:
         """Return aggregate reasoning metrics for run-level score_components.
 
-        Per-problem reasoning data is now sent via progress reports.
-        This method returns only the summary fields needed at run completion.
+        Per-problem reasoning data is now sent via progress reports. This method
+        returns only the summary fields needed at run completion. A missing or
+        failed per-problem judgment counts as 0: the average is over expected
+        trajectories, not just the judged ones. Incomplete coverage never blocks
+        the run.
         """
         with self._lock:
-            results = list(self._results.values())
+            expected = [
+                r for r in self._results.values() if r.reasoning_judgment_expected
+            ]
 
-        if not results:
+        if not expected:
             return {
                 "reasoning_quality": 0.0,
                 "reasoning_coefficient": reasoning_coefficient(0.0),
@@ -189,25 +194,21 @@ class ProgressReporter:
                 "judge_inference_402": 0,
             }
 
-        judged = [r for r in results if r.reasoning_score is not None]
-        total_score = sum(r.reasoning_score for r in judged)
-        avg = round(total_score / len(judged), 4) if judged else 0.0
+        judged = [r for r in expected if r.reasoning_score is not None]
+        avg = round(sum(r.reasoning_score for r in judged) / len(expected), 4)
         coeff = reasoning_coefficient(avg)
-        total_inf_failed = sum(r.reasoning_inf_failed for r in results)
-        total_inf_total = sum(r.reasoning_inf_total for r in results)
-        total_inf_402 = sum(r.reasoning_inf_402 for r in results)
 
         logging.info(
             f"Reasoning aggregate: quality={avg:.4f}, coefficient={coeff:.4f} "
-            f"({len(judged)} problems judged)"
+            f"({len(judged)}/{len(expected)} problems judged)"
         )
 
         return {
             "reasoning_quality": avg,
             "reasoning_coefficient": coeff,
-            "judge_inference_failed": total_inf_failed,
-            "judge_inference_total": total_inf_total,
-            "judge_inference_402": total_inf_402,
+            "judge_inference_failed": sum(r.reasoning_inf_failed for r in expected),
+            "judge_inference_total": sum(r.reasoning_inf_total for r in expected),
+            "judge_inference_402": sum(r.reasoning_inf_402 for r in expected),
         }
 
     def get_problem_status(self, problem_id: str) -> ProblemStatus:

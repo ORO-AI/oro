@@ -1,4 +1,5 @@
-FROM ghcr.io/oro-ai/oro/search-server-base:latest
+ARG SEARCH_SERVER_BASE_IMAGE=ghcr.io/oro-ai/oro/search-server-base:latest
+FROM ${SEARCH_SERVER_BASE_IMAGE}
 
 WORKDIR /app
 
@@ -22,9 +23,8 @@ RUN set -eux; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 
-# gunicorn is the production WSGI server (multi-process). Also in
-# requirements.txt for the base image; installed here too so the code-layer
-# image is self-contained even before the base is rebuilt.
+# gunicorn is also in the base requirements. Install it here so the code-layer
+# image remains self-contained before the base image is rebuilt.
 RUN pip install --no-cache-dir gunicorn==23.0.0
 
 # Only the code layer — changes on every release

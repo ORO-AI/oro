@@ -1,0 +1,64 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "atif-session-1",
+  "trajectory_id": "atif-trajectory-1",
+  "agent": { "name": "Example shopper", "version": "1.0" },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "Find a quiet mechanical keyboard under $100."
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "message": [
+        { "type": "text", "text": "I will compare switches and price." },
+        {
+          "type": "image",
+          "source": { "media_type": "image/png", "path": "screenshots/results.png" }
+        }
+      ],
+      "reasoning_content": "Start broad, then inspect the best candidates.",
+      "tool_calls": [
+        {
+          "tool_call_id": "call-1",
+          "function_name": "search",
+          "arguments": { "query": "quiet mechanical keyboard" }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "source_call_id": "call-1",
+            "content": "{\"results\":[{\"title\":\"Silent Board\",\"price\":89}],\"returned\":1}"
+          }
+        ]
+      },
+      "metrics": {
+        "prompt_tokens": 30,
+        "completion_tokens": 12,
+        "extra": { "latency_ms": 125 }
+      },
+      "llm_call_count": 1
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 30,
+    "total_completion_tokens": 12,
+    "total_steps": 2,
+    "extra": {
+      "oro": {
+        "reward": 0.75,
+        "success": true,
+        "termination_reason": "completed"
+      }
+    }
+  },
+  "extra": {
+    "oro": {
+      "task_id": "keyboard-search",
+      "family": "retrieval"
+    }
+  }
+}

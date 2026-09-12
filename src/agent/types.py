@@ -100,8 +100,7 @@ class JudgeResult(TypedDict):
     model: str
     inference_failed: int
     inference_total: int
-    # 402 = miner out of credits. Counted separately so the validator can
-    # label a stalled eval as a miner-funding failure rather than infra.
+    # Confirmed payment_required 402s, used to distinguish miner funding from infra.
     inference_402: int
 
 

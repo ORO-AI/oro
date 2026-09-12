@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>ORO Trajectory Room</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <header class="masthead">
+      <div>
+        <p class="kicker">ORO / EVALUATION INTELLIGENCE</p>
+        <h1>Trajectory Room</h1>
+      </div>
+      <div class="masthead__actions">
+        <span id="load-status" class="load-status" role="status">Loading</span>
+        <label class="file-button" for="file-input">Open JSON</label>
+        <input id="file-input" type="file" accept="application/json,.json" multiple>
+      </div>
+    </header>
+
+    <main class="workspace" id="drop-zone">
+      <aside class="episode-panel" aria-label="Episodes">
+        <div class="panel-heading">
+          <div><span class="eyebrow">Local run</span><h2>Episodes</h2></div>
+          <span id="episode-count" class="count-badge">0</span>
+        </div>
+        <label class="search-field">
+          <span class="sr-only">Search episodes</span>
+          <input id="episode-search" type="search" placeholder="Search task or query">
+        </label>
+        <div class="status-filters" role="group" aria-label="Filter by result">
+          <button class="filter is-active" data-status="all">All</button>
+          <button class="filter" data-status="pass">Passed</button>
+          <button class="filter" data-status="fail">Failed</button>
+        </div>
+        <div id="episode-list" class="episode-list"></div>
+      </aside>
+
+      <section class="trajectory-panel" aria-label="Selected trajectory">
+        <header id="trajectory-header" class="trajectory-header"></header>
+        <div id="timeline" class="timeline"></div>
+      </section>
+
+      <aside class="evidence-panel" aria-label="Outcome and evidence">
+        <div id="outcome"></div>
+        <section class="evidence-section raw-section">
+          <h3>Source artifact</h3>
+          <details><summary>View raw JSON</summary><pre id="raw-json"></pre></details>
+        </section>
+      </aside>
+    </main>
+
+    <div id="drop-overlay" class="drop-overlay" aria-hidden="true">
+      <div><strong>Drop trajectory JSON</strong><span>ORO episode v1 or ATIF v1.x</span></div>
+    </div>
+    <template id="empty-template">
+      <div class="empty-workspace"><p class="kicker">NO EPISODE SELECTED</p><h2>Open a trajectory to inspect it.</h2></div>
+    </template>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -167,6 +167,7 @@ class ScoringPool:
                 inference_failures=inf_failures,
                 inference_total=inf_total,
                 execution_time=execution_time,
+                reasoning_judgment_expected=True,
                 **reasoning,
             )
             with self._lock:

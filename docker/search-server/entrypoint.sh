@@ -57,5 +57,3 @@ exec gunicorn \
     --graceful-timeout 30 \
     --error-logfile - \
     src.search_engine.server:app
-
-

@@ -1,0 +1,10 @@
+{
+  "artifact_size_bytes": 3703,
+  "generator_base_commit": "655215e541145b2208b4f979f9c5ba8f4068b0c2",
+  "generator_repository": "ORO-AI/oro-env-generator",
+  "generation_command": "uv run pytest -q tests/test_compiler_validator.py::test_compile_exact_family_counts_and_validate",
+  "pack_sha256": "79309352c9d08419fd40a2ec322d1db03a57f24ee1d9fec949940a6b347276ec",
+  "pack_version": "oro_compiled_epoch_v5",
+  "runtime_version": "0.2.0",
+  "task_count": 14
+}

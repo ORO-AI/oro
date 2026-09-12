@@ -117,4 +117,3 @@ class TestLocalRetryQueue:
         queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
         assert queue.get_pending_count() == 1
 
-

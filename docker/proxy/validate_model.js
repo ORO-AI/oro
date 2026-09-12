@@ -281,6 +281,22 @@ function validate(r) {
       { method: "POST", body: forwardBody, args: r.variables.args || "" },
       function (reply) {
         _tag(r, _upstreamLabel(reply.status));
+        // Belt-and-suspenders forensic trail for ORO-2191. The Python side
+        // (SimulatorCompletion / ProxyClient.last_error) also captures the
+        // body, but a message posted here survives even for callers that
+        // don't read last_error yet — grep the proxy container logs on any
+        // env_error incident for the actual upstream reason.
+        if (reply.status >= 400) {
+          var body = reply.responseText || "";
+          r.error(
+            "upstream " +
+              reply.status +
+              " on " +
+              r.uri +
+              " body: " +
+              body.substring(0, 800)
+          );
+        }
         for (var h in reply.headersOut) {
           r.headersOut[h] = reply.headersOut[h];
         }

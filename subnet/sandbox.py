@@ -7,8 +7,6 @@ loading, and Docker command construction so the two call-sites stay in sync.
 import json
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple
-
 
 # Docker configuration — shared between test_runner and validator
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
@@ -16,7 +14,7 @@ SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
 
 
-def host_path(path: str, workspace_dir: Optional[str] = None) -> str:
+def host_path(path: str, workspace_dir: str | None = None) -> str:
     """Map a container-local path to its host equivalent for Docker volume mounts.
 
     When running inside a container with the Docker socket mounted, volume mount
@@ -95,16 +93,20 @@ def build_sandbox_command(
     logs_host_path: str,
     problem_file_arg: str,
     output_path: str,
+    output_host_path: str | None = None,
     image: str = SANDBOX_IMAGE,
     network: str = SANDBOX_NETWORK,
-    extra_volumes: Optional[List[Tuple[str, str]]] = None,
-    max_workers: Optional[int] = None,
-    timeout: Optional[float] = None,
-    inference_access_token: Optional[str] = None,
-    inference_provider: Optional[str] = None,
-    inference_base_url: Optional[str] = None,
-    agent_container_path: Optional[str] = None,
-    container_name: Optional[str] = None,
+    extra_volumes: list[tuple[str, str]] | None = None,
+    max_workers: int | None = None,
+    timeout: float | None = None,
+    inference_access_token: str | None = None,
+    inherit_inference_access_token: bool = False,
+    inference_provider: str | None = None,
+    inference_base_url: str | None = None,
+    inference_model: str | None = None,
+    inherit_inference_model: bool = False,
+    agent_container_path: str | None = None,
+    container_name: str | None = None,
 ) -> list[str]:
     """Build a ``docker run`` command for the sandbox container.
 
@@ -119,14 +121,18 @@ def build_sandbox_command(
         problem_file_arg: Container-side path to the problem file (passed as
             ``--problem-file`` to ``run_sandbox``).
         output_path: Container-side path where sandbox writes output JSONL.
+        output_host_path: If set, mount this writable directory at /app/output
+            and mount logs_host_path read-only for evaluator-owned inputs.
         image: Docker image to use.
         network: Docker network to attach to.
         extra_volumes: Optional list of ``(host_path, container_path)`` tuples
             mounted read-only.
         max_workers: If set, passed as ``--max-workers`` to ``run_sandbox``.
-        inference_access_token: If set, injected as both ``CHUTES_ACCESS_TOKEN``
-            and ``INFERENCE_ACCESS_TOKEN`` env vars (the legacy var is kept for
-            agent code that hasn't migrated).
+        inference_access_token: If set, injected as the ``INFERENCE_ACCESS_TOKEN``
+            env var.
+        inherit_inference_access_token: Pass the token variable name to Docker
+            without embedding its value in the command arguments. The caller
+            must supply the value in the subprocess environment.
         inference_provider: If set, injected as ``INFERENCE_PROVIDER`` env var.
             Identifies which inference backend the access token belongs to.
         inference_base_url: If set, injected as ``INFERENCE_BASE_URL`` env var.
@@ -203,6 +209,8 @@ def build_sandbox_command(
             "/tmp:rw,noexec,nosuid,size=256m",
             "-e",
             "SANDBOX_PROXY_URL=http://proxy:80",
+            "-e",
+            "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json",
         ]
     )
 
@@ -210,15 +218,25 @@ def build_sandbox_command(
     if not agent_container_path:
         cmd.extend(["-v", f"{agent_host_path}:/app/user_agent.py:ro"])
 
-    cmd.extend(["-v", f"{logs_host_path}:/app/logs"])
+    logs_mode = ":ro" if output_host_path is not None else ""
+    cmd.extend(["-v", f"{logs_host_path}:/app/logs{logs_mode}"])
+    if output_host_path is not None:
+        cmd.extend(["-v", f"{output_host_path}:/app/output"])
 
     if inference_access_token:
-        cmd.extend(["-e", f"CHUTES_ACCESS_TOKEN={inference_access_token}"])
-        cmd.extend(["-e", f"INFERENCE_ACCESS_TOKEN={inference_access_token}"])
+        if inherit_inference_access_token:
+            cmd.extend(["-e", "INFERENCE_ACCESS_TOKEN"])
+        else:
+            cmd.extend(["-e", f"INFERENCE_ACCESS_TOKEN={inference_access_token}"])
     if inference_provider:
         cmd.extend(["-e", f"INFERENCE_PROVIDER={inference_provider}"])
     if inference_base_url:
         cmd.extend(["-e", f"INFERENCE_BASE_URL={inference_base_url}"])
+    if inference_model:
+        if inherit_inference_model:
+            cmd.extend(["-e", "SANDBOX_MODEL"])
+        else:
+            cmd.extend(["-e", f"SANDBOX_MODEL={inference_model}"])
 
     if extra_volumes:
         for host, container in extra_volumes:
