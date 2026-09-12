@@ -36,3 +36,12 @@ class TestExponentialBackoff:
         values2 = [backoff.next() for _ in range(10)]
         # With jitter, sequences should differ (very high probability)
         assert values != values2
+
+    def test_jitter_does_not_exceed_max(self):
+        # At the cap, jitter (+20%) previously pushed the returned value above
+        # max_seconds even though _current itself was correctly capped.
+        backoff = ExponentialBackoff(base_seconds=5, max_seconds=20, jitter=True)
+        for _ in range(4):  # 5 -> 10 -> 20 -> 20 (capped) -> ...
+            backoff.next()
+        for _ in range(50):
+            assert backoff.next() <= 20
