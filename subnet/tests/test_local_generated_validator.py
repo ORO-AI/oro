@@ -296,13 +296,14 @@ def test_summary_records_the_agent_and_how_the_roster_was_chosen(
         status="completed",
         problem_count=None,
         seed=None,
-        agent_path=agent,
+        agent_file=agent.name,
+        agent_sha256="d" * 64,
     )
     roster = json.loads(path.read_text())
     assert roster["selection_mode"] == "qualifying_roster"
     assert roster["selection_seed"] is None
     assert roster["agent_file"] == "agent.py"
-    assert len(roster["agent_sha256"]) == 64
+    assert roster["agent_sha256"] == "d" * 64
 
     local_generated_validator._write_summary(
         path,
@@ -315,11 +316,40 @@ def test_summary_records_the_agent_and_how_the_roster_was_chosen(
         status="completed",
         problem_count=7,
         seed=99,
-        agent_path=agent,
+        agent_file=agent.name,
+        agent_sha256="d" * 64,
     )
     sampled = json.loads(path.read_text())
     assert sampled["selection_mode"] == "random_sample"
     assert sampled["selection_seed"] == 99
+
+
+def test_summary_reports_the_digest_the_runtime_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Editing the agent mid-run must not make summary.json disagree with the
+    # agent_version_id already baked into every episode receipt.
+    results = [
+        _episode(index, family)
+        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+    ]
+    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
+    config = _config(tmp_path)
+    before = local_generated_validator._sha256(config.agent_path)
+
+    real_sha256 = local_generated_validator._sha256
+
+    def hash_then_mutate(path: Path) -> str:
+        digest = real_sha256(path)
+        config.agent_path.write_text("# edited mid-run\n", encoding="utf-8")
+        return digest
+
+    monkeypatch.setattr(local_generated_validator, "_sha256", hash_then_mutate)
+    completed = run_local_generated_validator(config)
+
+    summary = json.loads(completed.summary_path.read_text())
+    assert summary["agent_sha256"] == before
+    assert summary["agent_sha256"] != real_sha256(config.agent_path)
 
 
 def test_summary_averages_rewards_within_each_family(tmp_path: Path) -> None:

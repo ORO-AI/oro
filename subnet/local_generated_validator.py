@@ -272,7 +272,8 @@ def _write_summary(
     status: str,
     problem_count: int | None = None,
     seed: int | None = None,
-    agent_path: Path | None = None,
+    agent_file: str | None = None,
+    agent_sha256: str | None = None,
     error: LocalGeneratedValidatorError | None = None,
 ) -> dict[str, Any]:
     task_rows = _summary_tasks(results)
@@ -299,8 +300,8 @@ def _write_summary(
             "random_sample" if problem_count is not None else "qualifying_roster"
         ),
         "selection_seed": seed if problem_count is not None else None,
-        "agent_file": None if agent_path is None else agent_path.name,
-        "agent_sha256": None if agent_path is None else _sha256(agent_path),
+        "agent_file": agent_file,
+        "agent_sha256": agent_sha256,
         "models": (
             {
                 str(role): str(model)
@@ -474,6 +475,10 @@ def run_local_generated_validator(
     phase = "initialization"
     runtime: SessionRuntime | None = None
     server: SessionServer | None = None
+    # The digest the runtime recorded as agent_version_id. Read once, before the
+    # sandbox starts, so the summary cannot disagree with the episode receipts if
+    # the file is edited or removed mid-run.
+    agent_identity: str | None = None
     try:
         _write_summary(
             summary_path,
@@ -669,7 +674,8 @@ def run_local_generated_validator(
             status="completed",
             problem_count=config.problem_count,
             seed=config.seed,
-            agent_path=config.agent_path,
+            agent_file=config.agent_path.name,
+            agent_sha256=agent_identity,
         )
         report_path = local_report.write_trajectory_report(
             artifact_dir.resolve() / "trajectories.html",
@@ -725,7 +731,8 @@ def run_local_generated_validator(
                 status="failed",
                 problem_count=config.problem_count,
                 seed=config.seed,
-                agent_path=config.agent_path,
+                agent_file=config.agent_path.name,
+                agent_sha256=agent_identity,
                 error=run_error,
             )
         except Exception:  # noqa: BLE001, S110
