@@ -14,6 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+from subnet.inference import (
+    resolve_inference_credentials as _resolve_inference_credentials,
+)
+
 # Search server URL for ProblemScorer product lookups — must be set BEFORE
 # importing ProblemScorer, which reads SEARCH_SERVER_URL at module level.
 SEARCH_SERVER_URL = os.environ.get("SEARCH_SERVER_URL", "http://search-server:5632")
@@ -21,17 +25,20 @@ os.environ.setdefault("SEARCH_SERVER_URL", SEARCH_SERVER_URL)
 
 # ProblemScorer uses HTTP calls to search-server — no pyserini/Java needed
 from src.agent.problem_scorer import ProblemScorer  # noqa: E402
-from src.agent.scoring import is_problem_successful, compute_aggregate  # noqa: E402
 from src.agent.reasoning_scorer import score_reasoning_quality  # noqa: E402
-from src.agent.scoring import reasoning_coefficient, blend_final_score  # noqa: E402
-
+from src.agent.scoring import (  # noqa: E402
+    blend_final_score,
+    compute_aggregate,
+    is_problem_successful,
+    reasoning_coefficient,
+)
 from subnet.sandbox import (  # noqa: E402
-    SANDBOX_IMAGE,
     HOST_PROJECT_DIR,
+    SANDBOX_IMAGE,
+    attach_title_embeddings,
+    build_sandbox_command,
     host_path,
     load_problems,
-    build_sandbox_command,
-    attach_title_embeddings,
 )
 
 # Default test problem file — problem suite v1 (90 problems)
@@ -43,32 +50,6 @@ def _write_jsonl(problems: list[dict], output_path: Path) -> None:
     with open(output_path, "w") as f:
         for p in problems:
             f.write(json.dumps(p) + "\n")
-
-
-_CHUTES_INFERENCE_BASE_URL = "https://llm.chutes.ai/v1"
-_OPENROUTER_INFERENCE_BASE_URL = "https://openrouter.ai/api/v1"
-
-
-def _resolve_inference_credentials() -> tuple[str | None, str | None, str | None]:
-    """Resolve (api_key, provider, base_url) for the local test rig.
-
-    Honors an explicit INFERENCE_PROVIDER override; otherwise infers from
-    which key env var is set. Returns (None, None, None) if neither is set.
-    """
-    or_key = os.environ.get("OPENROUTER_API_KEY")
-    chutes_key = os.environ.get("CHUTES_API_KEY")
-
-    explicit = os.environ.get("INFERENCE_PROVIDER")
-    if explicit == "openrouter" and or_key:
-        return or_key, "openrouter", _OPENROUTER_INFERENCE_BASE_URL
-    if explicit == "chutes" and chutes_key:
-        return chutes_key, "chutes", _CHUTES_INFERENCE_BASE_URL
-
-    if or_key:
-        return or_key, "openrouter", _OPENROUTER_INFERENCE_BASE_URL
-    if chutes_key:
-        return chutes_key, "chutes", _CHUTES_INFERENCE_BASE_URL
-    return None, None, None
 
 
 def _score_output(

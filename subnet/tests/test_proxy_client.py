@@ -49,12 +49,12 @@ class TestProxyClientAuth:
         assert "Authorization" not in kwargs.get("headers", {})
 
     def test_api_key_from_env(self):
-        with patch.dict("os.environ", {"CHUTES_ACCESS_TOKEN": "env-token"}):
+        with patch.dict("os.environ", {"INFERENCE_ACCESS_TOKEN": "env-token"}):
             client = ProxyClient(proxy_url="http://proxy:80")
             assert client.api_key == "env-token"
 
     def test_explicit_api_key_overrides_env(self):
-        with patch.dict("os.environ", {"CHUTES_ACCESS_TOKEN": "env-token"}):
+        with patch.dict("os.environ", {"INFERENCE_ACCESS_TOKEN": "env-token"}):
             client = ProxyClient(proxy_url="http://proxy:80", api_key="explicit")
             assert client.api_key == "explicit"
 

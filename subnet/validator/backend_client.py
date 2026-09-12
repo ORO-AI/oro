@@ -19,7 +19,8 @@ from uuid import UUID
 import httpx
 import requests
 from bittensor_wallet import Wallet
-from oro_sdk import BittensorAuthClient
+from oro_sdk import BittensorAuthClient, Client
+from oro_sdk.api.public import get_top_agent
 from oro_sdk.api.validator import (
     claim_work,
     complete_run,
@@ -47,6 +48,7 @@ from oro_sdk.models.presign_upload_response import PresignUploadResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.models.progress_update_request import ProgressUpdateRequest
 from oro_sdk.models.terminal_status import TerminalStatus
+from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
 from oro_sdk import errors as sdk_errors
 
@@ -191,16 +193,13 @@ _MAX_OVERLAY_SHARE = 0.5
 class WeightSalt:
     """One epoch's weight guidance from the Backend, fetched in a single call.
 
-    ``overlay`` — validated supplementary uid→share assignments (empty on any
-    error). ``epoch_standings`` — the epoch-pinned base standings (ORO-1704), or
-    None when the pin is disabled/absent, which the caller treats as a miss
-    (retains its last-good on-chain weights; burns to UID 0 only after a full
-    epoch of misses — there is NO live/public-top fallback). Both come from the
-    SAME response so they can't straddle an epoch boundary.
+    ``eligible`` preserves the Backend's eligibility decision for diagnostics;
+    None means the response itself was unavailable or malformed.
     """
 
     overlay: dict[int, float]
     epoch_standings: EpochStandings | None
+    eligible: bool | None = None
 
 
 class BackendClient:
@@ -222,6 +221,11 @@ class BackendClient:
         self._consecutive_failures = 0
         self._last_recreate_at: float = 0.0
         self._auth_client = self._build_auth_client()
+        self._public_client = Client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(timeout),
+            raise_on_unexpected_status=False,
+        )
 
     def _build_auth_client(self) -> BittensorAuthClient:
         return BittensorAuthClient(
@@ -566,15 +570,23 @@ class BackendClient:
             body=request_body,
         )
 
+    def get_top_miner(self) -> TopAgentResponse:
+        """Get the post-embargo public top and emission policy."""
+        return self._call_api(
+            get_top_agent.sync_detailed,
+            "get_top_miner",
+            client=self._public_client,
+        )
+
     def fetch_weight_salt(self) -> WeightSalt:
         """Fetch this epoch's overlay + epoch-pinned standings in ONE call.
 
         Participation-gated (signed client). One request so both fields come
         from the same epoch. On ANY fetch/parse error → empty overlay + None
         standings, i.e. a miss: the caller retains its last-good on-chain weights
-        (and burns to UID 0 only after a full epoch of misses) — there is NO live
-        / public-top fallback. A malformed payload must never raise past here or
-        it would break Yuma consensus.
+        during the grace period, then tries the post-embargo public top. A
+        malformed payload must never raise past here or it would break Yuma
+        consensus.
 
         The overlay is the trust boundary: every share must be finite and in
         [0, 1] and the total <= MAX_OVERLAY_SHARE, else the *whole* overlay is
@@ -597,7 +609,14 @@ class BackendClient:
         standings = getattr(resp, "epoch_standings", None)
         if standings is UNSET:
             standings = None
-        return WeightSalt(overlay=overlay, epoch_standings=standings)
+        eligible = getattr(resp, "eligible", None)
+        if not isinstance(eligible, bool):
+            eligible = None
+        return WeightSalt(
+            overlay=overlay,
+            epoch_standings=standings,
+            eligible=eligible,
+        )
 
     @staticmethod
     def _parse_overlay(resp: Any) -> dict[int, float]:

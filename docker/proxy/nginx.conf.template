@@ -31,6 +31,14 @@ http {
     # Rate limiting zone: 30 requests/second per client IP
     limit_req_zone $binary_remote_addr zone=agent:10m rate=30r/s;
 
+    # Return 429 (Too Many Requests) instead of the nginx default 503 when an
+    # agent bursts past the cap. 503 misleads agent authors — it reads as
+    # "server broken" so agents either give up or spam-retry with no backoff.
+    # 429 is the correct HTTP semantic for a client-side rate breach and lets
+    # a well-behaved agent add jitter/backoff without polluting real 5xx
+    # dashboards.
+    limit_req_status 429;
+
     # Combined access log + upstream metadata + per-request outcome label.
     # `$upstream_status` propagates the upstream HTTP status when a parent
     # location uses `proxy_pass` (e.g. /search/*) but stays `-` when the
@@ -75,14 +83,10 @@ http {
             add_header Content-Type application/json;
         }
 
-        # Block agent access to scoring-only endpoint (returns full product docs)
-        location /search/get_product_raw {
-            return 403 '{"error": "forbidden"}\n';
-            add_header Content-Type application/json;
-        }
-
-        # Route /search/* requests to search-server
-        location /search/ {
+        # Route only the two agent-facing search operations. Keeping this an
+        # allowlist prevents alternate spellings or newly-added search-server
+        # endpoints from exposing scoring/private product data by default.
+        location ~ ^/search/(find_product|view_product_information)$ {
             limit_req zone=agent burst=50 nodelay;
 
             # Re-resolve Docker DNS on every request so container IP changes
@@ -108,6 +112,23 @@ http {
             limit_req zone=agent burst=50 nodelay;
             client_body_buffer_size 1m;
             js_content validate_model.validate;
+        }
+
+        # Stateful actions terminate in the validator process. Session
+        # creation and verdict endpoints are intentionally not exposed.
+        location = /environment/call {
+            limit_req zone=agent burst=50 nodelay;
+
+            resolver 127.0.0.11 valid=10s;
+            set $session_upstream http://${SESSION_RUNTIME_HOST}:${SESSION_RUNTIME_PORT};
+            proxy_pass $session_upstream/v1/session/call;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout ${SESSION_CALL_TIMEOUT};
+            proxy_read_timeout ${SESSION_CALL_TIMEOUT};
         }
 
         # Internal location: fetch the allowed-models list from the ORO Backend
@@ -158,7 +179,7 @@ http {
             proxy_pass $chutes_upstream;
             proxy_ssl_server_name on;
 
-            # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN)
+            # Forward miner's auth token (set by ProxyClient from INFERENCE_ACCESS_TOKEN)
             proxy_set_header Authorization $http_authorization;
             proxy_set_header Host ${CHUTES_HOST};
             proxy_set_header X-Identifier "orosn15";
@@ -190,7 +211,7 @@ http {
             proxy_pass $openrouter_upstream;
             proxy_ssl_server_name on;
 
-            # Forward miner's auth token (set by ProxyClient from CHUTES_ACCESS_TOKEN /
+            # Forward miner's auth token (set by ProxyClient from
             # INFERENCE_ACCESS_TOKEN, populated per claim_work).
             proxy_set_header Authorization $http_authorization;
             proxy_set_header Host ${OPENROUTER_HOST};

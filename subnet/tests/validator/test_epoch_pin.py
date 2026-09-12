@@ -1,10 +1,8 @@
 """ORO-1704 epoch-pinned standings consumer tests.
 
 The load-bearing test is `test_pinned_vector_equals_live_regardless_of_order`:
-the pinned base vector must be byte-identical to the live one (that is the whole
-point — pin *what* validators adopt, not the resulting vector). The rest cover
-the switch-to-endpoint-or-fall-back behaviour: use the pinned standings when the
-Backend serves them, otherwise fall back to this validator's live standings.
+the pinned base vector must be byte-identical to the live one. The remaining
+tests cover private standings, the grace period, and the public-top fallback.
 """
 
 import time
@@ -12,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from oro_sdk.models.epoch_standings import EpochStandings
 from oro_sdk.models.pinned_finisher import PinnedFinisher
 from validator.backend_client import WeightSalt
@@ -177,7 +176,7 @@ def test_malformed_standings_retains(mock_backend_client, mock_subtensor, mock_w
     mock_subtensor.set_weights.assert_not_called()
 
 
-def test_rejected_set_does_not_advance_burn_anchor(
+def test_rejected_set_does_not_advance_private_success_anchor(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
     """A rejected set (ExtrinsicResponse-like `success=False`) must NOT count as
@@ -199,34 +198,97 @@ def test_rejected_set_does_not_advance_burn_anchor(
     assert setter._last_success_epoch is None  # but does not record success
 
 
-def test_sustained_miss_burns_to_uid0(
-    mock_backend_client, mock_subtensor, mock_wallet
+def test_sustained_miss_submits_public_top(
+    mock_backend_client, mock_subtensor, mock_wallet, caplog
 ):
-    """A full epoch elapsed with no successful set ⇒ burn to UID 0. Prior success
-    was in epoch 0; block 200 / (tempo 100 * reveal 1) = epoch 2, so a whole
-    epoch (1) fully elapsed with no set (guard: epoch >= last_success + 2)."""
+    """After the grace period, use the single post-embargo public snapshot."""
     mg = _metagraph(_finishers(6))
     mg.block = 200  # epoch 2 with the conftest tempo of 100
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=None
+        overlay={}, epoch_standings=None, eligible=False
+    )
+    mock_backend_client.get_top_miner.return_value = SimpleNamespace(
+        top_miner_hotkey="5HK0",
+        policy={"emission_baseline_burn_rate": 0.75},
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     setter._last_success_epoch = 0  # last good set was a full epoch ago
 
-    _run_tick_once(setter)
+    setter._tick()
 
     weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
-    # Burn vector: all weight on the burn slot (uid 0), nothing elsewhere.
     assert weights[0] == max(weights)
-    assert sum(weights[1:]) == 0
+    assert weights[1] > 0
+    assert sum(weights[2:]) == 0
+    assert "validator is currently ineligible" in caplog.text
 
 
-def test_partial_epoch_miss_retains_not_burn(
+@pytest.mark.parametrize(
+    "public_top",
+    [
+        SimpleNamespace(
+            top_miner_hotkey=None,
+            policy={"emission_baseline_burn_rate": 0.75},
+        ),
+        SimpleNamespace(top_miner_hotkey="5HK0", policy={}),
+        SimpleNamespace(
+            top_miner_hotkey="5Missing",
+            policy={"emission_baseline_burn_rate": 0.75},
+        ),
+    ],
+)
+def test_unusable_public_top_retains_last_good(
+    public_top, mock_backend_client, mock_subtensor, mock_wallet
+):
+    mg = _metagraph(_finishers(3))
+    mg.block = 200
+    mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
+        overlay={}, epoch_standings=None
+    )
+    mock_backend_client.get_top_miner.return_value = public_top
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
+    setter._last_success_epoch = 0
+
+    setter._tick()
+
+    mock_subtensor.set_weights.assert_not_called()
+
+
+def test_private_standings_recovery_supersedes_public_top(
+    mock_backend_client, mock_subtensor, mock_wallet
+):
+    fins = _finishers(3)
+    mg = _metagraph(fins)
+    mg.block = 200
+    mock_backend_client.fetch_weight_salt.side_effect = [
+        WeightSalt(overlay={}, epoch_standings=None),
+        WeightSalt(
+            overlay={},
+            epoch_standings=_standings(fins, top_hotkey="5HK1"),
+        ),
+    ]
+    mock_backend_client.get_top_miner.return_value = SimpleNamespace(
+        top_miner_hotkey="5HK0",
+        policy={"emission_baseline_burn_rate": 0.75},
+    )
+    setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
+    setter._last_success_epoch = 0
+
+    setter._tick()
+    setter._tick()
+
+    weights = mock_subtensor.set_weights.call_args.kwargs["weights"]
+    assert mock_subtensor.set_weights.call_count == 2
+    assert weights[2] > weights[1]
+
+
+def test_partial_epoch_miss_retains_before_public_fallback(
     mock_backend_client, mock_subtensor, mock_wallet
 ):
     """Off-by-one guard: a miss only one epoch after the last set (a set landed
     late in epoch 0, now epoch 1) is a partial-epoch transient miss ⇒ retain,
-    NOT burn. Burning here would zero emissions minutes after a good set."""
+    no public fallback. Replacing the vector here would happen minutes after a
+    good set."""
     mg = _metagraph(_finishers(6))
     mg.block = 100  # epoch 1 with the conftest tempo of 100
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(

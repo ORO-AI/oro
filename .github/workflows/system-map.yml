@@ -1,9 +1,15 @@
-# Caller — install in EACH mapped repo at:
-#   .github/workflows/system-map.yml
-# (Frontend, Backend, oro, oro-sdk, DB, Infrastructure)
-# Thin wrapper: on any PR to main, hand off to the shared dispatcher.
-# Tracks ORO-AI/.github@main (a first-party, branch-protected repo), so
-# dispatcher updates apply with no per-caller bump.
+# system-map source caller.
+#
+# NOTE: this repo is PUBLIC, and the shared dispatcher lives in the PRIVATE
+# ORO-AI/.github repo. GitHub does not let a public repo call a private repo's
+# reusable workflow, so the standard thin `uses:` caller (as installed in the
+# private mapped repos) fails here with "workflow was not found". The dispatch
+# logic is therefore INLINED below instead of calling the reusable workflow.
+#
+# KEEP IN SYNC with the shared dispatcher:
+#   ORO-AI/.github/.github/workflows/sync-system-map.yml
+# The two must stay behaviorally identical (diff changed files → dispatch to
+# oro-system-map). The private mapped repos still use the reusable caller.
 
 name: system-map
 
@@ -12,15 +18,44 @@ on:
     types: [opened, synchronize, reopened]
     branches: [main]
 
-# Least-privilege token forwarded to the reusable workflow.
+# Least-privilege: the diff step only reads the PR.
 permissions:
   contents: read
   pull-requests: read
 
 jobs:
-  sync:
+  dispatch:
     # Skip fork PRs — secrets aren't available to them, so the PAT would be empty.
     if: github.event.pull_request.head.repo.fork == false
-    uses: ORO-AI/.github/.github/workflows/sync-system-map.yml@main
-    secrets:
+    runs-on: ubuntu-latest
+    env:
       MAP_SYNC_PAT: ${{ secrets.MAP_SYNC_PAT }}
+    steps:
+      - name: Collect the PR's changed files
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=$(gh pr diff "${{ github.event.number }}" \
+                    --repo "${{ github.repository }}" --name-only \
+                  | tr '\n' ' ' | sed 's/ *$//')
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "changed: $files"
+
+      - name: Dispatch to oro-system-map
+        # Guard: skip cleanly when nothing changed OR the PAT is absent (unset secret / fork PR).
+        if: steps.diff.outputs.files != '' && env.MAP_SYNC_PAT != ''
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ env.MAP_SYNC_PAT }}
+          repository: ORO-AI/oro-system-map
+          event-type: source-pr
+          # toJSON() emits properly-quoted/escaped JSON strings, so a filename
+          # containing a quote can't break out of the payload literal.
+          client-payload: |
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "pr": "${{ github.event.number }}",
+              "sha": ${{ toJSON(github.event.pull_request.head.sha) }},
+              "files": ${{ toJSON(steps.diff.outputs.files) }}
+            }

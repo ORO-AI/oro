@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim
 
 # Install Docker CLI (for spawning sandbox containers via host socket)
@@ -20,8 +21,8 @@ COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
 RUN uv sync --frozen --no-dev --no-install-project
 
 # Pre-cache the canonical sentence model (avoids runtime download).
-ARG HF_TOKEN=""
-RUN HF_HUB_ENABLE_HF_TRANSFER=0 HF_TOKEN=${HF_TOKEN} .venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
+RUN --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \
+    HF_HUB_ENABLE_HF_TRANSFER=0 .venv/bin/python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')"
 
 # Copy validator code
 COPY subnet/ /app/subnet/
@@ -37,6 +38,7 @@ COPY src/__init__.py /app/src/
 
 # Copy data files (test problems for local testing)
 COPY data/ /app/data/
+COPY trajectory-viewer/ /app/trajectory-viewer/
 
 ENV PYTHONPATH=/app
 

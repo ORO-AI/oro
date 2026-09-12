@@ -4,82 +4,166 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-To test your agent locally before submitting, use the ORO test harness:
+The local workflow validates the sealed 35-task qualifying EnvPack, then runs
+all five tasks from each TF1 through TF7 family. It uses the generated
+validator's `oro-env-runtime` sessions, family verifiers, rewards, proxy,
+search server, and sandbox. It does not compile tasks or fetch evaluation work
+from the Backend. The proxy reads the public Backend model allowlist, matching
+the qualifying inference path.
+
+The exact qualifying EnvPack is included at `data/local-test/env-pack.tar.gz`
+using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.11, runtime
+contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
+`9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a`.
+The local runner verifies the pack, its runtime contracts, and the matching
+search-index identity before it starts the agent sandbox.
+Your agent file must define a synchronous callable
+`agent_main(problem_data)` that drives the environment session via
+`problem_data["environment"]["binding"]` and `policy_view`. See the [agent
+interface docs](https://docs.oroagents.com/docs/miners/agent-interface) for the
+full contract.
+
+Start from the bundled reference:
 
 ```bash
-git clone https://github.com/ORO-AI/oro.git
-cd oro
-cp .env.example .env   # Set CHUTES_API_KEY or OPENROUTER_API_KEY
+docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-The test harness supports both Chutes and OpenRouter for inference. Set whichever key you have. If you set both, pick one with `INFERENCE_PROVIDER=chutes` or `INFERENCE_PROVIDER=openrouter`.
+Once you have your own file (started from a copy of `environment_agent.py`),
+swap it in with `--agent-file my_agent.py`.
+
+> **Legacy `agent_main(task) -> List[Dict]`** — this is the old ShoppingBench
+> contract. Production evaluations no longer use it; an agent that never opens
+> a session against `binding.session_id` terminates as `agent_error` on every
+> task with zero score. Migrate to `agent_main(problem_data)` before submitting.
+
+### Setup and configuration
+
+Keep your existing `.env`, or copy `.env.example` for a new checkout. Set
+`OPENROUTER_API_KEY` or `CHUTES_API_KEY`. Both keys may remain configured;
+`INFERENCE_PROVIDER=chutes` or `INFERENCE_PROVIDER=openrouter` selects one.
+Without an explicit choice, OpenRouter takes precedence when both keys exist.
+`SANDBOX_MODEL` is an optional override used by the included reference agent.
+Its default is
+`deepseek-ai/DeepSeek-V3.2-TEE`, preserving the existing local-testing default.
+The proxy maps it to the paired OpenRouter identifier when using OpenRouter.
+Custom agents may choose one or more models in their own code. The proxy checks
+every request against the same live Backend allowlist used for qualifying. The
+shopper simulator keeps its model sealed in the EnvPack and uses that same
+proxy path. For example, set
+`SANDBOX_MODEL=Qwen/Qwen3.5-397B-A17B-TEE` to run the frontier Qwen model used
+for the reference trajectory run.
+
+Install the Git LFS pack and current validator, sandbox, and proxy images.
+For a source checkout, build the services after pulling the pack:
 
 ```bash
-# Test with the default agent
-docker compose run test --agent-file src/agent/agent.py
-
-# Test with your own agent
-docker compose run test --agent-file my_agent.py
+git lfs pull
+docker compose build test test-proxy sandbox
 ```
 
-The first run pulls pre-built images from GHCR (~8 GB total). Subsequent runs start in seconds.
+The `test-search-server` service follows the shared `IMAGE_TAG`, which defaults
+to `stable`, alongside the published sandbox and proxy images. The validator
+is built from the checkout. Set `IMAGE_TAG=latest` to test prerelease
+dependencies. For pack-specific validation, `LOCAL_SEARCH_SERVER_IMAGE`
+overrides only the search service with an exact tag or digest. Docker downloads
+the multi-architecture search image for the host platform on the first run.
+Reserve at least 16 GB of free disk space for the image and runtime data. The
+runtime rejects a mismatched search identity before starting the agent sandbox.
 
-### Options
+Before starting the agent, the runtime validates every task and catalog
+reference in the bundled qualifying pack.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--agent-file` | (required) | Path to your agent Python file |
-| `--problem-file` | `data/suites/problem_suite_v3.json` | Problem suite (30 problems) |
-| `--max-workers` | `3` | Parallel sandbox workers |
+`LOCAL_ENV_PACK_PATH` can select another pack for development, and
+`LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be
+available inside `/workspace`.
+`LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
+
+`--problems` runs a subset while you iterate. Pass any number from 1 to 35.
+The problems are sampled at random and spread across the seven families, so a
+short run still covers as many of TF1 through TF7 as it has room for:
+
+```bash
+docker compose run test --agent-file my_agent.py --problems 7
+```
+
+Each run samples afresh, so repeated runs do not tune the agent against one
+lucky subset. The report prints the seed; pass `--seed` to repeat an earlier
+selection exactly. Scores from a subset are not comparable to qualifying,
+which always runs all 35.
+Configuration and infrastructure failures return a nonzero exit status.
+
+Local tests use a dedicated search server and proxy. The proxy fetches the live
+allowlist from `BACKEND_URL`, which defaults to `https://api.oroagents.com`.
+The runtime shares the proxy's network namespace so the original Compose
+command works without additional networking flags. Run one local test at a
+time per Compose project. Dependencies stay running for subsequent tests; stop
+them with `docker compose --profile test down` when finished.
 
 **Note on `find_product`:** the `q` parameter matches against product title and the values within `attributes` / `sku_options`. Field names (keys) themselves are not searchable.
 
 ### Output
 
-The test runner scores each problem and prints per-category results:
+The command prints a run header, the 35 finalized tasks grouped by family with
+a per-family mean, the aggregate, and where the artifacts are:
 
+```text
+ORO Bench local run  local-...
+  pack        9e5d11c6…c73a  (35 tasks)
+  runtime     0.3.2  verifier 0.3.4
+  inference   openrouter
+  agent model deepseek-ai/DeepSeek-V3.2-TEE  (reference agent; custom agents choose in code)
+  simulator   mistralai/mistral-small-2603
+  judge       deepseek/deepseek-v4-flash-0731
+
+intent_decomposition               mean 0.80  4/5 passed
+  TF1-intent_decomposition-...     completed         1.00
+  ...
+
+Aggregate score  0.363515
+Artifacts        ./logs/environment-runs/local-...
+Trajectories     ./logs/environment-runs/local-.../trajectories.html  (open in a browser)
 ```
-  product : gt=0.200 (30 problems)
-  shop    : gt=0.167 (30 problems)
-  voucher : gt=0.133 (30 problems)
 
-Ground truth rate: 0.167
-Success rate:      0.333
-Result: PASS
-```
+Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
+that off. The simulator and judge models are sealed in the pack. The agent
+model line shows `SANDBOX_MODEL`, which is a request rather than a record: only
+the included reference agent reads it, and the proxy maps it to the active
+provider's name for that model, so an OpenRouter run of the default sends
+`deepseek/deepseek-v3.2`. A custom agent chooses its own models in code. A
+completed task can still have a zero reward if its verifier verdict is
+incorrect.
 
-### Debugging Failed Problems
+Open `trajectories.html` in any browser to step through every episode: the
+shopper request, your agent's messages and tool calls, observations, simulator
+events, the verdict checks, and the reward. It is a single self-contained file,
+so you can copy it off a remote host. The viewer source lives in
+`trajectory-viewer/`.
 
-During execution, the sandbox streams progress to stdout:
+Each run directory contains:
 
-```
-[1/90]  ok Looking for a toner from psph beauty that costs... (10.05s)
-[2/90]  ok Show me supplements priced above 189 pesos...     (5.33s)
-[3/90]  FAIL Find shops offering cotton slacks...               (35.21s)
-```
+- `summary.json`, with the pack digest, task roster, per-task and per-family
+  rewards, runtime error classification, and aggregate score;
+- `trajectories.html`, the self-contained trajectory viewer for the run;
+- `sandbox/sandbox_output.jsonl`, with the untrusted sandbox trajectory output;
+- `episode_results.jsonl`, with finalized runtime receipts including verifier
+  verdicts, call traces, ledgers, and provenance;
+- `environment_sessions.json` and `problems.jsonl`, which are runtime inputs.
 
-The full agent dialogue is saved to `logs/sandbox_output_local-test.jsonl`. Inspect specific problems with:
+The sandbox mounts evaluator artifacts read-only and writes only to `sandbox/`.
+Scores and task diagnostics come from runtime receipts. Self-reported timings,
+inference failures, and request logs remain in `sandbox/` for inspection and do
+not determine the summary. The output reader rejects symlinks, hard-linked or
+non-regular files, non-object rows, and files larger than 128 MiB. Interrupted
+runs retain finalized runtime receipts, including partial task outcomes.
+
+The printed `/app/logs/` path maps to `./logs/` on your host. Inspect the summary:
 
 ```bash
-# Show all queries and their scores (requires jq)
-cat logs/sandbox_output_local-test.jsonl | jq -r \
-  '.[0].extra_info.query[:80]'
-
-# Inspect the dialogue for problem N (0-indexed)
-sed -n '5p' logs/sandbox_output_local-test.jsonl | jq '
-  .[] | {
-    step: .extra_info.step,
-    think: .completion.message.think[:200],
-    tools: [.completion.message.tool_call[]?.name],
-    response: .completion.message.response[:200]
-  }'
-
-# See what products the agent found in a specific step
-sed -n '5p' logs/sandbox_output_local-test.jsonl | jq '
-  .[0].completion.message.tool_call[]
-  | select(.name == "find_product")
-  | .result[:3]
-  | .[] | {product_id, title, price}'
+run_dir=./logs/environment-runs/local-...
+python3 -m json.tool "$run_dir/summary.json"
+wc -l "$run_dir/sandbox/sandbox_output.jsonl"
 ```
 
-See the [local testing docs](https://docs.oroagents.com/docs/miners/local-testing) for more detail on CLI flags and interpreting results.
+The artifacts contain sealed task data and agent trajectories. Keep them local
+and do not publish them.

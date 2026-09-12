@@ -270,6 +270,24 @@ class TestBackendClientPresign:
         assert result.results_s3_key == "logs/run-123.tar.gz"
 
 
+class TestBackendClientTopMiner:
+    def test_get_top_miner(self, mock_wallet):
+        from oro_sdk.models.top_agent_response import TopAgentResponse
+
+        response = TopAgentResponse(
+            suite_id=789,
+            computed_at=datetime(2025, 1, 13, 12, 0, 0),
+            top_miner_hotkey="5GrwvaEF...",
+        )
+        client = BackendClient("https://api.example.com", mock_wallet)
+
+        with patch(
+            "validator.backend_client.get_top_agent.sync_detailed",
+            return_value=_create_response(200, response),
+        ):
+            assert client.get_top_miner().top_miner_hotkey == "5GrwvaEF..."
+
+
 class TestBackendClientWeightOverlay:
     def _client(self, mock_wallet):
         return BackendClient("https://api.example.com", mock_wallet)
@@ -293,7 +311,10 @@ class TestBackendClientWeightOverlay:
             "validator.backend_client.get_weight_salt.sync_detailed",
             return_value=self._resp({"114": 0.09, "201": 0.005}),
         ):
-            assert client.fetch_weight_salt().overlay == {114: 0.09, 201: 0.005}
+            salt = client.fetch_weight_salt()
+
+        assert salt.overlay == {114: 0.09, 201: 0.005}
+        assert salt.eligible is True
 
     def test_empty_overlay_returns_empty(self, mock_wallet):
         client = self._client(mock_wallet)

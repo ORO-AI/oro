@@ -26,10 +26,12 @@ resources/documents.jsonl
 .secrets
 .worktrees/
 .specstory/
-CLAUDE.md
 subnet/logs/
 data/single_problem.json
 data/test_agent.py
 
 # Root uv.lock is a stray artifact — the repo root uses requirements.txt.
 /uv.lock
+
+# Local generated-environment results.
+/environment-runs/

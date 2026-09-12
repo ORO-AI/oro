@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing
 import os
+import queue
 import sys
 import time
 from concurrent.futures import (
@@ -140,7 +141,6 @@ def load_agent_from_file(file_path: str) -> Callable:
     if not callable(agent_main):
         raise ImportError(f"'agent_main' in {file_path} is not callable")
 
-    logger.info(f"Succesfully loaded agent from {file_path}")
     return agent_main
 
 
@@ -269,7 +269,20 @@ def execute_single_problem(
         args=(problem, agent_file, result_queue, stats_file, request_log_file),
     )
     process.start()
-    process.join(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    queued_result = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            queued_result = result_queue.get(timeout=min(remaining, 0.1))
+            break
+        except queue.Empty:
+            if not process.is_alive():
+                break
+
+    process.join(timeout=max(0.0, deadline - time.monotonic()))
     execution_time = time.time() - start_time
 
     timed_out = process.is_alive()
@@ -301,8 +314,8 @@ def execute_single_problem(
         )
 
     try:
-        if not result_queue.empty():
-            status, data = result_queue.get_nowait()
+        if queued_result is not None:
+            status, data = queued_result
             if status == "success":
                 return ExecutionResult(
                     query=query,

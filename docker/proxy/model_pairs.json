@@ -12,6 +12,7 @@
     { "chutes": "zai-org/GLM-5.1-TEE",                       "openrouter": "z-ai/glm-5.1" },
     { "chutes": "zai-org/GLM-5.2-TEE",                       "openrouter": "z-ai/glm-5.2" },
     { "chutes": "moonshotai/Kimi-K2.6-TEE",                  "openrouter": "moonshotai/kimi-k2.6" },
+    { "chutes": "unsloth/Mistral-Nemo-Instruct-2407-TEE",    "openrouter": "mistralai/mistral-small-2603" },
     { "chutes": "XiaomiMiMo/MiMo-V2-Flash-TEE",             "openrouter": "xiaomi/mimo-v2-flash" },
     { "chutes": "openai/gpt-oss-120b-TEE",                   "openrouter": "openai/gpt-oss-120b" }
   ]

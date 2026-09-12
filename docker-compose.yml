@@ -1,6 +1,8 @@
 services:
   search-server:
-    image: ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}
+    # SEARCH_SERVER_IMAGE lets a deployment pin a generated-index image without
+    # changing the shared validator/proxy/sandbox IMAGE_TAG.
+    image: ${SEARCH_SERVER_IMAGE:-ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}}
     build:
       context: .
       dockerfile: docker/search-server/Dockerfile
@@ -59,6 +61,9 @@ services:
       # production; staging/dev override via BACKEND_URL env var.
       - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
+      - SESSION_RUNTIME_HOST=${SESSION_RUNTIME_HOST:-validator}
+      - SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
     # Loopback-only publish. Sandbox agents reach the proxy over the `main`
     # docker network (`SANDBOX_PROXY_URL=http://proxy:80`), so no host publish
     # is required for normal operation. Keeping a loopback publish preserves
@@ -149,7 +154,18 @@ services:
       - WALLET_HOTKEY=${WALLET_HOTKEY:-default}
       - NETUID=${NETUID:-15}
       - SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-finney}
+      # Optional private subtensor RPC. When set, wins over SUBTENSOR_NETWORK
+      # so validators can point at their own node and avoid the shared
+      # foundation-finney 429s. Empty = fall back to the network's default
+      # public endpoint via bittensor's network→endpoint resolver.
+      - SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-}
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
+      - ORO_SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
+      - ORO_SESSION_SIMULATOR_TIMEOUT=${ORO_SESSION_SIMULATOR_TIMEOUT:-60}
+      # Optional startup preflight for an operator-selected immutable pack.
+      # Pack-bound claimed work selects the generated evaluator automatically.
+      - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}
+      - ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256=${ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256:-}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
       # defaults to "true" in `bittensor.core.config.no_parse_cli`), so
@@ -255,18 +271,39 @@ services:
       - main
     restart: unless-stopped
 
-  # Local testing — run agent against test problems, print score, exit
+  # Local generated evaluation, using the existing miner command and .env.
+  test-search-server:
+    image: ${LOCAL_SEARCH_SERVER_IMAGE:-ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}}
+    profiles:
+      - test
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5632
+      - SEARCH_WORKERS=${SEARCH_WORKERS:-}
+      - SEARCH_THREADS=${SEARCH_THREADS:-4}
+      - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5632/health').read()\""]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - main
+    restart: unless-stopped
+
   test:
     image: ghcr.io/oro-ai/oro/validator:${IMAGE_TAG:-stable}
+    pull_policy: build
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
     profiles:
       - test
     depends_on:
-      search-server:
+      test-search-server:
         condition: service_healthy
-      proxy:
+      test-proxy:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -274,18 +311,53 @@ services:
       - ./logs:/app/logs
     environment:
       - HOST_PROJECT_DIR=${PWD}
+      - PYTHONPATH=/workspace:/app
+      - LOCAL_OUTPUT_ROOT=/app/logs/environment-runs
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-ghcr.io/oro-ai/oro/sandbox:${IMAGE_TAG:-stable}}
-      - SANDBOX_NETWORK=sandbox-network
+      - SANDBOX_NETWORK=${COMPOSE_PROJECT_NAME:-shoppingbench}-test-sandbox
+      - SANDBOX_MODEL=${SANDBOX_MODEL:-deepseek-ai/DeepSeek-V3.2-TEE}
       - CHUTES_API_KEY=${CHUTES_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INFERENCE_PROVIDER=${INFERENCE_PROVIDER:-}
-      # Opt-in shadow scoring (mirrors the validator service).
-      - SHADOW_SCORE_MODEL=${SHADOW_SCORE_MODEL:-}
-    # Use the venv interpreter — bare `python` is the system Python and
-    # has no project dependencies installed (e.g. `requests`).
-    entrypoint: [".venv/bin/python", "-m", "subnet.test_runner"]
+      - LOCAL_ENV_PACK_PATH=${LOCAL_ENV_PACK_PATH:-/workspace/data/local-test/env-pack.tar.gz}
+      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a}
+      - LOCAL_MAX_WORKERS=${LOCAL_MAX_WORKERS:-7}
+      - LOCAL_TIMEOUT=${LOCAL_TIMEOUT:-1800}
+      - SEARCH_SERVER_URL=http://test-search-server:5632
+    working_dir: /workspace
+    entrypoint: ["/app/.venv/bin/python", "-m", "subnet.local_generated_validator"]
+    # Compose run omits service aliases. Sharing the local proxy's network
+    # namespace lets it reach this run's session server on loopback.
+    network_mode: service:test-proxy
+    restart: "no"
+
+  test-proxy:
+    image: ghcr.io/oro-ai/oro/proxy:${IMAGE_TAG:-stable}
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    profiles:
+      - test
+    environment:
+      - SEARCH_SERVER_URL=test-search-server
+      - SEARCH_SERVER_PORT=5632
+      - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
+      - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
+      - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
+      - SESSION_RUNTIME_HOST=127.0.0.1
+      - SESSION_RUNTIME_PORT=9101
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks:
-      - main
+      main:
+      test-sandbox:
+        aliases:
+          - proxy
     restart: "no"
 
 volumes:
@@ -298,5 +370,9 @@ networks:
     driver: bridge
   sandbox:
     name: sandbox-network
+    driver: bridge
+    internal: true
+  test-sandbox:
+    name: ${COMPOSE_PROJECT_NAME:-shoppingbench}-test-sandbox
     driver: bridge
     internal: true

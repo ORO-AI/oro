@@ -67,9 +67,8 @@ class ReasoningJudge:
             inf_total = judge_result["inference_total"]
             inf_402 = judge_result["inference_402"]
             with self._lock:
-                # Any 402 trips the breaker immediately — the miner's
-                # token can't afford a single judge call, and the same
-                # token is reused across every rotation model.
+                # Only a confirmed OpenRouter payment_required response
+                # increments inference_402.
                 if inf_402 > 0:
                     self._circuit_open = True
                     self._consecutive_failures = CIRCUIT_BREAKER_THRESHOLD
@@ -94,7 +93,11 @@ class ReasoningJudge:
                 f"(problem={problem_id}, model={judge_result['model']})"
             )
             return {
-                "reasoning_score": judge_result["score"],
+                # A real zero has a model; an empty model means every judge
+                # attempt failed and must not become a score sample.
+                "reasoning_score": (
+                    judge_result["score"] if judge_result["model"] else None
+                ),
                 "reasoning_explanation": judge_result["explanation"],
                 "reasoning_model": judge_result["model"],
                 "reasoning_inf_failed": inf_failed,

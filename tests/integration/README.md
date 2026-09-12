@@ -47,6 +47,24 @@ Integration tests verify that ShoppingBench services work correctly when running
 - Clean up stale containers: `docker compose rm -f sandbox`
 - Restart: `docker compose up -d sandbox`
 
+## Sealed environment pack loader
+
+With the local Backend and LocalStack running, the test compiles a deterministic
+pack fixture, creates the pack bucket, uploads the archive, registers it through
+the signed admin endpoint, and loads it through the signed validator endpoint:
+
+```bash
+ORO_SUBNET_NETUID=<local-backend-netuid> \
+  pytest tests/integration/test_env_pack_loader.py -v
+```
+
+The Backend smoke setup must have provisioned its deterministic `//AdminLocal`
+and `//ValidatorLocal` identities once. The pack itself is fully provisioned by
+this test and registration is idempotent. Override endpoints or identities with
+`BACKEND_URL`, `AWS_ENDPOINT_URL`, `REDIS_URL`, `ORO_SUBNET_NETUID`,
+`ORO_ADMIN_KEY_URI`, and `ORO_VALIDATOR_KEY_URI`. The test refreshes the local
+validator permit cache itself.
+
 ## Caching and Performance Optimization
 
 ### Index Caching
