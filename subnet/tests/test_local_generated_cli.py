@@ -117,7 +117,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "0.2.12"
+    assert version("oro-env-runtime") == "0.2.13"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
