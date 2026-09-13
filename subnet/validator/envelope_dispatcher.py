@@ -122,12 +122,23 @@ class EnvelopeDispatcher:
         """Mark all unscored problems as TIMED_OUT in local results.
 
         Only reaches problems that never produced an envelope (sandbox death
-        before write, never-started, or partial run cut off by hard deadline).
+        before write, never-started, or partial run cut off by hard deadline)
+        AND have no scoring already in flight. A problem already submitted to
+        the scoring pool is left alone here: the caller (progress_reporter's
+        hard-timeout / no-output-file paths) does not guarantee
+        ``pending_count() == 0`` before calling this, and the worker thread
+        writes the real score into ``self._results`` under the same lock the
+        moment it finishes — clobbering a TIMED_OUT/0.0 placeholder we'd
+        already handed to the batch reporter with no further report to
+        correct it.
         """
         with self._lock:
             scored_ids = set(self._results.keys())
 
-        unscored = set(self._id_to_problem.keys()) - scored_ids
+        candidates = set(self._id_to_problem.keys()) - scored_ids
+        unscored = {
+            pid for pid in candidates if not self._scoring_pool.has_future(pid)
+        }
         if not unscored:
             return
 

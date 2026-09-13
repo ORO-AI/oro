@@ -176,3 +176,22 @@ class TestSweepNarrowing:
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
+
+    def test_sweep_skips_problems_with_in_flight_future(self, reporter):
+        # p1 was already submitted to the scoring pool and is still running
+        # (future not done) when the caller's hard-timeout/no-output-file
+        # path calls the sweep without checking pending_count() first.
+        # Marking it TIMED_OUT here would be clobbered moments later when
+        # the worker writes the real score, but only *after* a TIMED_OUT/0.0
+        # has already gone out in a batch report with nothing left to
+        # correct it — so the sweep must leave it alone.
+        from concurrent.futures import Future
+
+        still_running: Future = Future()
+        reporter._scoring_pool.futures[_P1] = still_running
+
+        reporter._envelope_dispatcher.mark_remaining_timed_out()
+
+        assert _P1 not in reporter._results
+        assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
