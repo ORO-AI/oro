@@ -50,6 +50,8 @@ class ExecutionResult:
     problem_id: Optional[str] = None
     inference_failure_count: int = 0
     inference_total: int = 0
+    inference_usage: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    include_private_usage: bool = field(default=False, repr=False)
     proxy_calls: Optional[List[Dict]] = None
     status: SandboxProblemStatus = field(default=SandboxProblemStatus.FAILED)
 
@@ -160,6 +162,26 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
+_INFERENCE_COUNTERS = (
+    "inference_success",
+    "inference_failed",
+    "inference_total",
+    "inference_cost_usd",
+    "inference_cost_missing",
+    "prompt_tokens",
+    "completion_tokens",
+)
+
+
+def _numeric_inference_counters(entry: dict) -> dict[str, int | float]:
+    return {
+        counter: value
+        for counter in _INFERENCE_COUNTERS
+        if isinstance((value := entry.get(counter)), (int, float))
+        and not isinstance(value, bool)
+    }
+
+
 def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
     """Merge latest cumulative counters from one or more isolated files."""
 
@@ -176,24 +198,42 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
                         entry = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if "dialogue" in entry:
+                        nested = entry.get("_shadow_inference_usage")
+                        if not isinstance(nested, dict):
+                            continue
+                        entry = {**nested, "problem_id": entry.get("problem_id")}
                     key = (str(entry.get("problem_id")), source)
                     latest_by_source[key] = entry
         except (FileNotFoundError, OSError):
             pass
     totals: dict[str, dict] = {}
-    counters = (
-        "inference_success",
-        "inference_failed",
-        "inference_total",
-        "inference_cost_usd",
-        "inference_cost_missing",
-        "prompt_tokens",
-        "completion_tokens",
-    )
     for (problem_id, _source), entry in latest_by_source.items():
+        numeric = _numeric_inference_counters(entry)
+        if not numeric:
+            continue
         total = totals.setdefault(problem_id, {"problem_id": problem_id})
-        for counter in counters:
-            total[counter] = total.get(counter, 0) + entry.get(counter, 0)
+        for counter in _INFERENCE_COUNTERS:
+            total[counter] = total.get(counter, 0) + numeric.get(counter, 0)
+    return totals
+
+
+def merge_inference_stats(*sources: dict[str, dict]) -> dict[str, dict]:
+    """Add independent episode counters from trusted or isolated sources."""
+
+    totals: dict[str, dict] = {}
+    for source in sources:
+        for problem_id, entry in source.items():
+            if not isinstance(entry, dict):
+                continue
+            numeric = _numeric_inference_counters(entry)
+            if not numeric:
+                continue
+            total = totals.setdefault(problem_id, {"problem_id": problem_id})
+            for counter, value in numeric.items():
+                total[counter] = total.get(counter, 0) + value
     return totals
 
 
@@ -318,7 +358,10 @@ def execute_single_problem(
             process.kill()
             process.join()
 
-    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+    inference_usage = read_inference_stats(stats_file).get(str(problem_id))
+    include_private_usage = problem.get("category") == "generated_environment"
+    inf_failures = int((inference_usage or {}).get("inference_failed", 0))
+    inf_total = int((inference_usage or {}).get("inference_total", 0))
     proxy_calls = _read_request_log(request_log_file)
 
     if timed_out:
@@ -331,6 +374,8 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            inference_usage=inference_usage,
+            include_private_usage=include_private_usage,
             proxy_calls=proxy_calls or None,
             status=SandboxProblemStatus.TIMED_OUT,
         )
@@ -347,6 +392,8 @@ def execute_single_problem(
                     problem_id=problem_id,
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
+                    inference_usage=inference_usage,
+                    include_private_usage=include_private_usage,
                     proxy_calls=proxy_calls or None,
                     status=SandboxProblemStatus.SUCCESS,
                 )
@@ -366,6 +413,8 @@ def execute_single_problem(
                 problem_id=problem_id,
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
+                inference_usage=inference_usage,
+                include_private_usage=include_private_usage,
                 proxy_calls=proxy_calls or None,
                 status=SandboxProblemStatus.FAILED,
             )
@@ -377,6 +426,8 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            inference_usage=inference_usage,
+            include_private_usage=include_private_usage,
             proxy_calls=proxy_calls or None,
             status=SandboxProblemStatus.FAILED,
         )
@@ -460,7 +511,7 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
                 "message": result.error,
             }
 
-    return {
+    envelope = {
         "problem_id": result.problem_id,
         "status": result.status.value,
         "execution_time": result.execution_time,
@@ -469,6 +520,9 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
         "error": error_obj,
         "dialogue": dialogue,
     }
+    if result.include_private_usage and result.inference_usage is not None:
+        envelope["_shadow_inference_usage"] = result.inference_usage
+    return envelope
 
 
 def execute_problems_parallel(

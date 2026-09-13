@@ -379,7 +379,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
 
 
 @pytest.mark.parametrize(
-    ("inference_stats", "expected_cost"),
+    ("sidecar_stats", "output_stats", "expected_cost"),
     [
         (
             {
@@ -391,13 +391,40 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
                 "prompt_tokens": 10,
                 "completion_tokens": 4,
             },
+            None,
             0.125,
         ),
-        ({"problem_id": "session", "inference_total": "invalid"}, None),
+        ({"problem_id": "session", "inference_total": "invalid"}, None, None),
+        (
+            None,
+            {
+                "problem_id": "session",
+                "inference_total": 3,
+                "inference_failed": 0,
+                "inference_cost_usd": 0.25,
+                "inference_cost_missing": 0,
+                "prompt_tokens": 12,
+                "completion_tokens": 5,
+            },
+            0.25,
+        ),
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 2,
+                "inference_cost_usd": 0.125,
+            },
+            {
+                "problem_id": "session",
+                "inference_total": 3,
+                "inference_cost_usd": 0.25,
+            },
+            0.25,
+        ),
     ],
 )
 def test_generated_runner_noncritical_failures_do_not_change_score(
-    tmp_path, monkeypatch, inference_stats, expected_cost
+    tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost
 ):
     result = {
         "task_id": "public",
@@ -441,7 +468,21 @@ def test_generated_runner_noncritical_failures_do_not_change_score(
         eval_run_id="run",
         agent_version_id="agent",
     )
-    (tmp_path / "inference_stats.jsonl").write_text(json.dumps(inference_stats) + "\n")
+    if sidecar_stats is not None:
+        (tmp_path / "inference_stats.jsonl").write_text(
+            json.dumps(sidecar_stats) + "\n"
+        )
+    if output_stats is not None:
+        (tmp_path / "output.jsonl").write_text(
+            json.dumps(
+                {
+                    "problem_id": "session",
+                    "_shadow_inference_usage": output_stats,
+                    "dialogue": [],
+                }
+            )
+            + "\n"
+        )
 
     completion = validator._run_generated_evaluation(
         work,
@@ -457,9 +498,11 @@ def test_generated_runner_noncritical_failures_do_not_change_score(
     validator.session_runtime.clear.assert_called_once_with(registry)
     assert completion is not None
     assert completion.score == 0.5
+    usage = completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"][
+        "public"
+    ]
     if expected_cost is None:
-        assert "_shadow_resource_usage" not in completion.sandbox_metadata
+        assert usage["inference_cost_status"] == "missing"
+        assert "inference_cost_usd" not in usage
     else:
-        assert completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"][
-            "public"
-        ]["inference_cost_usd"] == expected_cost
+        assert usage["inference_cost_usd"] == expected_cost

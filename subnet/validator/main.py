@@ -24,7 +24,10 @@ from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
-from src.agent.sandbox_executor import read_inference_stats
+from src.agent.sandbox_executor import (
+    merge_inference_stats,
+    read_inference_stats,
+)
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .bounded_io import read_text_lossy, run_capped
@@ -1354,14 +1357,25 @@ class Validator:
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
         try:
+            eval_dir = self._eval_dir(eval_run_id_str)
+            output_stats = read_inference_stats(str(sandbox_output))
+            sidecar_stats = read_inference_stats(
+                str(eval_dir / "inference_stats.jsonl")
+            )
+            # The runner-owned output snapshot survives even when the shared
+            # append-only sidecar is absent at finalization. Prefer it per
+            # episode so the same agent calls are never counted twice.
+            agent_stats = {
+                problem_id: output_stats.get(problem_id, usage)
+                for problem_id, usage in sidecar_stats.items()
+            }
+            agent_stats.update(output_stats)
+            simulator_stats = read_inference_stats(
+                str(self._simulator_inference_stats_file(eval_run_id_str))
+            )
             by_episode = summarize_episode_resource_usage(
                 results,
-                read_inference_stats(
-                    [
-                        str(self._eval_dir(eval_run_id_str) / "inference_stats.jsonl"),
-                        str(self._simulator_inference_stats_file(eval_run_id_str)),
-                    ]
-                ),
+                merge_inference_stats(agent_stats, simulator_stats),
                 inference_provider,
             )
         except Exception:
