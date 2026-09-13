@@ -160,13 +160,10 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
-def _read_inference_stats(path: str, problem_id: str) -> tuple:
-    """Read inference stats for a problem from the shared JSONL file.
+def read_inference_stats(path: str) -> dict[str, dict]:
+    """Read the latest cumulative inference stats for every problem."""
 
-    Multiple problems append to the same file (one line per inference call,
-    cumulative counts). Returns the last matching entry's (failure_count, total).
-    """
-    last_failed, last_total = 0, 0
+    latest = {}
     try:
         with open(path) as f:
             for line in f:
@@ -174,12 +171,17 @@ def _read_inference_stats(path: str, problem_id: str) -> tuple:
                 if not line:
                     continue
                 entry = json.loads(line)
-                if str(entry.get("problem_id")) == str(problem_id):
-                    last_failed = entry.get("inference_failed", 0)
-                    last_total = entry.get("inference_total", 0)
+                latest[str(entry.get("problem_id"))] = entry
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    return last_failed, last_total
+    return latest
+
+
+def _read_inference_stats(path: str, problem_id: str) -> tuple:
+    """Return the latest failure and request counts for one problem."""
+
+    entry = read_inference_stats(path).get(str(problem_id), {})
+    return entry.get("inference_failed", 0), entry.get("inference_total", 0)
 
 
 def _read_request_log(path: str) -> List[Dict]:

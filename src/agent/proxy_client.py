@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -119,11 +120,32 @@ class InferenceStats:
         self._lock = threading.Lock()
         self._success = 0
         self._failed = 0
+        self._cost_usd = 0.0
+        self._cost_missing = 0
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
         self._stats_file = stats_file
 
-    def record_success(self):
+    def record_success(self, usage: Optional[Dict] = None):
         with self._lock:
             self._success += 1
+            cost = usage.get("cost") if isinstance(usage, dict) else None
+            if (
+                isinstance(cost, (int, float))
+                and not isinstance(cost, bool)
+                and cost >= 0
+                and math.isfinite(cost)
+            ):
+                self._cost_usd += cost
+            else:
+                self._cost_missing += 1
+            if isinstance(usage, dict):
+                prompt_tokens = usage.get("prompt_tokens")
+                completion_tokens = usage.get("completion_tokens")
+                if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+                    self._prompt_tokens += max(prompt_tokens, 0)
+                if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
+                    self._completion_tokens += max(completion_tokens, 0)
             self._flush()
 
     def record_failure(self):
@@ -145,6 +167,10 @@ class InferenceStats:
                 "inference_success": self._success,
                 "inference_failed": self._failed,
                 "inference_total": self._success + self._failed,
+                "inference_cost_usd": self._cost_usd,
+                "inference_cost_missing": self._cost_missing,
+                "prompt_tokens": self._prompt_tokens,
+                "completion_tokens": self._completion_tokens,
             }
             with open(self._stats_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
@@ -360,15 +386,16 @@ class ProxyClient:
         response = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
 
-        if "/inference/" in path:
-            if response and response.status_code == 200:
-                self.inference_stats.record_success()
-            else:
-                self.inference_stats.record_failure()
-
         result = None
         if response and response.status_code == 200:
             result = response.json()
+
+        if "/inference/" in path:
+            if result is not None:
+                usage = result.get("usage") if isinstance(result, dict) else None
+                self.inference_stats.record_success(usage)
+            else:
+                self.inference_stats.record_failure()
 
         self.request_log.record(
             method="POST",

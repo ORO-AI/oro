@@ -10,6 +10,7 @@ from validator.generated_evaluation import (
     GENERATED_PROBLEM_SCHEMA,
     aggregate_results,
     select_run_task_roster,
+    summarize_episode_inference_usage,
     validate_run_results,
     write_problem_file,
 )
@@ -63,6 +64,30 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
     )
 
     assert score == 0.25
+
+
+@pytest.mark.parametrize(
+    ("provider", "stats", "expected_status"),
+    [
+        ("openrouter", {"inference_cost_usd": 0.25}, "complete"),
+        (
+            "openrouter",
+            {"inference_cost_usd": 0.25, "inference_cost_missing": 1},
+            "partial",
+        ),
+        ("openrouter", None, "missing"),
+        ("chutes", {"inference_total": 1}, "unsupported"),
+    ],
+)
+def test_episode_inference_usage_status(provider, stats, expected_status) -> None:
+    by_session = {"session": stats} if stats is not None else {}
+
+    usage = summarize_episode_inference_usage(
+        [{"session_id": "session", "task_id": "task"}], by_session, provider
+    )["task"]
+
+    assert usage["inference_cost_status"] == expected_status
+    assert ("inference_cost_usd" in usage) is (stats is not None and provider == "openrouter")
 
 
 @pytest.mark.parametrize("outcome", ["leakage", "exploit"])
@@ -253,6 +278,7 @@ def test_selection_preserves_backend_order_and_allows_selected_race_subset():
 def test_result_identity_cannot_be_replaced_at_matching_cardinality(change):
     result = {
         "task_id": "public",
+        "session_id": "session",
         "family": "right",
         "evaluation_run_id": "run",
         "agent_version_id": "agent",
@@ -287,6 +313,7 @@ def test_wrong_roster_cannot_be_emitted(monkeypatch):
 def test_incremental_result_batch_accepts_only_selected_bound_tasks():
     result = {
         "task_id": "public",
+        "session_id": "session",
         "family": "right",
         "evaluation_run_id": "run",
         "agent_version_id": "agent",
@@ -310,9 +337,30 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
         )
 
 
-def test_generated_runner_flush_failure_does_not_change_score(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("inference_stats", "expected_cost"),
+    [
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 2,
+                "inference_failed": 0,
+                "inference_cost_usd": 0.125,
+                "inference_cost_missing": 0,
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+            },
+            0.125,
+        ),
+        ({"problem_id": "session", "inference_total": "invalid"}, None),
+    ],
+)
+def test_generated_runner_noncritical_failures_do_not_change_score(
+    tmp_path, monkeypatch, inference_stats, expected_cost
+):
     result = {
         "task_id": "public",
+        "session_id": "session",
         "family": "right",
         "evaluation_run_id": "run",
         "agent_version_id": "agent",
@@ -352,6 +400,7 @@ def test_generated_runner_flush_failure_does_not_change_score(tmp_path, monkeypa
         eval_run_id="run",
         agent_version_id="agent",
     )
+    (tmp_path / "inference_stats.jsonl").write_text(json.dumps(inference_stats) + "\n")
 
     completion = validator._run_generated_evaluation(
         work,
@@ -367,3 +416,9 @@ def test_generated_runner_flush_failure_does_not_change_score(tmp_path, monkeypa
     validator.session_runtime.clear.assert_called_once_with(registry)
     assert completion is not None
     assert completion.score == 0.5
+    if expected_cost is None:
+        assert "_shadow_resource_usage" not in completion.sandbox_metadata
+    else:
+        assert completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"][
+            "public"
+        ]["inference_cost_usd"] == expected_cost

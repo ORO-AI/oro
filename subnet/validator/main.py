@@ -24,6 +24,7 @@ from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from src.agent.scoring import blend_final_score
+from src.agent.sandbox_executor import read_inference_stats
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .bounded_io import read_text_lossy, run_capped
@@ -55,6 +56,7 @@ from .generated_evaluation import (
     GENERATED_SCORE_SCHEMA,
     aggregate_results,
     select_run_task_roster,
+    summarize_episode_inference_usage,
     validate_run_results,
     write_problem_file,
 )
@@ -1343,6 +1345,24 @@ class Validator:
         logging.info(
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
+        try:
+            by_episode = summarize_episode_inference_usage(
+                results,
+                read_inference_stats(
+                    str(self._eval_dir(eval_run_id_str) / "inference_stats.jsonl")
+                ),
+                inference_provider,
+            )
+        except Exception:
+            logging.warning(
+                "Unable to collect shadow episode inference usage",
+                exc_info=True,
+            )
+        else:
+            sandbox_metadata = dict(sandbox_metadata)
+            sandbox_metadata["_shadow_resource_usage"] = {
+                "by_episode": by_episode
+            }
         return _EvaluationCompletion(
             score=score,
             score_components={"schema_version": GENERATED_SCORE_SCHEMA},
