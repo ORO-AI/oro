@@ -1,6 +1,7 @@
 """Tests for process-based timeout enforcement in sandbox_executor."""
 
 import json
+import math
 import os
 import tempfile
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from src.agent.sandbox_executor import (
     _read_inference_stats,
     _read_request_log,
+    build_result_envelope,
     execute_single_problem,
     read_inference_stats,
 )
@@ -19,6 +21,7 @@ SLOW = str(FIXTURES / "slow_agent.py")
 CRASH = str(FIXTURES / "crashing_agent.py")
 FROZEN_DC = str(FIXTURES / "frozen_dataclass_agent.py")
 LARGE_RESULT = str(FIXTURES / "large_result_agent.py")
+INFERENCE_STATS = str(FIXTURES / "inference_stats_agent.py")
 
 
 def test_successful_execution():
@@ -75,6 +78,52 @@ def test_frozen_dataclass_with_pep563_annotations():
     )
     assert result.success
     assert result.result["answer"] == "hello-frozen"
+
+
+def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+    result = execute_single_problem(
+        {
+            "query": "test",
+            "problem_id": "episode-1",
+            "category": "generated_environment",
+        },
+        timeout=10.0,
+        agent_file=INFERENCE_STATS,
+    )
+
+    assert result.success
+    usage = read_inference_stats(str(tmp_path / "inference_stats.jsonl"))
+    assert usage["episode-1"] == {
+        "problem_id": "episode-1",
+        "inference_success": 1,
+        "inference_failed": 0,
+        "inference_total": 1,
+        "inference_cost_usd": 0.25,
+        "inference_cost_missing": 0,
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+    }
+    assert result.inference_usage == usage["episode-1"]
+    output = tmp_path / "runner-output.jsonl"
+    envelope = build_result_envelope(result)
+    assert envelope["_shadow_inference_usage"] == usage["episode-1"]
+    envelope["_shadow_inference_usage"] = {
+        **envelope["_shadow_inference_usage"],
+        "problem_id": "spoofed",
+    }
+    output.write_text(json.dumps(envelope) + "\n")
+    assert read_inference_stats(str(output)) == {"episode-1": usage["episode-1"]}
+
+
+def test_legacy_result_envelope_does_not_include_shadow_inference_usage():
+    result = execute_single_problem(
+        {"query": "test", "problem_id": "legacy"},
+        timeout=10.0,
+        agent_file=FAST,
+    )
+
+    assert "_shadow_inference_usage" not in build_result_envelope(result)
 
 
 class TestReadInferenceStats:
@@ -154,6 +203,15 @@ class TestReadInferenceStats:
             assert read_inference_stats(path)["p1"]["inference_total"] == 2
         finally:
             os.unlink(path)
+
+    def test_ignores_snapshot_with_no_valid_counters(self, tmp_path):
+        for index, value in enumerate(("bad", math.nan, math.inf, -1)):
+            path = tmp_path / f"stats-{index}.jsonl"
+            path.write_text(
+                json.dumps({"problem_id": "p1", "inference_total": value})
+            )
+
+            assert read_inference_stats(str(path)) == {}
 
 
 class TestReadRequestLog:
