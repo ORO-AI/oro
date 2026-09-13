@@ -152,11 +152,46 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
     return float(reward_total / Decimal(len(results)))
 
 
+def summarize_episode_inference_usage(
+    results: list[dict[str, Any]],
+    stats_by_session: dict[str, dict],
+    provider: str,
+) -> dict[str, dict]:
+    """Map small proxy-client counters from session IDs to task IDs."""
+
+    episodes = {}
+    for result in results:
+        stats = stats_by_session.get(str(result.get("session_id")))
+        usage = {
+            "inference_requests": int((stats or {}).get("inference_total", 0)),
+            "inference_failed_requests": int(
+                (stats or {}).get("inference_failed", 0)
+            ),
+            "prompt_tokens": int((stats or {}).get("prompt_tokens", 0)),
+            "completion_tokens": int((stats or {}).get("completion_tokens", 0)),
+        }
+        if provider != "openrouter":
+            usage["inference_cost_status"] = "unsupported"
+        elif stats is None:
+            usage["inference_cost_status"] = "missing"
+        else:
+            missing = int(stats.get("inference_cost_missing", 0))
+            usage["inference_cost_status"] = (
+                "complete" if missing == 0 else "partial"
+            )
+            usage["inference_cost_usd"] = float(
+                stats.get("inference_cost_usd", 0)
+            )
+        episodes[str(result["task_id"])] = usage
+    return episodes
+
+
 __all__ = [
     "GENERATED_PROBLEM_SCHEMA",
     "GENERATED_SCORE_SCHEMA",
     "aggregate_results",
     "select_run_task_roster",
+    "summarize_episode_inference_usage",
     "validate_run_results",
     "write_problem_file",
 ]
