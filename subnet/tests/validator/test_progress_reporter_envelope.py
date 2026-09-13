@@ -10,6 +10,7 @@ import pytest
 from oro_sdk.models import ProblemStatus
 
 from validator.progress_reporter import ProgressReporter
+from validator.types import ProblemResult
 
 
 def _write_envelope(path: Path, **fields):
@@ -211,5 +212,47 @@ class TestSweepNarrowing:
         reporter._envelope_dispatcher.mark_remaining_timed_out()
 
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
+
+    def test_sweep_does_not_clobber_score_written_between_snapshot_and_write(
+        self, reporter
+    ):
+        # p1 is genuinely unscored when the sweep captures scored_ids, but a
+        # worker writes its real score and finishes (future.done() becomes
+        # True) right as/after has_pending_future(p1) is evaluated -- which
+        # reports "not pending" (done), same as a resultless terminal future.
+        # Without a final re-check under the lock at write time, the sweep
+        # would overwrite the real score with TIMED_OUT/0.0. It must not.
+        from concurrent.futures import Future
+
+        real_result = ProblemResult(
+            problem_id=_P1,
+            category="product",
+            status=ProblemStatus.SUCCESS,
+            score=1.0,
+        )
+        finished_future: Future = Future()
+        finished_future.set_result(None)
+        reporter._scoring_pool.futures[_P1] = finished_future
+
+        real_has_pending_future = reporter._scoring_pool.has_pending_future
+
+        def racing_has_pending_future(pid):
+            result = real_has_pending_future(pid)
+            if pid == _P1:
+                # Simulate the worker's write landing in the window between
+                # the scored_ids snapshot (already taken, p1 absent) and
+                # this check -- exactly the race the fix must survive.
+                reporter._results[_P1] = real_result
+            return result
+
+        reporter._scoring_pool.has_pending_future = racing_has_pending_future
+
+        reporter._envelope_dispatcher.mark_remaining_timed_out()
+
+        assert reporter._results[_P1] is real_result
+        assert reporter._results[_P1].status == ProblemStatus.SUCCESS
+        assert reporter._results[_P1].score == 1.0
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT

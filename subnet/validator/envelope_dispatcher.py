@@ -134,7 +134,11 @@ class EnvelopeDispatcher:
         writes the real score into ``self._results`` under the same lock the
         moment it finishes — clobbering a TIMED_OUT/0.0 placeholder we'd
         already handed to the batch reporter with no further report to
-        correct it.
+        correct it. As a final safety net against the narrow window between
+        the ``scored_ids`` snapshot above and this method's own write lock
+        (a future can finish — writing its result, then flipping to done —
+        in between), each write below re-checks ``self._results`` under the
+        lock and skips any problem a worker already scored in that window.
         """
         with self._lock:
             scored_ids = set(self._results.keys())
@@ -148,9 +152,20 @@ class EnvelopeDispatcher:
         if not unscored:
             return
 
-        logging.info(f"Marking {len(unscored)} unscored problems as TIMED_OUT")
+        logging.info(f"Marking up to {len(unscored)} unscored problems as TIMED_OUT")
         with self._lock:
+            marked = 0
             for pid in unscored:
+                # Re-check under the lock instead of trusting the earlier
+                # scored_ids snapshot: a future can finish -- writing its
+                # real result via the same lock, then flipping to done --
+                # in the window between that snapshot and has_pending_future()
+                # above. A Future only reports done=True after the callable
+                # (and therefore any self._results write it makes) has
+                # returned, so if a result landed here in that window we are
+                # guaranteed to see it now and must not clobber it.
+                if pid in self._results:
+                    continue
                 self._results[pid] = ProblemResult(
                     problem_id=pid,
                     category=self._id_to_problem[pid]
@@ -159,3 +174,5 @@ class EnvelopeDispatcher:
                     status=ProblemStatus.TIMED_OUT,
                     score=0.0,
                 )
+                marked += 1
+        logging.info(f"Marked {marked} unscored problems as TIMED_OUT")
