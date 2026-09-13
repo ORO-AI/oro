@@ -710,6 +710,37 @@ async def test_http_failure_does_not_log_presigned_url(
 
 
 @_run_async
+async def test_backend_metadata_403_logs_status_and_stage(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pack_sha256 = "a" * 64
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(403, text="edge rejected request")
+    )
+
+    with caplog.at_level("WARNING", logger=env_pack_loader.__name__):
+        async with httpx.AsyncClient(transport=transport) as client:
+            loaded = await fetch_and_validate_pack(
+                pack_sha256,
+                "https://backend.test",
+                object(),
+                scratch_root=tmp_path,
+                http_client=client,
+                backend_transport=transport,
+            )
+
+    assert loaded is None
+    metrics_record = next(
+        record for record in caplog.records if "; metrics=" in record.message
+    )
+    assert "BackendError status=403" in metrics_record.message
+    metrics = json.loads(metrics_record.message.partition("; metrics=")[2])
+    assert metrics["outcome"] == "rejected"
+    assert metrics["stage"] == "backend_metadata"
+
+
+@_run_async
 @pytest.mark.parametrize(
     ("field_name", "bad_value"),
     [

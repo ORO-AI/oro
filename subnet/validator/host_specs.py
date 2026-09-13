@@ -74,18 +74,15 @@ def check_host_min_specs() -> HostSpecs:
     deficits = specs.deficits()
     if deficits:
         logging.warning(
-            "HOST UNDER MIN SPEC: %s. Reference is 8 vCPU / 16 GiB "
+            f"HOST UNDER MIN SPEC: {', '.join(deficits)}. "
+            "Reference is 8 vCPU / 16 GiB "
             "(c7g.2xlarge). Under-spec hosts cause search-server thrashing "
             "and inference stalls, and produce systematically low agent "
-            "scores. Validator will continue starting.",
-            ", ".join(deficits),
+            "scores. Validator will continue starting."
         )
     else:
         logging.info(
-            "Host specs OK: cpus=%d ram_gib=%.1f (min %d / %.0f)",
-            specs.cpus,
-            specs.ram_gib,
-            MIN_CPUS,
-            MIN_RAM_GIB,
+            f"Host specs OK: cpus={specs.cpus} ram_gib={specs.ram_gib:.1f} "
+            f"(min {MIN_CPUS} / {MIN_RAM_GIB:.0f})"
         )
     return specs
