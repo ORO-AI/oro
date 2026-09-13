@@ -75,20 +75,24 @@ def _call_envelope(
 def test_default_simulator_uses_the_miner_funded_proxy(
     loaded_pack: LoadedPack,
     proxy_url: str,
+    tmp_path,
 ) -> None:
+    stats_file = str(tmp_path / "simulator-inference.jsonl")
     with SessionRegistry(
         loaded_pack,
         inference_access_token="miner-token",
+        inference_stats_file=stats_file,
         simulator_proxy_url=proxy_url,
     ) as registry:
         _start(registry)
-        session = registry._sessions["session-1"].session
-        simulator = registry._default_simulator(session)
+        state = registry._sessions["session-1"]
+        simulator = registry._default_simulator(state)
 
-        assert simulator.model == session.model_roles["user_simulator"]
-        assert simulator._completion is registry._simulator_completion
-        assert registry._simulator_completion._client.api_key == "miner-token"
-        assert registry._simulator_completion._client.proxy_url == proxy_url
+        assert simulator.model == state.session.model_roles["user_simulator"]
+        assert simulator._completion._client.api_key == "miner-token"
+        assert simulator._completion._client.proxy_url == proxy_url
+        assert simulator._completion._client.inference_stats._problem_id == "session-1"
+        assert simulator._completion._client.inference_stats._stats_file == stats_file
 
 
 def test_default_simulator_evidence_is_private_and_persisted(
@@ -104,7 +108,9 @@ def test_default_simulator_evidence_is_private_and_persisted(
         # equivalent of the old success shape.
         from src.agent.proxy_client import PostResult
 
-        registry._simulator_completion._client.post_verbose = MagicMock(
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose = MagicMock(
             return_value=PostResult(
                 data={
                     "choices": [
@@ -171,7 +177,9 @@ def test_default_simulator_failure_is_an_environment_error(
         # leak the exception's private message into the ledger. Only the
         # class name is safe to surface — trusted upstream bodies flow
         # through ``InferenceProviderError`` instead (ORO-2191).
-        registry._simulator_completion._client.post_verbose = MagicMock(
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose = MagicMock(
             side_effect=RuntimeError(private_detail)
         )
         with pytest.raises(
@@ -202,10 +210,10 @@ def test_default_simulator_rejects_missing_miner_credentials(
 ) -> None:
     with SessionRegistry(loaded_pack) as registry:
         _start(registry)
-        session = registry._sessions["session-1"].session
+        state = registry._sessions["session-1"]
 
         with pytest.raises(RuntimeError, match="miner inference credentials"):
-            registry._default_simulator(session)
+            registry._default_simulator(state)
 
 
 def test_fresh_sessions_are_isolated_and_hide_private_truth(
