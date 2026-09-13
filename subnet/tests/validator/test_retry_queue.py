@@ -147,6 +147,7 @@ def sample_progress_update():
     return ProblemProgressUpdate(
         problem_id=UUID("87654321-4321-4321-4321-210987654321"),
         status=ProblemStatus.SUCCESS,
+        logs_s3_key="logs/run-123/p-87654321.jsonl.gz",
     )
 
 
@@ -192,6 +193,16 @@ class TestLocalRetryQueueProgress:
         assert queue.get_pending_count() == 0
         mock_backend_client.report_progress.assert_called_once()
 
+        # The value that motivated add_progress()/_process_progress() in the
+        # first place (logs_s3_key) must survive the JSON to_dict/from_dict
+        # round trip intact, not just "some update" being replayed.
+        call_args = mock_backend_client.report_progress.call_args
+        eval_run_id_arg, updates_arg = call_args.args
+        assert eval_run_id_arg == UUID("12345678-1234-1234-1234-123456789012")
+        assert len(updates_arg) == 1
+        assert updates_arg[0].logs_s3_key == sample_progress_update.logs_s3_key
+        assert updates_arg[0].problem_id == sample_progress_update.problem_id
+
     def test_process_pending_keeps_progress_on_transient_failure(
         self, temp_storage_path, mock_backend_client, sample_progress_update
     ):
@@ -209,3 +220,52 @@ class TestLocalRetryQueueProgress:
         queue.process_pending()
 
         assert queue.get_pending_count() == 1
+
+    def test_process_pending_retries_unwrapped_transport_error(
+        self, temp_storage_path, mock_backend_client, sample_progress_update
+    ):
+        # A transport-level error _call_api didn't convert to BackendError
+        # (e.g. a raw ConnectionError) must still be retried, not dropped.
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add_progress(
+            UUID("12345678-1234-1234-1234-123456789012"), sample_progress_update
+        )
+
+        mock_backend_client.report_progress.side_effect = ConnectionError("reset")
+
+        queue.process_pending()
+
+        assert queue.get_pending_count() == 1
+        with open(temp_storage_path) as f:
+            data = json.load(f)
+        assert data["pending"][0]["retry_count"] == 1
+
+    def test_malformed_progress_entry_does_not_abort_other_entries(
+        self, temp_storage_path, mock_backend_client, sample_progress_update
+    ):
+        # A malformed persisted entry (bad UUID) must not raise past
+        # _process_progress and abort process_pending()'s whole loop --
+        # every other pending entry (here, a second, well-formed progress
+        # update) still has to be attempted in the same pass.
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add_progress(
+            UUID("12345678-1234-1234-1234-123456789012"), sample_progress_update
+        )
+        with open(temp_storage_path) as f:
+            data = json.load(f)
+        data["pending"].insert(0, {**data["pending"][0], "eval_run_id": "not-a-uuid"})
+        with open(temp_storage_path, "w") as f:
+            json.dump(data, f)
+
+        mock_backend_client.report_progress.return_value = None
+
+        queue.process_pending()
+
+        # The malformed entry is retried (bounded by max_retries) rather
+        # than crashing the pass; the well-formed one still got processed.
+        mock_backend_client.report_progress.assert_called_once()
+        assert queue.get_pending_count() == 1
+        with open(temp_storage_path) as f:
+            data = json.load(f)
+        assert data["pending"][0]["eval_run_id"] == "not-a-uuid"
+        assert data["pending"][0]["retry_count"] == 1

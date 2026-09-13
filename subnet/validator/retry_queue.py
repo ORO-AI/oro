@@ -164,11 +164,24 @@ class LocalRetryQueue:
             )
 
     def _process_progress(self, entry: dict) -> None:
-        """Process a progress-report retry entry. Raises _TransientRetry on transient error."""
-        eval_run_id = UUID(entry["eval_run_id"])
-        update = ProblemProgressUpdate.from_dict(entry["update"])
+        """Process a progress-report retry entry. Raises _TransientRetry on
+        transient or unexpected error.
 
+        Parsing (UUID / ProblemProgressUpdate.from_dict) happens inside the
+        try so a malformed entry can't raise past this method: process_pending()
+        only catches _TransientRetry, so an uncaught exception here would abort
+        its whole loop and silently strand every other pending completion and
+        progress entry for that pass, not just this one.
+
+        Likewise, an unexpected (non-BackendError) exception — e.g. a
+        transport-level error _call_api didn't wrap into BackendError — is
+        retried rather than dropped, so a bounded number of retries (up to
+        max_retries) gets a chance to succeed instead of permanently losing
+        the update on the first hiccup.
+        """
         try:
+            eval_run_id = UUID(entry["eval_run_id"])
+            update = ProblemProgressUpdate.from_dict(entry["update"])
             self.backend_client.report_progress(eval_run_id, [update])
             logging.info(
                 f"Retry succeeded for progress update {eval_run_id}/{update.problem_id}"
@@ -177,16 +190,18 @@ class LocalRetryQueue:
             if e.is_transient:
                 logging.warning(
                     f"Retry {entry['retry_count'] + 1}/{self.max_retries} failed "
-                    f"for progress update {eval_run_id}/{update.problem_id}: {e}"
+                    f"for progress update {entry.get('eval_run_id')}: {e}"
                 )
                 raise _TransientRetry()
             else:
                 logging.error(
                     f"Non-retryable error for progress update "
-                    f"{eval_run_id}/{update.problem_id}, dropping: {e}"
+                    f"{entry.get('eval_run_id')}, dropping: {e}"
                 )
         except Exception as e:
-            logging.error(
-                f"Unexpected error for progress update "
-                f"{eval_run_id}/{update.problem_id}, dropping: {e}"
+            logging.warning(
+                f"Retry {entry['retry_count'] + 1}/{self.max_retries} failed "
+                f"for progress update {entry.get('eval_run_id')} "
+                f"(unexpected error, will retry): {e}"
             )
+            raise _TransientRetry()
