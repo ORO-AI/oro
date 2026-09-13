@@ -107,9 +107,10 @@ class TestCheckHostMinSpecsLogging:
         mock_log.warning.assert_called_once()
         mock_log.info.assert_not_called()
         args = mock_log.warning.call_args.args
+        assert len(args) == 1
         assert "HOST UNDER MIN SPEC" in args[0]
-        assert "cpus=2" in args[1]
-        assert "ram_gib=3.8" in args[1]
+        assert "cpus=2" in args[0]
+        assert "ram_gib=3.8" in args[0]
 
     def test_info_when_ok(self):
         with patch.object(host_specs, "logging") as mock_log, patch.object(
@@ -119,7 +120,9 @@ class TestCheckHostMinSpecsLogging:
         mock_log.info.assert_called_once()
         mock_log.warning.assert_not_called()
         args = mock_log.info.call_args.args
+        assert len(args) == 1
         assert "Host specs OK" in args[0]
+        assert "cpus=8 ram_gib=16.0 (min 6 / 12)" in args[0]
 
     def test_returns_specs_regardless(self):
         with patch.object(host_specs, "read_host_specs", return_value=HostSpecs(cpus=2, ram_gib=3.8)):
