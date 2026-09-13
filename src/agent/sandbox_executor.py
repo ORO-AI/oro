@@ -172,10 +172,13 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
                     line = line.strip()
                     if not line:
                         continue
-                    entry = json.loads(line)
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
                     key = (str(entry.get("problem_id")), source)
                     latest_by_source[key] = entry
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except (FileNotFoundError, OSError):
             pass
     totals: dict[str, dict] = {}
     counters = (

@@ -145,6 +145,16 @@ class TestReadInferenceStats:
             for path in paths:
                 os.unlink(path)
 
+    def test_malformed_line_does_not_hide_later_snapshot(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write('{"problem_id":"p1"\n')
+            f.write(json.dumps({"problem_id": "p1", "inference_total": 2}) + "\n")
+            path = f.name
+        try:
+            assert read_inference_stats(path)["p1"]["inference_total"] == 2
+        finally:
+            os.unlink(path)
+
 
 class TestReadRequestLog:
     def test_reads_all_entries(self):
