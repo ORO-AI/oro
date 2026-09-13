@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import queue
@@ -179,6 +180,8 @@ def _numeric_inference_counters(entry: dict) -> dict[str, int | float]:
         for counter in _INFERENCE_COUNTERS
         if isinstance((value := entry.get(counter)), (int, float))
         and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
     }
 
 

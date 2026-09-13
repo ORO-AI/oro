@@ -1,6 +1,7 @@
 """Tests for process-based timeout enforcement in sandbox_executor."""
 
 import json
+import math
 import os
 import tempfile
 import time
@@ -203,11 +204,14 @@ class TestReadInferenceStats:
         finally:
             os.unlink(path)
 
-    def test_ignores_snapshot_with_no_numeric_counters(self, tmp_path):
-        path = tmp_path / "stats.jsonl"
-        path.write_text(json.dumps({"problem_id": "p1", "inference_total": "bad"}))
+    def test_ignores_snapshot_with_no_valid_counters(self, tmp_path):
+        for index, value in enumerate(("bad", math.nan, math.inf, -1)):
+            path = tmp_path / f"stats-{index}.jsonl"
+            path.write_text(
+                json.dumps({"problem_id": "p1", "inference_total": value})
+            )
 
-        assert read_inference_stats(str(path)) == {}
+            assert read_inference_stats(str(path)) == {}
 
 
 class TestReadRequestLog:
