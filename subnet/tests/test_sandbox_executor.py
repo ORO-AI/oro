@@ -6,7 +6,12 @@ import tempfile
 import time
 from pathlib import Path
 
-from src.agent.sandbox_executor import execute_single_problem, _read_inference_stats, _read_request_log
+from src.agent.sandbox_executor import (
+    _read_inference_stats,
+    _read_request_log,
+    execute_single_problem,
+    read_inference_stats,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FAST = str(FIXTURES / "fast_agent.py")
@@ -100,6 +105,55 @@ class TestReadInferenceStats:
         failures, total = _read_inference_stats("/tmp/nonexistent.jsonl", "p1")
         assert failures == 0
         assert total == 0
+
+    def test_merges_latest_cumulative_stats_from_each_source(self):
+        agent_entries = [
+            {
+                "problem_id": "p1",
+                "inference_total": 1,
+                "inference_cost_usd": 0.1,
+            },
+            {
+                "problem_id": "p1",
+                "inference_total": 3,
+                "inference_cost_usd": 0.3,
+            },
+        ]
+        simulator_entry = {
+            "problem_id": "p1",
+            "inference_total": 2,
+            "inference_cost_usd": 0.2,
+        }
+        with (
+            tempfile.NamedTemporaryFile(
+                suffix=".jsonl", delete=False, mode="w"
+            ) as agent_file,
+            tempfile.NamedTemporaryFile(
+                suffix=".jsonl", delete=False, mode="w"
+            ) as simulator_file,
+        ):
+            for entry in agent_entries:
+                agent_file.write(json.dumps(entry) + "\n")
+            simulator_file.write(json.dumps(simulator_entry) + "\n")
+            paths = [agent_file.name, simulator_file.name]
+        try:
+            usage = read_inference_stats(paths)["p1"]
+            assert usage["inference_failed"] == 0
+            assert usage["inference_total"] == 5
+            assert usage["inference_cost_usd"] == 0.5
+        finally:
+            for path in paths:
+                os.unlink(path)
+
+    def test_malformed_line_does_not_hide_later_snapshot(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write('{"problem_id":"p1"\n')
+            f.write(json.dumps({"problem_id": "p1", "inference_total": 2}) + "\n")
+            path = f.name
+        try:
+            assert read_inference_stats(path)["p1"]["inference_total"] == 2
+        finally:
+            os.unlink(path)
 
 
 class TestReadRequestLog:

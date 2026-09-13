@@ -152,12 +152,33 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
     return float(reward_total / Decimal(len(results)))
 
 
-def summarize_episode_inference_usage(
+def _operation_counts(result: dict[str, Any]) -> Counter[str]:
+    """Count validator-observed logical operations without copying trace data."""
+
+    counts: Counter[str] = Counter()
+    traces = result.get("call_trace")
+    if not isinstance(traces, list):
+        return counts
+    for trace in traces:
+        request = trace.get("request") if isinstance(trace, dict) else None
+        if not isinstance(request, dict):
+            continue
+        grouped_calls = request.get("calls")
+        calls = grouped_calls if isinstance(grouped_calls, list) else [request]
+        for call in calls:
+            action = call.get("action") if isinstance(call, dict) else None
+            name = action.get("name") if isinstance(action, dict) else None
+            if isinstance(name, str) and name:
+                counts[f"environment.{name}"] += 1
+    return counts
+
+
+def summarize_episode_resource_usage(
     results: list[dict[str, Any]],
     stats_by_session: dict[str, dict],
     provider: str,
 ) -> dict[str, dict]:
-    """Map small proxy-client counters from session IDs to task IDs."""
+    """Map private inference and logical-operation counters to task IDs."""
 
     episodes = {}
     for result in results:
@@ -170,6 +191,9 @@ def summarize_episode_inference_usage(
             "prompt_tokens": int((stats or {}).get("prompt_tokens", 0)),
             "completion_tokens": int((stats or {}).get("completion_tokens", 0)),
         }
+        operation_counts = _operation_counts(result)
+        usage["operation_requests"] = sum(operation_counts.values())
+        usage["operations"] = dict(sorted(operation_counts.items()))
         if provider != "openrouter":
             usage["inference_cost_status"] = "unsupported"
         elif stats is None:
@@ -191,7 +215,7 @@ __all__ = [
     "GENERATED_SCORE_SCHEMA",
     "aggregate_results",
     "select_run_task_roster",
-    "summarize_episode_inference_usage",
+    "summarize_episode_resource_usage",
     "validate_run_results",
     "write_problem_file",
 ]

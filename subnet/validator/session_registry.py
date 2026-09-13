@@ -98,6 +98,7 @@ class _CachedResponse:
 
 @dataclass
 class _SessionState:
+    session_id: str
     evaluation_run_id: str
     agent_version_id: str
     task_id: str
@@ -135,6 +136,7 @@ class SessionRegistry:
         max_calls_per_turn: int = MAX_CALLS_PER_TURN,
         max_workers: int = 8,
         inference_access_token: str | None = None,
+        inference_stats_file: str | None = None,
         simulator_proxy_url: str = "http://proxy:80",
         simulator_factory: Callable[[TaskSession], Any] | None = None,
     ) -> None:
@@ -151,23 +153,28 @@ class SessionRegistry:
         self.tool_timeout_s = float(tool_timeout_s)
         self.simulator_timeout_s = float(simulator_timeout_s)
         self.max_calls_per_turn = int(max_calls_per_turn)
-        self._simulator_completion = (
-            SimulatorCompletion(inference_access_token, proxy_url=simulator_proxy_url)
-            if inference_access_token
-            else None
-        )
-        self._simulator_factory = simulator_factory or self._default_simulator
+        self._inference_access_token = inference_access_token
+        self._inference_stats_file = inference_stats_file
+        self._simulator_proxy_url = simulator_proxy_url
+        self._simulator_factory = simulator_factory
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self._sessions: dict[str, _SessionState] = {}
         self._lock = threading.Lock()
         self._closed = False
         self._finalized = False
 
-    def _default_simulator(self, session: TaskSession) -> UserSim:
-        if self._simulator_completion is None:
+    def _default_simulator(self, state: _SessionState) -> UserSim:
+        if self._inference_access_token is None:
             raise RuntimeError(
                 "miner inference credentials are required for user simulation"
             )
+        completion = SimulatorCompletion(
+            self._inference_access_token,
+            proxy_url=self._simulator_proxy_url,
+            inference_stats_file=self._inference_stats_file,
+            episode_id=state.session_id,
+        )
+        session = state.session
         family = get_family(session.task.family)
         return UserSim(
             session.task,
@@ -175,7 +182,7 @@ class SessionRegistry:
             surface_events=not session.state_blind,
             sim_context=family.user_sim_context(session.task),
             allow_pushback=family.user_sim_allow_pushback(session.task),
-            completion=self._simulator_completion,
+            completion=completion,
         )
 
     def _simulator_response(
@@ -185,7 +192,11 @@ class SessionRegistry:
         intervention_index: int | None = None,
     ) -> dict[str, Any]:
         if state.simulator is None:
-            state.simulator = self._simulator_factory(state.session)
+            state.simulator = (
+                self._simulator_factory(state.session)
+                if self._simulator_factory is not None
+                else self._default_simulator(state)
+            )
         if intervention_index is not None:
             return state.simulator.ensure_intervention(
                 state.session.task.interventions[intervention_index],
@@ -287,6 +298,7 @@ class SessionRegistry:
                 ),
             }
             state = _SessionState(
+                session_id=session_id,
                 evaluation_run_id=evaluation_run_id,
                 agent_version_id=agent_version_id,
                 task_id=task_id,

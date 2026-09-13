@@ -116,7 +116,12 @@ class InferenceStats:
     available even if the process is killed (e.g., Docker timeout).
     """
 
-    def __init__(self, stats_file: str | None = None):
+    def __init__(
+        self,
+        stats_file: str | None = None,
+        *,
+        problem_id: str | None = None,
+    ):
         self._lock = threading.Lock()
         self._success = 0
         self._failed = 0
@@ -125,6 +130,7 @@ class InferenceStats:
         self._prompt_tokens = 0
         self._completion_tokens = 0
         self._stats_file = stats_file
+        self._problem_id = problem_id
 
     def record_success(self, usage: Optional[Dict] = None):
         with self._lock:
@@ -159,9 +165,11 @@ class InferenceStats:
             logger.debug("InferenceStats: no stats file configured, skipping flush")
             return
         try:
-            problem_data = os.environ.get("PROBLEM_DATA", "{}")
-            problem = json.loads(problem_data)
-            problem_id = problem.get("problem_id") or problem.get("id", "unknown")
+            problem_id = self._problem_id
+            if problem_id is None:
+                problem_data = os.environ.get("PROBLEM_DATA", "{}")
+                problem = json.loads(problem_data)
+                problem_id = problem.get("problem_id") or problem.get("id", "unknown")
             entry = {
                 "problem_id": str(problem_id),
                 "inference_success": self._success,
@@ -211,6 +219,8 @@ class ProxyClient:
         retry_delay: float = DEFAULT_RETRY_DELAY,
         rate_limit_retry_delay: float = DEFAULT_RATE_LIMIT_RETRY_DELAY,
         api_key: Optional[str] = None,
+        inference_stats_file: str | None = None,
+        inference_stats_problem_id: str | None = None,
     ):
         """
         Initialize the proxy client.
@@ -224,6 +234,9 @@ class ProxyClient:
                 attempt). Longer than retry_delay since rate limits need more time to clear.
             api_key: API key for inference requests (defaults to INFERENCE_ACCESS_TOKEN env var).
                 When set, inference POST requests include an Authorization header.
+            inference_stats_file: Optional explicit destination for inference counters.
+            inference_stats_problem_id: Optional fixed episode identifier. When omitted,
+                the sandbox problem identifier is read from PROBLEM_DATA.
         """
         self.proxy_url = proxy_url or os.getenv("SANDBOX_PROXY_URL", "http://proxy:80")
         self.timeout = timeout
@@ -231,10 +244,13 @@ class ProxyClient:
         self.retry_delay = retry_delay
         self.rate_limit_retry_delay = rate_limit_retry_delay
         self.api_key = api_key or os.getenv("INFERENCE_ACCESS_TOKEN")
-        stats_file = os.environ.get(
+        stats_file = inference_stats_file or os.environ.get(
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
-        self.inference_stats = InferenceStats(stats_file)
+        self.inference_stats = InferenceStats(
+            stats_file,
+            problem_id=inference_stats_problem_id,
+        )
         request_log_file = os.environ.get("REQUEST_LOG_FILE")
         self.request_log = RequestLog(request_log_file)
 
@@ -390,12 +406,7 @@ class ProxyClient:
         if response and response.status_code == 200:
             result = response.json()
 
-        if "/inference/" in path:
-            if result is not None:
-                usage = result.get("usage") if isinstance(result, dict) else None
-                self.inference_stats.record_success(usage)
-            else:
-                self.inference_stats.record_failure()
+        self._record_inference_result(path, result)
 
         self.request_log.record(
             method="POST",
@@ -438,15 +449,10 @@ class ProxyClient:
         response = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
 
-        if "/inference/" in path:
-            if response and response.status_code == 200:
-                self.inference_stats.record_success()
-            else:
-                self.inference_stats.record_failure()
-
         data: Optional[Dict] = None
         if response is not None and response.status_code == 200:
             data = response.json()
+        self._record_inference_result(path, data)
 
         error: Optional[Dict[str, Any]] = None
         if data is None:
@@ -461,6 +467,16 @@ class ProxyClient:
             duration_ms=duration_ms,
         )
         return PostResult(data=data, error=error)
+
+    def _record_inference_result(self, path: str, result: object) -> None:
+        """Record one final inference outcome for either POST interface."""
+        if "/inference/" not in path:
+            return
+        if result is None:
+            self.inference_stats.record_failure()
+            return
+        usage = result.get("usage") if isinstance(result, dict) else None
+        self.inference_stats.record_success(usage)
 
     @staticmethod
     def _describe_error(response: Optional[requests.Response]) -> Dict[str, Any]:

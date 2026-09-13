@@ -10,7 +10,7 @@ from validator.generated_evaluation import (
     GENERATED_PROBLEM_SCHEMA,
     aggregate_results,
     select_run_task_roster,
-    summarize_episode_inference_usage,
+    summarize_episode_resource_usage,
     validate_run_results,
     write_problem_file,
 )
@@ -82,12 +82,53 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
 def test_episode_inference_usage_status(provider, stats, expected_status) -> None:
     by_session = {"session": stats} if stats is not None else {}
 
-    usage = summarize_episode_inference_usage(
+    usage = summarize_episode_resource_usage(
         [{"session_id": "session", "task_id": "task"}], by_session, provider
     )["task"]
 
     assert usage["inference_cost_status"] == expected_status
     assert ("inference_cost_usd" in usage) is (stats is not None and provider == "openrouter")
+
+
+def test_episode_resource_usage_counts_single_and_grouped_operations() -> None:
+    result = {
+        "session_id": "session",
+        "task_id": "task",
+        "call_trace": [
+            {"request": {"action": {"name": "search", "args": {}}}},
+            {
+                "request": {
+                    "calls": [
+                        {"action": {"name": "view", "args": {}}},
+                        {"action": {"name": "search", "args": {}}},
+                    ]
+                }
+            },
+        ],
+    }
+
+    usage = summarize_episode_resource_usage([result], {}, "openrouter")["task"]
+
+    assert usage["operation_requests"] == 3
+    assert usage["operations"] == {
+        "environment.search": 2,
+        "environment.view": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "call_trace",
+    [None, {}, [None, {}, {"request": None}, {"request": {"calls": [None]}}]],
+)
+def test_episode_resource_usage_ignores_malformed_trace_entries(call_trace) -> None:
+    usage = summarize_episode_resource_usage(
+        [{"session_id": "session", "task_id": "task", "call_trace": call_trace}],
+        {},
+        "openrouter",
+    )["task"]
+
+    assert usage["operation_requests"] == 0
+    assert usage["operations"] == {}
 
 
 @pytest.mark.parametrize("outcome", ["leakage", "exploit"])

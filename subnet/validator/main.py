@@ -56,7 +56,7 @@ from .generated_evaluation import (
     GENERATED_SCORE_SCHEMA,
     aggregate_results,
     select_run_task_roster,
-    summarize_episode_inference_usage,
+    summarize_episode_resource_usage,
     validate_run_results,
     write_problem_file,
 )
@@ -452,6 +452,11 @@ class Validator:
         # Sandbox runs as --user 1000:1000, ensure it can write to this directory
         os.chmod(d, 0o777)
         return d
+
+    @staticmethod
+    def _simulator_inference_stats_file(eval_run_id_str: str) -> Path:
+        """Validator-private counters; the sandbox cannot modify this file."""
+        return Path("/tmp") / f"oro-simulator-inference-{eval_run_id_str}.jsonl"
 
     def download_agent(self, url: str, eval_run_id: str) -> Optional[Path]:
         """Download agent file from URL to per-evaluation directory.
@@ -1071,6 +1076,9 @@ class Validator:
                 simulator_timeout_s=self.config.session_simulator_timeout,
                 max_workers=self.config.sandbox_max_workers,
                 inference_access_token=inference_access_token,
+                inference_stats_file=str(
+                    self._simulator_inference_stats_file(str(work.eval_run_id))
+                ),
             )
             sessions = [
                 registry.start(
@@ -1346,10 +1354,13 @@ class Validator:
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
         try:
-            by_episode = summarize_episode_inference_usage(
+            by_episode = summarize_episode_resource_usage(
                 results,
                 read_inference_stats(
-                    str(self._eval_dir(eval_run_id_str) / "inference_stats.jsonl")
+                    [
+                        str(self._eval_dir(eval_run_id_str) / "inference_stats.jsonl"),
+                        str(self._simulator_inference_stats_file(eval_run_id_str)),
+                    ]
                 ),
                 inference_provider,
             )
@@ -1583,6 +1594,12 @@ class Validator:
                     shutil.rmtree(eval_dir)
                 except OSError as e:
                     logging.debug(f"Cleanup failed for {eval_dir}: {e}")
+            try:
+                self._simulator_inference_stats_file(eval_run_id_str).unlink(
+                    missing_ok=True
+                )
+            except OSError as e:
+                logging.debug(f"Simulator stats cleanup failed: {e}")
 
     def _upload_logs(
         self,

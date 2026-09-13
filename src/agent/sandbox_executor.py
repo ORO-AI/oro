@@ -160,21 +160,41 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
-def read_inference_stats(path: str) -> dict[str, dict]:
-    """Read the latest cumulative inference stats for every problem."""
+def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
+    """Merge latest cumulative counters from one or more isolated files."""
 
-    latest = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                latest[str(entry.get("problem_id"))] = entry
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return latest
+    latest_by_source = {}
+    paths = [path] if isinstance(path, str) else path
+    for source, stats_path in enumerate(paths):
+        try:
+            with open(stats_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    key = (str(entry.get("problem_id")), source)
+                    latest_by_source[key] = entry
+        except (FileNotFoundError, OSError):
+            pass
+    totals: dict[str, dict] = {}
+    counters = (
+        "inference_success",
+        "inference_failed",
+        "inference_total",
+        "inference_cost_usd",
+        "inference_cost_missing",
+        "prompt_tokens",
+        "completion_tokens",
+    )
+    for (problem_id, _source), entry in latest_by_source.items():
+        total = totals.setdefault(problem_id, {"problem_id": problem_id})
+        for counter in counters:
+            total[counter] = total.get(counter, 0) + entry.get(counter, 0)
+    return totals
 
 
 def _read_inference_stats(path: str, problem_id: str) -> tuple:

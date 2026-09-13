@@ -62,6 +62,8 @@ class SimulatorCompletion:
         proxy_url: str = "http://proxy:80",
         timeout_s: int = 55,
         client: ProxyClient | None = None,
+        inference_stats_file: str | None = None,
+        episode_id: str | None = None,
     ) -> None:
         if not access_token:
             raise ValueError("miner inference access token is required")
@@ -70,6 +72,8 @@ class SimulatorCompletion:
             api_key=access_token,
             timeout=timeout_s,
             max_retries=1,
+            inference_stats_file=inference_stats_file,
+            inference_stats_problem_id=episode_id,
         )
 
     async def __call__(

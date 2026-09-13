@@ -181,6 +181,30 @@ def test_post_verbose_returns_data_and_no_error_on_2xx(client):
     assert result.error is None
 
 
+@pytest.mark.parametrize("method_name", ["post", "post_verbose"])
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"cost": 0.125, "prompt_tokens": 10, "completion_tokens": 4},
+        None,
+    ],
+)
+def test_inference_post_interfaces_record_response_usage(client, method_name, usage):
+    payload = {"choices": [], "usage": usage} if usage is not None else {"choices": []}
+    client.inference_stats = MagicMock()
+
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        return_value=_ok_response(payload),
+    ):
+        getattr(client, method_name)(
+            "/inference/chat/completions", json_data={"messages": []}
+        )
+
+    client.inference_stats.record_success.assert_called_once_with(usage)
+    client.inference_stats.record_failure.assert_not_called()
+
+
 def test_post_verbose_distinguishes_network_from_upstream(client):
     """A network exception (no HTTP response at all) yields
     ``kind="network", status=None`` so callers can distinguish "provider

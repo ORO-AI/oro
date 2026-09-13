@@ -130,6 +130,23 @@ class TestInferenceStats:
         finally:
             os.unlink(path)
 
+    def test_explicit_problem_overrides_process_environment(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            path = f.name
+        try:
+            with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "wrong"}'}):
+                stats = InferenceStats(
+                    stats_file=path,
+                    problem_id="session-1",
+                )
+                stats.record_success({"cost": 0.1})
+
+            with open(path) as f:
+                entry = json.loads(f.readline())
+            assert entry["problem_id"] == "session-1"
+        finally:
+            os.unlink(path)
+
 
 class TestRequestLog:
     """Tests for proxy call request logging."""
