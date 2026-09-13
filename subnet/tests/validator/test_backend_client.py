@@ -411,6 +411,31 @@ class TestBackendClientUploadToS3:
 
 
 class TestBackendClientErrorHandling:
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+    def test_transient_http_status_uses_sdk_classification(self, status):
+        from oro_sdk import is_transient_status
+
+        error = BackendError("temporary failure", status_code=status)
+        assert error.is_transient == is_transient_status(status)
+        assert error.is_transient
+
+    @pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+    def test_permanent_http_status_is_not_retried(self, status):
+        assert not BackendError("rejected", status_code=status).is_transient
+
+    def test_rate_limited_completion_is_transient(self, mock_wallet):
+        from oro_sdk.models.terminal_status import TerminalStatus
+
+        client = BackendClient("https://api.example.com", mock_wallet)
+        with patch(
+            "validator.backend_client.complete_run.sync_detailed",
+            return_value=_create_response(429),
+        ):
+            with pytest.raises(BackendError) as exc_info:
+                client.complete_run(UUID(int=1), TerminalStatus.FAILED, failure_reason="test")
+        assert exc_info.value.status_code == 429
+        assert exc_info.value.is_transient
+
     def test_server_error_is_transient(self, mock_wallet):
         """500 errors are transient and should be retried."""
         client = BackendClient("https://api.example.com", mock_wallet)
