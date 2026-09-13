@@ -68,7 +68,9 @@ class TestInferenceStats:
         try:
             with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-1"}'}):
                 stats = InferenceStats(stats_file=path)
-                stats.record_success()
+                stats.record_success(
+                    {"cost": 0.25, "prompt_tokens": 10, "completion_tokens": 4}
+                )
                 stats.record_failure()
                 stats.record_success()
 
@@ -83,6 +85,10 @@ class TestInferenceStats:
                 "inference_success": 2,
                 "inference_failed": 1,
                 "inference_total": 3,
+                "inference_cost_usd": 0.25,
+                "inference_cost_missing": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
             }
         finally:
             os.unlink(path)
