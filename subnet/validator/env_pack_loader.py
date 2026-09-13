@@ -23,9 +23,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
+from uuid import UUID
 
 import httpx
-from bittensor_auth import generate_auth_headers
+from oro_sdk.api.validator import get_pack, get_race_pack
+from oro_sdk.models.pack_fetch_response import PackFetchResponse
+from oro_sdk.models.race_pack_fetch_response import RacePackFetchResponse
+
+from .backend_client import BackendError
+from .env_backend import call_environment_api, environment_client
 
 from oro_env_runtime.contracts import (
     ENV_CONTRACT_VERSION,
@@ -575,14 +581,14 @@ async def fetch_and_validate_pack(
     scratch_root: str | Path | None = None,
     timeout: float = 60.0,
     http_client: httpx.AsyncClient | None = None,
+    backend_transport: httpx.AsyncBaseTransport | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> LoadedPack | None:
     """Fetch, validate, and load a sealed pack, returning ``None`` on rejection.
 
-    A supplied ``http_client`` remains caller-owned. The default client carries
-    no persistent auth headers: only the Backend metadata request receives a
-    fresh SR25519 header set, so those credentials cannot leak to the presigned
-    object-store URL.
+    A supplied ``http_client`` remains caller-owned and is used only for
+    unsigned object-store downloads. Backend metadata uses a separate signed
+    SDK client. ``backend_transport`` allows caller-owned test transports.
     """
 
     if not isinstance(pack_sha256, str) or not _SHA256_RE.fullmatch(pack_sha256):
@@ -599,12 +605,15 @@ async def fetch_and_validate_pack(
     client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(timeout))
     try:
         with _record_timing(timings, current_stage):
-            auth_headers = generate_auth_headers(validator_keypair)
-            auth_headers["Accept-Encoding"] = "identity"
-            fetch_url = f"{backend_url.rstrip('/')}/v1/validator/pack/{pack_sha256}"
-            response = await client.get(fetch_url, headers=auth_headers)
-            response.raise_for_status()
-            metadata = _require_metadata(response.json(), pack_sha256)
+            async with environment_client(
+                backend_url, validator_keypair, timeout=timeout, transport=backend_transport
+            ) as backend:
+                response = await call_environment_api(
+                    get_pack.asyncio_detailed, PackFetchResponse,
+                    operation="pack fetch", client=backend, pack_sha256=pack_sha256,
+                )
+            # Validate the delivered wire fields, not SDK-filled defaults.
+            metadata = _require_metadata(json.loads(response.content), pack_sha256)
 
         scratch_parent = None if scratch_root is None else Path(scratch_root)
         if scratch_parent is not None:
@@ -676,9 +685,11 @@ async def fetch_and_validate_pack(
             metadata=metadata,
             _scratch_dir=scratch_dir,
         )
-    except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError) as exc:
+    except (BackendError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError) as exc:
         if isinstance(exc, httpx.HTTPStatusError):
             error = f"HTTPStatusError status={exc.response.status_code}"
+        elif isinstance(exc, BackendError):
+            error = f"BackendError status={exc.status_code}"
         elif isinstance(exc, PackCompatibilityError):
             error = f"PackValidationError: {exc}"
         else:
@@ -718,6 +729,7 @@ async def fetch_and_validate_race_pack(
     scratch_root: str | Path | None = None,
     timeout: float = 60.0,
     http_client: httpx.AsyncClient | None = None,
+    backend_transport: httpx.AsyncBaseTransport | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> LoadedPack | None:
     """Fetch, validate, and extract the race-scoped sub-archive.
@@ -750,12 +762,14 @@ async def fetch_and_validate_race_pack(
     client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(timeout))
     try:
         with _record_timing(timings, current_stage):
-            auth_headers = generate_auth_headers(validator_keypair)
-            auth_headers["Accept-Encoding"] = "identity"
-            fetch_url = f"{backend_url.rstrip('/')}/v1/validator/race/{race_id}/pack"
-            response = await client.post(fetch_url, headers=auth_headers)
-            response.raise_for_status()
-            metadata = _require_race_metadata(response.json(), race_id, pack_sha256)
+            async with environment_client(
+                backend_url, validator_keypair, timeout=timeout, transport=backend_transport
+            ) as backend:
+                response = await call_environment_api(
+                    get_race_pack.asyncio_detailed, RacePackFetchResponse,
+                    operation="assigned pack fetch", client=backend, race_id=UUID(race_id),
+                )
+            metadata = _require_race_metadata(json.loads(response.content), race_id, pack_sha256)
 
         scratch_parent = None if scratch_root is None else Path(scratch_root)
         if scratch_parent is not None:
@@ -830,9 +844,11 @@ async def fetch_and_validate_race_pack(
             metadata=metadata,
             _scratch_dir=scratch_dir,
         )
-    except (httpx.HTTPError, OSError, ValueError, TypeError, KeyError) as exc:
+    except (BackendError, httpx.HTTPError, OSError, ValueError, TypeError, KeyError) as exc:
         if isinstance(exc, httpx.HTTPStatusError):
             error = f"HTTPStatusError status={exc.response.status_code}"
+        elif isinstance(exc, BackendError):
+            error = f"BackendError status={exc.status_code}"
         elif isinstance(exc, PackCompatibilityError):
             # Now reachable: _require_race_metadata validates PACK_VERSION_IDENTITIES.
             error = f"PackValidationError: {exc}"

@@ -13,10 +13,8 @@ The emitter is intentionally **standalone**:
 - Takes the dict output of ``SessionRegistry.finalized_results()``
   rather than importing the registry — session termination wiring
   belongs to the orchestration layer, not the transport layer.
-- No dependency on any oro-sdk types (the episode-results endpoint is
-  ``include_in_schema=False`` on Backend, so nothing is generated in
-  the SDK for it). Auth follows the same ``bittensor_auth`` +
-  ``httpx`` pattern as ``env_pack_loader``.
+- Uses the published SDK for Backend request/response models and signing.
+  Content-addressed object-store uploads use a separate unsigned client.
 
 Payload shape must match ``EpisodeResultEntry`` in
 ``ORO-AI/Backend:app/models/schemas/env_pack.py``. See constants below
@@ -36,9 +34,18 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
-from bittensor_auth import generate_auth_headers
+from oro_sdk import Client
+from oro_sdk.api.validator import presign_episode_artifact, submit_episode_results
+from oro_sdk.models.episode_artifact_presign_request import EpisodeArtifactPresignRequest
+from oro_sdk.models.episode_artifact_presign_response import EpisodeArtifactPresignResponse
+from oro_sdk.models.submit_episode_results_request import SubmitEpisodeResultsRequest
+from oro_sdk.models.submit_episode_results_response import SubmitEpisodeResultsResponse
+from oro_sdk.retry import compute_delay, parse_retry_after
 from oro_env_runtime.schema import LedgerEntry, TaskSpec, VerifierResult
 from oro_env_runtime.verify import verify
+
+from .backend_client import BackendError
+from .env_backend import call_environment_api, environment_client
 
 EPISODE_ARTIFACT_SCHEMA_VERSION = "oro.environment_episode.v1"
 _REQUEST_ATTEMPTS = 3
@@ -62,17 +69,14 @@ async def _request(
     url: str,
     *,
     operation: str,
-    validator_keypair: Any | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
-    """Send one request, retrying only transport, rate-limit, and 5xx failures."""
+    """Retry an unsigned object-store upload; never attach Backend credentials."""
 
     for attempt in range(_REQUEST_ATTEMPTS):
-        request_kwargs = dict(kwargs)
-        if validator_keypair is not None:
-            request_kwargs["headers"] = generate_auth_headers(validator_keypair)
+        retry_after = None
         try:
-            response = await client.request(method, url, **request_kwargs)
+            response = await client.request(method, url, **kwargs)
         except httpx.HTTPError as exc:
             if attempt == _REQUEST_ATTEMPTS - 1:
                 raise EpisodeEmitError(
@@ -83,14 +87,14 @@ async def _request(
                 return response
             if response.status_code != 429 and response.status_code < 500:
                 raise EpisodeEmitError(
-                    f"{operation} rejected status={response.status_code} "
-                    f"body={response.text[:200]}"
+                    f"{operation} rejected status={response.status_code}"
                 )
             if attempt == _REQUEST_ATTEMPTS - 1:
                 raise EpisodeEmitError(
                     f"{operation} transient failure status={response.status_code}"
                 )
-        await asyncio.sleep(min(2**attempt, 4))
+            retry_after = parse_retry_after(response)
+        await asyncio.sleep(compute_delay(attempt, 1.0, 60.0, False, retry_after))
 
     raise AssertionError("request retry loop exhausted unexpectedly")
 
@@ -256,8 +260,7 @@ def build_episode_payload(
 async def upload_episode_artifact(
     client: httpx.AsyncClient,
     *,
-    backend_url: str,
-    validator_keypair: Any,
+    backend: Client,
     result: dict[str, Any],
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> str:
@@ -266,25 +269,27 @@ async def upload_episode_artifact(
     artifact = build_episode_artifact(result)
     body = serialize_episode_artifact(artifact)
     artifact_sha256 = episode_artifact_sha256(body)
-    request = {
+    request = EpisodeArtifactPresignRequest.from_dict({
         "eval_run_id": result.get("evaluation_run_id"),
         "env_pack_sha256": result.get("pack_sha256"),
         "artifact_sha256": artifact_sha256,
         "content_length": len(body),
-    }
-    response = await _request(
-        client,
-        "POST",
-        f"{backend_url.rstrip('/')}/v1/validator/episode-artifacts/presign",
-        operation="episode artifact presign",
-        validator_keypair=validator_keypair,
-        json=request,
-    )
-    presign = response.json()
-    if presign.get("artifact_sha256") != artifact_sha256:
+    })
+    try:
+        response = await call_environment_api(
+            presign_episode_artifact.asyncio_detailed,
+            EpisodeArtifactPresignResponse,
+            operation="episode artifact presign",
+            client=backend,
+            body=request,
+        )
+    except BackendError as exc:
+        raise EpisodeEmitError(str(exc)) from None
+    presign = response.parsed
+    if presign.artifact_sha256 != artifact_sha256:
         raise EpisodeEmitError("episode artifact presign hash mismatch")
-    upload_url = str(presign.get("upload_url") or "")
-    artifact_uri = str(presign.get("artifact_uri") or "")
+    upload_url = presign.upload_url
+    artifact_uri = presign.artifact_uri
     if not upload_url or not artifact_uri.startswith("s3://"):
         raise EpisodeEmitError("episode artifact presign response is incomplete")
     if download_url_rewriter is not None:
@@ -309,10 +314,8 @@ _MAX_BATCH_SIZE = 500  # Backend cap on results per request (env_pack.py:391).
 
 
 async def submit_episode_batch(
-    client: httpx.AsyncClient,
+    client: Client,
     *,
-    backend_url: str,
-    validator_keypair: Any,
     entries: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """POST a batch to ``/v1/validator/episode-results``.
@@ -330,19 +333,24 @@ async def submit_episode_batch(
 
     merged_results: list[dict[str, Any]] = []
     merged_counts: Counter[str] = Counter()
-    url = f"{backend_url.rstrip('/')}/v1/validator/episode-results"
 
     for chunk_start in range(0, len(entries), _MAX_BATCH_SIZE):
         chunk = entries[chunk_start : chunk_start + _MAX_BATCH_SIZE]
-        response = await _request(
-            client,
-            "POST",
-            url,
-            operation=f"episode-results chunk {chunk_start}",
-            validator_keypair=validator_keypair,
-            json={"results": chunk},
-        )
-        body = response.json()
+        try:
+            response = await call_environment_api(
+                submit_episode_results.asyncio_detailed,
+                SubmitEpisodeResultsResponse,
+                operation=f"episode-results chunk {chunk_start}",
+                client=client,
+                body=SubmitEpisodeResultsRequest.from_dict({"results": chunk}),
+            )
+        except BackendError as exc:
+            raise EpisodeEmitError(str(exc)) from None
+        body = response.parsed.to_dict()
+        expected = Counter((str(item["eval_run_id"]), item["task_id"]) for item in chunk)
+        received = Counter((item["eval_run_id"], item["task_id"]) for item in body["results"])
+        if received != expected:
+            raise EpisodeEmitError("episode-results acknowledgement roster mismatch")
         merged_results.extend(body.get("results", []))
         merged_counts.update(
             {k: int(v) for k, v in (body.get("counts") or {}).items()}
@@ -359,6 +367,7 @@ async def emit_finalized_results(
     results: list[dict[str, Any]],
     download_url_rewriter: Callable[[str], str] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    backend_transport: httpx.AsyncBaseTransport | None = None,
 ) -> dict[str, Any]:
     """Upload complete artifacts and submit their searchable summaries."""
 
@@ -367,29 +376,29 @@ async def emit_finalized_results(
     owned_client = http_client is None
     client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(60.0))
     try:
-        payloads = []
-        for result in results:
-            artifact_uri = await upload_episode_artifact(
-                client,
-                backend_url=backend_url,
-                validator_keypair=validator_keypair,
-                result=result,
-                download_url_rewriter=download_url_rewriter,
-            )
-            payloads.append(
-                build_episode_payload(
-                    result,
-                    eval_run_id=str(result["evaluation_run_id"]),
-                    env_pack_sha256=env_pack_sha256,
-                    ledger_uri=artifact_uri,
+        async with environment_client(
+            backend_url, validator_keypair, transport=backend_transport
+        ) as backend:
+            payloads = []
+            for result in results:
+                artifact_uri = await upload_episode_artifact(
+                    client,
+                    backend=backend,
+                    result=result,
+                    download_url_rewriter=download_url_rewriter,
                 )
+                payloads.append(
+                    build_episode_payload(
+                        result,
+                        eval_run_id=str(result["evaluation_run_id"]),
+                        env_pack_sha256=env_pack_sha256,
+                        ledger_uri=artifact_uri,
+                    )
+                )
+            submitted = await submit_episode_batch(
+                backend,
+                entries=payloads,
             )
-        submitted = await submit_episode_batch(
-            client,
-            backend_url=backend_url,
-            validator_keypair=validator_keypair,
-            entries=payloads,
-        )
         rejected = [
             item
             for item in submitted.get("results", [])
@@ -401,6 +410,8 @@ async def emit_finalized_results(
                 + json.dumps(rejected[:3], sort_keys=True)
             )
         return submitted
+    except BackendError as exc:
+        raise EpisodeEmitError(str(exc)) from None
     finally:
         if owned_client:
             await client.aclose()

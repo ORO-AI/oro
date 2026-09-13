@@ -213,6 +213,7 @@ async def test_rewrites_artifact_url_without_changing_backend_auth(
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
             download_url_rewriter=lambda url: url.replace(
                 "http://localhost:",
                 "http://host.docker.internal:",
@@ -240,6 +241,7 @@ async def _fetch_pack(
             object(),
             scratch_root=scratch_root,
             http_client=client,
+            backend_transport=client._transport,
         )
 
 
@@ -248,9 +250,8 @@ def _stub_auth_and_epoch_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     with env_pack_loader._VALIDATED_PACKS_LOCK:
         env_pack_loader._VALIDATED_PACKS.clear()
     monkeypatch.setattr(
-        env_pack_loader,
-        "generate_auth_headers",
-        lambda _keypair: {
+        "oro_sdk.bittensor_auth._pkg_generate_auth_headers",
+        lambda _keypair, **_kwargs: {
             "X-Hotkey": "test-hotkey",
             "X-Timestamp": "1",
             "X-Nonce": "nonce",
@@ -288,6 +289,7 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
                 object(),
                 scratch_root=tmp_path,
                 http_client=client,
+                backend_transport=client._transport,
             )
 
     assert loaded is not None
@@ -403,6 +405,7 @@ async def test_loads_generator_compatibility_fixture_and_executes(
             object(),
             scratch_root=tmp_path / "loaded",
             http_client=client,
+            backend_transport=client._transport,
         )
 
     assert loaded is not None
@@ -465,6 +468,7 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
             object(),
             scratch_root=tmp_path / "accepted",
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is not None
     loaded.close()
@@ -480,6 +484,7 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
             object(),
             scratch_root=tmp_path / "rejected",
             http_client=client,
+            backend_transport=client._transport,
         )
     assert rejected is None
 
@@ -501,6 +506,7 @@ async def test_rejects_content_hash_mismatch_and_removes_scratch(
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
 
     assert loaded is None
@@ -518,6 +524,7 @@ async def test_rejects_bad_tarball(tmp_path: Path) -> None:
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
 
     assert loaded is None
@@ -647,6 +654,7 @@ async def test_rejects_expired_download_url_before_fetch(tmp_path: Path) -> None
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
 
     assert loaded is None
@@ -681,6 +689,7 @@ async def test_http_failure_does_not_log_presigned_url(
                 object(),
                 scratch_root=tmp_path,
                 http_client=client,
+                backend_transport=client._transport,
             )
 
     assert loaded is None
@@ -729,6 +738,7 @@ async def test_version_mismatch_skips_without_downloading(
                 object(),
                 scratch_root=tmp_path,
                 http_client=client,
+                backend_transport=client._transport,
             )
 
     assert loaded is None
@@ -753,6 +763,7 @@ async def test_qualifying_delivery_rejects_parent_signature(tmp_path: Path) -> N
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is None
 
@@ -778,6 +789,7 @@ async def test_rejects_failed_sealed_epoch_validation(
                 object(),
                 scratch_root=tmp_path,
                 http_client=client,
+                backend_transport=client._transport,
             )
 
     assert loaded is None
@@ -863,6 +875,7 @@ async def test_race_pack_fetch_returns_loaded_pack(tmp_path: Path) -> None:
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is not None
     assert loaded.pack_sha256 == pack_sha256
@@ -885,6 +898,7 @@ async def test_race_pack_fetch_rejects_content_hash_mismatch(tmp_path: Path) -> 
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is None
     assert list(tmp_path.iterdir()) == []
@@ -905,6 +919,7 @@ async def test_race_pack_fetch_rejects_pack_sha256_mismatch(tmp_path: Path) -> N
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is None
 
@@ -925,5 +940,6 @@ async def test_race_pack_fetch_rejects_race_id_mismatch(tmp_path: Path) -> None:
             object(),
             scratch_root=tmp_path,
             http_client=client,
+            backend_transport=client._transport,
         )
     assert loaded is None
