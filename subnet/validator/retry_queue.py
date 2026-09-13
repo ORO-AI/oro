@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
+from oro_sdk.models import ProblemProgressUpdate
 from oro_sdk.models.terminal_status import TerminalStatus
 
 from .backend_client import BackendClient, BackendError
@@ -70,6 +71,19 @@ class LocalRetryQueue:
         self._save(data)
         logging.info(f"Added {completion.eval_run_id} to retry queue")
 
+    def add_progress(self, eval_run_id: UUID, update: ProblemProgressUpdate) -> None:
+        """Add a failed per-problem progress report to the retry queue."""
+        data = self._load()
+        entry: dict = {
+            "type": "progress",
+            "eval_run_id": str(eval_run_id),
+            "update": update.to_dict(),
+            "added_at": datetime.now().isoformat(),
+            "retry_count": 0,
+        }
+        data["pending"].append(entry)
+        self._save(data)
+        logging.info(f"Added progress update for {eval_run_id} to retry queue")
 
     def get_pending_count(self) -> int:
         """Get number of pending retries."""
@@ -92,6 +106,8 @@ class LocalRetryQueue:
             try:
                 if entry_type == "completion":
                     self._process_completion(entry)
+                elif entry_type == "progress":
+                    self._process_progress(entry)
                 else:
                     logging.warning(f"Unknown entry type '{entry_type}', dropping")
             except _TransientRetry:
@@ -145,4 +161,32 @@ class LocalRetryQueue:
         except Exception as e:
             logging.error(
                 f"Unexpected error for completion {entry['eval_run_id']}, dropping: {e}"
+            )
+
+    def _process_progress(self, entry: dict) -> None:
+        """Process a progress-report retry entry. Raises _TransientRetry on transient error."""
+        eval_run_id = UUID(entry["eval_run_id"])
+        update = ProblemProgressUpdate.from_dict(entry["update"])
+
+        try:
+            self.backend_client.report_progress(eval_run_id, [update])
+            logging.info(
+                f"Retry succeeded for progress update {eval_run_id}/{update.problem_id}"
+            )
+        except BackendError as e:
+            if e.is_transient:
+                logging.warning(
+                    f"Retry {entry['retry_count'] + 1}/{self.max_retries} failed "
+                    f"for progress update {eval_run_id}/{update.problem_id}: {e}"
+                )
+                raise _TransientRetry()
+            else:
+                logging.error(
+                    f"Non-retryable error for progress update "
+                    f"{eval_run_id}/{update.problem_id}, dropping: {e}"
+                )
+        except Exception as e:
+            logging.error(
+                f"Unexpected error for progress update "
+                f"{eval_run_id}/{update.problem_id}, dropping: {e}"
             )

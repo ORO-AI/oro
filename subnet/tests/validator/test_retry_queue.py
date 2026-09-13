@@ -136,3 +136,76 @@ class TestLocalRetryQueue:
 
         queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
         assert queue.get_pending_count() == 1
+
+
+@pytest.fixture
+def sample_progress_update():
+    """Sample progress update for retry queue progress tests."""
+    from oro_sdk.models import ProblemProgressUpdate
+    from oro_sdk.models.problem_status import ProblemStatus
+
+    return ProblemProgressUpdate(
+        problem_id=UUID("87654321-4321-4321-4321-210987654321"),
+        status=ProblemStatus.SUCCESS,
+    )
+
+
+class TestLocalRetryQueueProgress:
+    """Regression coverage for add_progress()/process_pending() on 'progress' entries.
+
+    main.py calls retry_queue.add_progress() when report_progress() fails
+    while reporting logs_s3_key (see _upload_logs), but add_progress() and
+    the 'progress' branch of process_pending() previously did not exist —
+    the call raised AttributeError, which the caller's broad except turned
+    into a misleading "Failed to upload logs" error even when every upload
+    had actually succeeded, and the retry was silently lost.
+    """
+
+    def test_add_progress_persists_to_file(
+        self, temp_storage_path, mock_backend_client, sample_progress_update
+    ):
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        eval_run_id = UUID("12345678-1234-1234-1234-123456789012")
+
+        queue.add_progress(eval_run_id, sample_progress_update)
+
+        with open(temp_storage_path) as f:
+            data = json.load(f)
+
+        assert len(data["pending"]) == 1
+        assert data["pending"][0]["type"] == "progress"
+        assert data["pending"][0]["eval_run_id"] == str(eval_run_id)
+        assert queue.get_pending_count() == 1
+
+    def test_process_pending_removes_progress_on_success(
+        self, temp_storage_path, mock_backend_client, sample_progress_update
+    ):
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add_progress(
+            UUID("12345678-1234-1234-1234-123456789012"), sample_progress_update
+        )
+
+        mock_backend_client.report_progress.return_value = None
+
+        queue.process_pending()
+
+        assert queue.get_pending_count() == 0
+        mock_backend_client.report_progress.assert_called_once()
+
+    def test_process_pending_keeps_progress_on_transient_failure(
+        self, temp_storage_path, mock_backend_client, sample_progress_update
+    ):
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add_progress(
+            UUID("12345678-1234-1234-1234-123456789012"), sample_progress_update
+        )
+
+        # No status_code/sdk_error set -> is_transient defaults to True,
+        # same convention test_process_pending_keeps_on_failure relies on above.
+        mock_backend_client.report_progress.side_effect = BackendError(
+            "Server unavailable"
+        )
+
+        queue.process_pending()
+
+        assert queue.get_pending_count() == 1
