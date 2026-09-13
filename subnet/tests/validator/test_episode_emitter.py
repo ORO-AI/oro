@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from validator import episode_emitter
+from validator.env_backend import environment_client
+from validator.generated_progress_reporter import GeneratedProgressReporter
 from validator.episode_emitter import (
     EpisodeEmitError,
     build_episode_artifact,
@@ -256,6 +258,10 @@ def _keypair():
     return Keypair.create_from_uri("//TestValidator")
 
 
+def _entry(task_id="t1"):
+    return build_episode_payload({**_base_verdict(), "task_id": task_id}, **_payload_kwargs())
+
+
 @_run_async
 async def test_submit_single_batch_forwards_body_and_returns_merged():
     resp_body = {
@@ -265,61 +271,56 @@ async def test_submit_single_batch_forwards_body_and_returns_merged():
         "counts": {"201": 1},
     }
     transport = _MockTransport([httpx.Response(200, json=resp_body)])
-    async with httpx.AsyncClient(transport=transport) as client:
+    async with environment_client("https://api.example", _keypair(), transport=transport) as client:
         out = await submit_episode_batch(
             client,
-            backend_url="https://api.example",
-            validator_keypair=_keypair(),
-            entries=[{"task_id": "t1"}],
+            entries=[_entry()],
         )
     assert out["counts"] == {"201": 1}
     assert len(transport.requests) == 1
     body = json.loads(transport.requests[0].content)
-    assert body == {"results": [{"task_id": "t1"}]}
+    assert body == {"results": [_entry()]}
 
 
 @_run_async
 async def test_submit_batch_splits_over_backend_cap():
     """Backend caps at 500; over-cap input must chunk without silent drop."""
-    resp_body = {"results": [], "counts": {"201": 500}}
+    def receipt(start, stop):
+        return {"results": [
+            {"eval_run_id": _EVAL_RUN_ID, "task_id": f"t{i}", "status": 201}
+            for i in range(start, stop)
+        ], "counts": {"201": stop - start}}
     transport = _MockTransport(
-        [httpx.Response(200, json=resp_body), httpx.Response(200, json=resp_body)]
+        [httpx.Response(200, json=receipt(0, 500)), httpx.Response(200, json=receipt(500, 501))]
     )
-    async with httpx.AsyncClient(transport=transport) as client:
-        entries = [{"task_id": f"t{i}"} for i in range(501)]
+    async with environment_client("https://api.example", _keypair(), transport=transport) as client:
+        entries = [_entry(f"t{i}") for i in range(501)]
         out = await submit_episode_batch(
             client,
-            backend_url="https://api.example",
-            validator_keypair=_keypair(),
             entries=entries,
         )
     assert len(transport.requests) == 2
-    # Counts merged (500 from each chunk-response since we mocked identically)
-    assert out["counts"] == {"201": 1000}
+    assert out["counts"] == {"201": 501}
 
 
 @_run_async
 async def test_submit_batch_raises_on_4xx_permanent():
     """A 422/400 is not a retry — surface as a hard EpisodeEmitError with body."""
     transport = _MockTransport([httpx.Response(422, text="bad schema field")])
-    async with httpx.AsyncClient(transport=transport) as client:
+    async with environment_client("https://api.example", _keypair(), transport=transport) as client:
         with pytest.raises(EpisodeEmitError, match="rejected status=422"):
             await submit_episode_batch(
                 client,
-                backend_url="https://api.example",
-                validator_keypair=_keypair(),
-                entries=[{"task_id": "t1"}],
+                entries=[_entry()],
             )
 
 
 @_run_async
 async def test_submit_empty_batch_rejected():
-    async with httpx.AsyncClient() as client:
+    async with environment_client("https://api.example", _keypair()) as client:
         with pytest.raises(ValueError, match="empty batch"):
             await submit_episode_batch(
                 client,
-                backend_url="https://api.example",
-                validator_keypair=_keypair(),
                 entries=[],
             )
 
@@ -352,13 +353,14 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
                 },
             )
         if request.url.host == "objects.test":
+            assert not any(header.lower().startswith("x-") for header in request.headers)
             uploaded = request.content
             return httpx.Response(200)
         submitted = json.loads(request.content)
         return httpx.Response(
             200,
             json={
-                "results": [{"task_id": "TF2-retrieval_recall-1", "status": 201}],
+                "results": [{"eval_run_id": _EVAL_RUN_ID, "task_id": "TF2-retrieval_recall-1", "status": 201}],
                 "counts": {"201": 1},
             },
         )
@@ -372,6 +374,7 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
             env_pack_sha256=_PACK_SHA,
             results=[_base_verdict()],
             http_client=client,
+            backend_transport=client._transport,
         )
 
     assert result["counts"] == {"201": 1}
@@ -386,6 +389,69 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     assert artifact["episode"]["call_trace"][0]["request"]["call_id"] == "call-1"
     assert submitted is not None
     assert submitted["results"][0]["ledger_uri"].startswith("s3://episodes/")
+
+
+@pytest.mark.parametrize("bad_receipt", ["missing", "duplicate", "wrong_run", "unexpected"])
+@_run_async
+async def test_incomplete_or_unrelated_receipts_are_not_acknowledgements(bad_receipt):
+    item = {"eval_run_id": _EVAL_RUN_ID, "task_id": "t1", "status": 201}
+    receipts = {
+        "missing": [],
+        "duplicate": [item, item],
+        "wrong_run": [{**item, "eval_run_id": "00000000-0000-0000-0000-000000000001"}],
+        "unexpected": [{**item, "task_id": "other"}],
+    }[bad_receipt]
+    transport = _MockTransport([httpx.Response(200, json={"results": receipts, "counts": {}})])
+    async with environment_client("https://api.example", _keypair(), transport=transport) as client:
+        with pytest.raises(EpisodeEmitError, match="roster mismatch"):
+            await submit_episode_batch(client, entries=[_entry()])
+
+
+def test_partial_ack_remains_pending_and_replay_receipts_allow_recovery():
+    batches = []
+    artifacts = []
+    results = [{**_base_verdict(), "task_id": task} for task in ("one", "two")]
+
+    def handler(request):
+        if request.url.path.endswith("/episode-artifacts/presign"):
+            digest = json.loads(request.content)["artifact_sha256"]
+            return httpx.Response(200, json={
+                "upload_url": "https://objects.test/" + digest,
+                "artifact_uri": "s3://episodes/" + digest,
+                "artifact_sha256": digest,
+            })
+        if request.url.host == "objects.test":
+            assert "X-Signature" not in request.headers
+            artifacts.append(request.content)
+            return httpx.Response(200)
+        batches.append(json.loads(request.content))
+        statuses = [201, 422] if len(batches) == 1 else [409, 201]
+        return httpx.Response(200, json={
+            "results": [{"eval_run_id": _EVAL_RUN_ID, "task_id": item["task_id"], "status": status}
+                        for item, status in zip(results, statuses)],
+            "counts": {str(status): 1 for status in statuses},
+        })
+
+    def emit(batch):
+        async def run():
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as objects:
+                await emit_finalized_results(
+                    backend_url="https://api.example", validator_keypair=_keypair(),
+                    env_pack_sha256=_PACK_SHA, results=batch,
+                    http_client=objects, backend_transport=objects._transport,
+                )
+        asyncio.run(run())
+
+    reporter = GeneratedProgressReporter(None, emit)
+    with pytest.raises(EpisodeEmitError, match="rejected"):
+        reporter.flush(results)
+    assert reporter._acknowledged == set()
+    reporter.flush(results)
+    reporter.flush(results)
+    assert reporter._acknowledged == {"one", "two"}
+    assert len(batches) == 2
+    assert batches[0] == batches[1]
+    assert artifacts[:2] == artifacts[2:]
 
 # ---------------------------------------------------------------------------
 # replay_ledger

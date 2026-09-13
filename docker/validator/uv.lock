@@ -1277,7 +1277,7 @@ wheels = [
 
 [[package]]
 name = "oro-sdk"
-version = "1.0.105"
+version = "1.0.120"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -1285,9 +1285,9 @@ dependencies = [
     { name = "httpx" },
     { name = "python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bc/05/6dd45bf2a11dcf3f99fc626453de2b2b12dc6fca6dc157b031701ee60305/oro_sdk-1.0.105.tar.gz", hash = "sha256:efa546e6b6b22fb1470c191e5d6d910ca666036aeec00bdb355e7c91ad038a88", size = 148225, upload-time = "2026-08-14T07:27:04.922Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e0/69/a485d7e65b5c09503138c1f1f0f6c1b936af0a2c582d02eff8c217e46290/oro_sdk-1.0.120.tar.gz", hash = "sha256:b9882bd36521909fc5bc07df425137c116476cb5e3273da3c33f3ea0080c53ef", size = 169195, upload-time = "2026-09-13T21:42:19.438Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/55/c714f98097710f12982a4a1174b4879d673299a9c83a2797dee21fdce5cf/oro_sdk-1.0.105-py3-none-any.whl", hash = "sha256:4d993503ef5947299656cb8d564518b2f91c37319e40811c86f5a4f128ffc997", size = 356948, upload-time = "2026-08-14T07:27:03.646Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/fa/6bb6bac1fddd2193f617eec5924eed15f65ee577684294a72beb53e13c0b/oro_sdk-1.0.120-py3-none-any.whl", hash = "sha256:3c970d8bb97a764bdb48e2323fb300045290f92f002f9bb508091c884085d2ac", size = 410669, upload-time = "2026-09-13T21:42:18.197Z" },
 ]
 
 [[package]]
@@ -1325,7 +1325,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "oro-env-runtime", specifier = "==0.2.14" },
-    { name = "oro-sdk", specifier = "==1.0.105" },
+    { name = "oro-sdk", specifier = "==1.0.120" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "py-spy", specifier = ">=0.4.1" },
