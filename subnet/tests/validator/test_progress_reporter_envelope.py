@@ -195,3 +195,21 @@ class TestSweepNarrowing:
         assert _P1 not in reporter._results
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
+
+    def test_sweep_marks_terminal_future_with_no_result(self, reporter):
+        # p1's future finished (e.g. _score_problem hit an early-return path
+        # or swallowed an internal exception) but wrote nothing to _results,
+        # and collect_completed() hasn't reaped it yet. has_future() alone
+        # can't distinguish this from a still-running future -- the sweep
+        # must still mark it TIMED_OUT, since nothing else ever will.
+        from concurrent.futures import Future
+
+        finished_with_no_result: Future = Future()
+        finished_with_no_result.set_result(None)
+        reporter._scoring_pool.futures[_P1] = finished_with_no_result
+
+        reporter._envelope_dispatcher.mark_remaining_timed_out()
+
+        assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT

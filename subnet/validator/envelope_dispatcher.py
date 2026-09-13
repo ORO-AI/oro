@@ -123,8 +123,12 @@ class EnvelopeDispatcher:
 
         Only reaches problems that never produced an envelope (sandbox death
         before write, never-started, or partial run cut off by hard deadline)
-        AND have no scoring already in flight. A problem already submitted to
-        the scoring pool is left alone here: the caller (progress_reporter's
+        AND have no scoring genuinely still in flight. A problem whose future
+        is done — even if it produced no result (unknown problem_id, no
+        scorer, or an internally-caught exception in _score_problem) — is
+        left to this sweep the same as one that never got submitted at all,
+        since nothing further will ever populate its result. Only a future
+        that's still *running* is excluded: the caller (progress_reporter's
         hard-timeout / no-output-file paths) does not guarantee
         ``pending_count() == 0`` before calling this, and the worker thread
         writes the real score into ``self._results`` under the same lock the
@@ -137,7 +141,9 @@ class EnvelopeDispatcher:
 
         candidates = set(self._id_to_problem.keys()) - scored_ids
         unscored = {
-            pid for pid in candidates if not self._scoring_pool.has_future(pid)
+            pid
+            for pid in candidates
+            if not self._scoring_pool.has_pending_future(pid)
         }
         if not unscored:
             return

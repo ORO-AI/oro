@@ -58,6 +58,22 @@ class ScoringPool:
     def has_future(self, problem_id: str) -> bool:
         return problem_id in self.futures
 
+    def has_pending_future(self, problem_id: str) -> bool:
+        """True iff problem_id has a future registered that has not finished yet.
+
+        Distinct from has_future(): a future that's already done — whether it
+        wrote a result or returned early with none (unknown problem_id, no
+        scorer, or an internally-caught exception in _score_problem) — is
+        terminal and will never populate self._results on its own. It stays
+        in self.futures until the next collect_completed() reaps it, so
+        has_future() alone can't tell a finished-but-resultless future from
+        one that's genuinely still running. Callers that need to avoid racing
+        a still-in-progress score (e.g. a timeout sweep deciding what to mark
+        TIMED_OUT) should use this instead.
+        """
+        future = self.futures.get(problem_id)
+        return future is not None and not future.done()
+
     def pending_count(self) -> int:
         return sum(1 for f in self.futures.values() if not f.done())
 
