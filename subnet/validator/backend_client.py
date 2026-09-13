@@ -19,7 +19,7 @@ from uuid import UUID
 import httpx
 import requests
 from bittensor_wallet import Wallet
-from oro_sdk import BittensorAuthClient, Client
+from oro_sdk import BittensorAuthClient, Client, is_transient_status
 from oro_sdk.api.public import get_top_agent
 from oro_sdk.api.validator import (
     claim_work,
@@ -98,8 +98,8 @@ class BackendError(Exception):
     @property
     def is_transient(self) -> bool:
         """Return True if this error is transient and may be retried."""
-        if self.status_code is not None and self.status_code >= 500:
-            return True
+        if self.status_code is not None:
+            return is_transient_status(self.status_code)
         # Connection/timeout errors don't have status codes but are transient
         if self.status_code is None and self.sdk_error is None:
             return True
@@ -385,7 +385,7 @@ class BackendClient:
 
         Raises:
             BackendError: If the request fails.
-                - is_transient=True for 5xx/timeout/connection errors
+                - is_transient=True for 429/5xx/timeout/connection errors
                 - is_conflict=True if at capacity (409)
                 - is_auth_error=True if authentication fails (401/403)
         """

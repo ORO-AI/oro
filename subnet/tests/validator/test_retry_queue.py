@@ -29,6 +29,26 @@ def sample_completion():
 
 
 class TestLocalRetryQueue:
+    def test_rate_limited_completion_survives_restart_and_retries(
+        self, temp_storage_path, mock_backend_client, sample_completion
+    ):
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add(sample_completion)
+        mock_backend_client.complete_run.side_effect = BackendError(
+            "rate limited", status_code=429
+        )
+
+        queue.process_pending()
+
+        restarted = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        assert restarted.get_pending_count() == 1
+        with open(temp_storage_path) as f:
+            assert json.load(f)["pending"][0]["retry_count"] == 1
+
+        mock_backend_client.complete_run.side_effect = None
+        restarted.process_pending()
+        assert restarted.get_pending_count() == 0
+
     def test_add_persists_to_file(
         self, temp_storage_path, mock_backend_client, sample_completion
     ):
@@ -116,4 +136,3 @@ class TestLocalRetryQueue:
 
         queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
         assert queue.get_pending_count() == 1
-
