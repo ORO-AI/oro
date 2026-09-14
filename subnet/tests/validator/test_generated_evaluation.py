@@ -139,29 +139,46 @@ def test_integrity_outcomes_reject_the_run(outcome) -> None:
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-def test_isolated_harness_failure_completes_run_scoring_task_as_zero(outcome) -> None:
-    """One harness failure among many good tasks does not sink the pack;
-    the failing task counts as zero reward in the average."""
-    results = [_result(f"task-{i}", correct=True, reward=1.0) for i in range(9)]
-    results.append(_result("task-9", correct=False, outcome=outcome))
-
-    score = aggregate_results(results)
-
-    # 9 correct tasks × 1.0 reward, averaged over all 10 tasks.
-    assert score == pytest.approx(0.9)
+@pytest.mark.parametrize("count", [1, 7, 10, 35])
+def test_one_harness_failure_rejects_entire_run(outcome, count) -> None:
+    results = [_result(f"task-{i}", correct=True, reward=1.0) for i in range(count - 1)]
+    results.append(_result("failed", correct=False, outcome=outcome))
+    with pytest.raises(ValueError) as caught:
+        aggregate_results(results)
+    detail = f"completed={count - 1}, " if count > 1 else ""
+    assert str(caught.value) == (
+        f"generated evaluation infrastructure failure: {detail}{outcome}=1"
+    )
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-def test_harness_failures_above_tolerance_still_reject_the_run(outcome) -> None:
-    """Above the tolerance threshold the environment is judged too broken
-    to score fairly; whole-pack rejection returns."""
-    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(6)]
+@pytest.mark.parametrize("failed", [2, 3, 4])
+def test_former_tolerance_boundary_always_rejects(outcome, failed) -> None:
+    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(10 - failed)]
     results.extend(
-        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(4)
+        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(failed)
     )
 
     with pytest.raises(ValueError, match="infrastructure failure"):
         aggregate_results(results)
+
+
+@pytest.mark.parametrize("integrity", ["leakage", "exploit"])
+@pytest.mark.parametrize("infra", ["environment_error", "verifier_error"])
+def test_integrity_takes_precedence_over_infrastructure(integrity, infra):
+    with pytest.raises(ValueError) as caught:
+        aggregate_results([
+            _result("infra", correct=False, outcome=infra),
+            _result("cheat", correct=False, outcome=integrity),
+        ])
+    assert str(caught.value) == f"generated evaluation integrity failure: {integrity}=1"
+
+
+def test_valid_all_zero_and_agent_error_run_is_successful_zero_score():
+    assert aggregate_results([
+        _result("wrong", correct=False),
+        _result("agent", correct=False, outcome="agent_error"),
+    ]) == 0.0
 
 
 def test_cheating_outcome_rejects_even_at_low_count() -> None:
@@ -178,6 +195,47 @@ def test_duplicate_task_result_is_rejected() -> None:
         aggregate_results(
             [_result("one", correct=True, reward=1), _result("one", correct=False)]
         )
+
+
+@pytest.mark.parametrize("outcome,expected_reason", [
+    ("environment_error", "generated evaluation infrastructure failure: environment_error=1"),
+    ("verifier_error", "generated evaluation infrastructure failure: verifier_error=1"),
+    ("exploit", "generated evaluation integrity failure: exploit=1"),
+])
+def test_generated_runner_delivers_failed_completion(
+    tmp_path, monkeypatch, outcome, expected_reason
+):
+    result = {
+        **_result("task", correct=False, outcome=outcome),
+        "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
+        "pack_sha256": "a" * 64,
+    }
+    registry = MagicMock()
+    registry.finalized_results.return_value = [result]
+    reporter = MagicMock()
+    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
+    validator = Validator.__new__(Validator)
+    validator._create_environment_sessions = MagicMock(return_value=(
+        registry,
+        [{"session_id": "session", "policy_view": {"query": "query", "tool_contract_version": "v1"}}],
+        {"task": "right"},
+    ))
+    validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
+    validator.session_runtime = MagicMock()
+    validator.backend_client = MagicMock()
+    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
+    completion = validator._run_generated_evaluation(
+        work, tmp_path / "agent.py", inference_access_token="synthetic",
+        inference_provider="openrouter", inference_base_url="https://example.test/v1",
+    )
+    assert completion is None
+    validator.backend_client.complete_run.assert_called_once_with(
+        eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
+        failure_reason=expected_reason, sandbox_metadata={},
+    )
+    reporter.flush.assert_called_once_with([result])
+    validator.session_runtime.clear.assert_called_once_with(registry)
 
 
 @pytest.mark.parametrize(

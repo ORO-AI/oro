@@ -16,17 +16,10 @@ GENERATED_PROBLEM_SCHEMA = "oro.generated_environment_problem.v1"
 # a run where the agent broke the sealed contract.
 _CHEATING_OUTCOMES = frozenset({"leakage", "exploit"})
 
-# Harness outcomes are infrastructure-attributable, not the agent's fault
-# (see failure_classification in Backend). An isolated blip on one task
-# should NOT throw away the other N-1 correctly scored tasks; instead we
-# count the failing task as zero reward (it stays in the denominator so
-# the agent's score reflects the loss), and let the run complete.
-#
-# Above the tolerance fraction we still hard-fail: at that point the
-# environment is broken enough that the surviving results aren't a fair
-# measurement of the agent.
+# Any harness failure makes the evaluation unusable, matching Backend's
+# acceptance rule. Infrastructure failures are not zero-reward agent outcomes;
+# never accept a partial score or change the frozen roster's denominator.
 _HARNESS_OUTCOMES = frozenset({"environment_error", "verifier_error"})
-_HARNESS_TOLERANCE_FRACTION = 0.3
 
 
 def select_run_task_roster(
@@ -133,14 +126,14 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         )
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
-    harness_failure_count = sum(
-        count for outcome, count in outcomes.items() if outcome in _HARNESS_OUTCOMES
-    )
-    if harness_failure_count / len(results) > _HARNESS_TOLERANCE_FRACTION:
+    if outcomes.keys() & _HARNESS_OUTCOMES:
+        # Keep the existing count-form completion protocol understood by older
+        # Backends. Include all outcomes; integrity failures took precedence above.
+        detail = ", ".join(
+            f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
+        )
         raise ValueError(
-            "generated evaluation infrastructure failure: "
-            f"{harness_failure_count}/{len(results)} tasks failed on "
-            f"infrastructure (threshold {_HARNESS_TOLERANCE_FRACTION:.0%})"
+            f"generated evaluation infrastructure failure: {detail}"
         )
 
     reward_total = Decimal("0")
