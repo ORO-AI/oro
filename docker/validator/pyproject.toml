@@ -10,7 +10,7 @@ dependencies = [
     "bittensor-wallet==4.1.0",
     "fastapi>=0.115",
     "openai==2.44.0",
-    "oro-env-runtime==0.2.14",
+    "oro-env-runtime==0.2.18",
     "oro-sdk==1.0.121",
     "prometheus-client>=0.20.0",
     "psutil>=5.9.0",
