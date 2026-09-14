@@ -86,6 +86,7 @@ def _base_verdict(
         },
         "terminal_state_hash": _TERM_HASH,
         "step_count": 12,
+        "wall_seconds": 123.456789,
         "render_budget": None,
         "bootstrap": {
             "session_id": "sess-1",
@@ -144,6 +145,7 @@ def test_payload_completed_happy_path():
     assert p["terminal_state_hash"] == _TERM_HASH
     assert p["ledger_uri"] == "s3://b/k"
     assert p["step_count"] == 12
+    assert p["wall_seconds"] == 123.456789
     assert p["verdict_checks"]["final_in_gold"] is True
     assert p["reward_components"]["retrieval"] == 0.9
 

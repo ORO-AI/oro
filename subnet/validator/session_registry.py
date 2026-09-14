@@ -106,6 +106,8 @@ class _SessionState:
     simulator: Any | None
     transcript: list[dict[str, Any]]
     bootstrap: dict[str, Any]
+    started_at: float
+    finished_at: float | None = None
     call_trace: list[dict[str, Any]] = field(default_factory=list)
     event_fired_turn: int | None = None
     event_surfaced: bool = False
@@ -306,6 +308,7 @@ class SessionRegistry:
                 simulator=None,
                 transcript=[{"role": "user", "content": session.task.goal_text}],
                 bootstrap=bootstrap,
+                started_at=time.perf_counter(),
             )
             self._sessions[session_id] = state
 
@@ -776,6 +779,8 @@ class SessionRegistry:
         snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         snapshot = snapshot or self._session_snapshot(state)
+        if state.finished_at is None:
+            state.finished_at = time.perf_counter()
         has_terminal_state = outcome in {"completed", "partial", "leakage", "exploit"}
         return {
             "evaluation_run_id": state.evaluation_run_id,
@@ -792,6 +797,7 @@ class SessionRegistry:
                 snapshot["state_hash"] if has_terminal_state else None
             ),
             "step_count": snapshot["step_count"],
+            "wall_seconds": round(max(0.0, state.finished_at - state.started_at), 6),
             "solver_turn_count": snapshot["solver_turn_count"],
             "action_count": snapshot["step_count"],
             "render_budget": snapshot["render_budget"],
