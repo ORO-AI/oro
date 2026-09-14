@@ -957,6 +957,20 @@ def test_timeout_finalization_and_close_do_not_wait_for_tool_worker(
         registry.close()
 
 
+def test_finalized_result_records_stable_monotonic_wall_seconds(
+    registry: SessionRegistry,
+) -> None:
+    _start(registry)
+    state = registry._sessions["session-1"]
+    state.started_at = time.perf_counter() - 2.5
+
+    first = registry.finalized_results()[0]
+    second = registry.finalized_results()[0]
+
+    assert 2.4 < first["wall_seconds"] < 2.6
+    assert second["wall_seconds"] == first["wall_seconds"]
+
+
 def test_http_bridge_exposes_calls_but_not_private_operations(
     registry: SessionRegistry,
 ) -> None:

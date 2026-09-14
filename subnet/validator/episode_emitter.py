@@ -251,6 +251,7 @@ def build_episode_payload(
         "verdict_checks": dict(verifier_result.get("checks") or {}),
         "reward_components": dict(verifier_result.get("reward_record") or {}),
         "aggregate_reward": aggregate_reward,
+        "wall_seconds": verdict.get("wall_seconds"),
         "terminal_state_hash": terminal_state_hash,
         "ledger_uri": ledger_uri,
         "step_count": int(verdict.get("step_count") or 0),
