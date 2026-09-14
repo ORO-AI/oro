@@ -232,3 +232,28 @@ def test_concurrent_sessions_do_not_race_on_error_signal() -> None:
 
     assert a.value.status == 429 and "session-A" in a.value.body
     assert b.value.status == 500 and "session-B" in b.value.body
+
+
+@pytest.mark.parametrize("setting,expected", [("", None), ("false", False), ("true", True)])
+def test_shopper_reasoning_setting_reaches_provider_request(monkeypatch, setting, expected):
+    monkeypatch.setenv("ORO_SHOPPER_REASONING_ENABLED", setting)
+    client = MagicMock()
+    client.post_verbose.return_value = _ok({"choices": [{"message": {"content": '{}'}, "finish_reason": "stop"}]})
+    completion = SimulatorCompletion("miner-token", client=client)
+    asyncio.run(completion("deepseek/deepseek-v4.1-flash", [], max_tokens=400, temperature=0.0))
+    payload = client.post_verbose.call_args.kwargs["json_data"]
+    assert payload["model"] == "deepseek/deepseek-v4.1-flash"
+    assert payload["max_tokens"] == 400
+    assert payload["temperature"] == 0.0
+    if expected is None:
+        assert "reasoning" not in payload
+    else:
+        assert payload["reasoning"] == {"enabled": expected}
+
+
+def test_invalid_shopper_reasoning_setting_fails_before_inference(monkeypatch):
+    monkeypatch.setenv("ORO_SHOPPER_REASONING_ENABLED", "disabled")
+    client = MagicMock()
+    with pytest.raises(ValueError, match="ORO_SHOPPER_REASONING_ENABLED"):
+        SimulatorCompletion("miner-token", client=client)
+    client.post_verbose.assert_not_called()

@@ -162,6 +162,8 @@ services:
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - ORO_SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
       - ORO_SESSION_SIMULATOR_TIMEOUT=${ORO_SESSION_SIMULATOR_TIMEOUT:-60}
+      # Shopper only; empty preserves provider defaults. False disables optional thinking.
+      - ORO_SHOPPER_REASONING_ENABLED=${ORO_SHOPPER_REASONING_ENABLED:-}
       # Optional startup preflight for an operator-selected immutable pack.
       # Pack-bound claimed work selects the generated evaluator automatically.
       - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}
@@ -322,6 +324,7 @@ services:
       - LOCAL_ENV_PACK_PATH=${LOCAL_ENV_PACK_PATH:-/workspace/data/local-test/env-pack.tar.gz}
       - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a}
       - LOCAL_MAX_WORKERS=${LOCAL_MAX_WORKERS:-7}
+      - ORO_SHOPPER_REASONING_ENABLED=${ORO_SHOPPER_REASONING_ENABLED:-}
       - LOCAL_TIMEOUT=${LOCAL_TIMEOUT:-1800}
       - SEARCH_SERVER_URL=http://test-search-server:5632
     working_dir: /workspace

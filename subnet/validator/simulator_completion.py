@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any
 
@@ -67,6 +68,10 @@ class SimulatorCompletion:
     ) -> None:
         if not access_token:
             raise ValueError("miner inference access token is required")
+        reasoning = os.environ.get("ORO_SHOPPER_REASONING_ENABLED", "").strip().lower()
+        if reasoning not in {"", "true", "false"}:
+            raise ValueError("ORO_SHOPPER_REASONING_ENABLED must be true, false, or empty")
+        self._reasoning_enabled = None if not reasoning else reasoning == "true"
         self._client = client or ProxyClient(
             proxy_url=proxy_url,
             api_key=access_token,
@@ -90,6 +95,10 @@ class SimulatorCompletion:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        # Keep the shopper's small response budget available for its JSON reply.
+        # Unset preserves provider defaults, including mandatory-reasoning models.
+        if self._reasoning_enabled is not None:
+            request["reasoning"] = {"enabled": self._reasoning_enabled}
         if temperature is not None:
             request["temperature"] = temperature
         if tools:
