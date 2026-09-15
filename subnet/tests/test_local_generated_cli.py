@@ -21,7 +21,7 @@ from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "46d1198c035b582b7c4e75b138364e7a50242e8af3fb75acc44fa8b23e96011d"
+    "f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5"
 )
 
 
