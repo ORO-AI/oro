@@ -128,8 +128,8 @@ class TestSandboxIsolation:
         assert result.returncode == 0, f"Container cannot reach proxy: {result.stderr}"
         assert "healthy" in result.stdout.lower() or result.stdout.strip() == "healthy"
 
-    def test_search_server_through_proxy(self, sandbox_container):
-        """Test that sandbox container can reach search-server through proxy."""
+    def test_legacy_search_routes_are_gone(self, sandbox_container):
+        """The ShoppingBench /search/* routes answer 410 and never reach search-server (ORO-2246)."""
         result = exec_in_container(
             sandbox_container,
             [
@@ -137,18 +137,18 @@ class TestSandboxIsolation:
                 "-s",
                 "--max-time",
                 "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
                 "http://proxy:80/search/find_product?q=test&page=1",
             ],
             timeout=10,
         )
 
-        assert result.returncode == 0, (
-            f"Container cannot reach search-server through proxy: {result.stderr}"
-        )
-
-        response = result.stdout
-        assert "product_id" in response or "[]" in response, (
-            f"Unexpected response from search-server: {response[:200]}"
+        assert result.returncode == 0, f"Container cannot reach proxy: {result.stderr}"
+        assert result.stdout.strip() == "410", (
+            f"Expected 410 for a legacy search route, got: {result.stdout[:200]}"
         )
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):

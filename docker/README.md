@@ -241,9 +241,9 @@ The proxy service acts as a gateway for sandboxed agent containers, providing co
 ```
 Internet
   ↓
-Bridge Network (default, has internet)
-  ├─→ search-server (accessible from host via port mapping)
-  └─→ proxy (connected to bridge for internet access)
+`main` network (shoppingbench-main, has internet)
+  ├─→ search-server (on the `main` network; loopback publish for operator checks)
+  └─→ proxy (on `main` for internet access)
         ↓
         └─→ sandbox network (internal, no internet)
               ├─→ proxy (accessible from agent containers)
@@ -256,7 +256,7 @@ Bridge Network (default, has internet)
 # Build proxy image
 docker compose build proxy
 
-# Start proxy (requires search-server to be running)
+# Start proxy
 docker compose up -d proxy
 
 # View logs
@@ -270,8 +270,6 @@ Configure via `.env` file:
 ```bash
 # Proxy configuration
 PROXY_PORT=8080  # Port exposed on host
-SEARCH_SERVER_URL=search-server  # Service name for search-server
-SEARCH_SERVER_PORT=5632  # Port of search-server
 ```
 
 ### Agent Container Configuration
@@ -289,8 +287,8 @@ This allows agent containers to access services through the proxy:
 ### Network Isolation
 
 - **Agent containers** are placed on the `sandbox` network (internal, no internet access)
-- **Proxy** is on both `bridge` (for internet) and `sandbox` (for agent containers)
-- **Search-server** is on default `bridge` network (accessible from host and the validator runtime, never from the sandbox)
+- **Proxy** is on both `main` (for internet) and `sandbox` (for agent containers)
+- **Search-server** is on the `main` network (reachable by the validator runtime and, via loopback publish, the host; never by the sandbox)
 
 ### Verifying the Proxy
 

@@ -18,8 +18,8 @@ services:
       # overrides the image ENV). Index is off-heap/mmap, so 1g/worker is plenty;
       # keeps total heap modest across N workers on memory-constrained hosts.
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
-    # Loopback-only publish. Validator + proxy reach search-server over the
-    # `main` docker network (`http://search-server:5632`), so no host publish
+    # Loopback-only publish. The validator runtime reaches search-server over
+    # the `main` docker network (`http://search-server:5632`), so no host publish
     # is required for normal operation. Keeping a loopback publish lets an
     # operator `curl 127.0.0.1:5632/health` from an EC2 shell without
     # exposing the port on any external interface — docker binds to the wildcard
@@ -40,10 +40,10 @@ services:
     networks:
       - main
     # Match sandbox container's --cpu-shares=2048 (see subnet/sandbox.py).
-    # Search-server sits on the sandbox's hot path (every find_product /
-    # view_product call). Leaving it at Docker's 1024 default lets the
-    # sandbox starve it on saturated hosts, elongating sandbox phase and
-    # tripping per-problem timeouts.
+    # Search-server sits on the episode hot path (every search / filter /
+    # view action the runtime executes). Leaving it at Docker's 1024 default
+    # lets the sandbox starve it on saturated hosts, elongating sandbox phase
+    # and tripping per-problem timeouts.
     cpu_shares: 2048
     restart: unless-stopped
 
@@ -82,9 +82,9 @@ services:
     labels:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     # Match sandbox container's --cpu-shares=2048. Proxy fans every
-    # /inference and /search call from sandbox + reasoning judge; if
+    # /inference and /environment/call request from the sandbox; if
     # sandbox outweighs proxy under CPU pressure, both inference and
-    # search round-trips stall.
+    # tool round-trips stall.
     cpu_shares: 2048
     restart: unless-stopped
 
@@ -337,8 +337,6 @@ services:
     profiles:
       - test
     environment:
-      - SEARCH_SERVER_URL=test-search-server
-      - SEARCH_SERVER_PORT=5632
       - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
       - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}

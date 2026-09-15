@@ -79,8 +79,8 @@ http {
 
         # Default deny — block any path not explicitly handled below
         location / {
+            default_type application/json;
             return 403 '{"error": "forbidden"}\n';
-            add_header Content-Type application/json;
         }
 
         # ShoppingBench-era search routes. The ORO Bench runtime talks to the
@@ -89,10 +89,11 @@ http {
         # carried the verifier's normalized attribute keys straight to the
         # sandbox with no turn cost and no trace (ORO-2246), so the routes are
         # gone rather than forwarded. 410 (not the generic 403) so a client
-        # cannot mistake it for a permissions or transient error.
-        location ^~ /search/ {
-            return 410 '{"error": "gone", "detail": "ShoppingBench search routes were removed; use the ORO Bench environment tools via /environment/call"}\n';
-            add_header Content-Type application/json;
+        # can tell a removal from a permissions error. `return` consults
+        # default_type, not add_header, for the Content-Type of its body.
+        location ~ ^/search(/|$) {
+            default_type application/json;
+            return 410 '{"error": "ShoppingBench search routes were removed; use the ORO Bench environment tools via /environment/call"}\n';
         }
 
         # Route /inference/* requests through njs model validation

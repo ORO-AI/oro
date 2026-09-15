@@ -103,7 +103,6 @@ def test_compose_supports_existing_miner_command_and_env_file(
     )
     assert service["network_mode"] == "service:test-proxy"
     assert proxy["environment"]["SESSION_RUNTIME_HOST"] == "127.0.0.1"
-    assert proxy["environment"]["SEARCH_SERVER_URL"] == "test-search-server"
     assert proxy["environment"]["BACKEND_URL"] == "https://api.oroagents.com"
     assert proxy["environment"]["BACKEND_HOST"] == "api.oroagents.com"
     assert "ORO_LOCAL_INFERENCE_MODE" not in proxy["environment"]
