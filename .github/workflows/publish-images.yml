@@ -227,63 +227,88 @@ jobs:
       - name: Smoke test search-server image
         run: |
           set -euo pipefail
+
+          # Poll a search-server container's /health until it returns.
+          # Base image is ~7GB and cold JVM startup can take ~30s on the
+          # runner; give up to ~120s. Echoes the JSON body on success,
+          # empty on timeout. Caller checks for empty + inspects logs.
+          wait_for_health() {
+            local ctr="$1" body=""
+            for _ in $(seq 1 40); do
+              local state
+              state=$(docker inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null || echo missing)
+              if [ "$state" != "running" ]; then
+                echo "::error::search-server container $ctr exited early (state=$state)"
+                docker logs "$ctr" 2>&1 || true
+                docker rm -f "$ctr" 2>/dev/null || true
+                return 1
+              fi
+              body=$(docker exec "$ctr" python -c 'import urllib.request, json; print(json.dumps(json.loads(urllib.request.urlopen("http://localhost:5632/health", timeout=3).read())))' 2>/dev/null || echo "")
+              if [ -n "$body" ]; then
+                printf '%s' "$body"
+                return 0
+              fi
+              sleep 3
+            done
+            return 2
+          }
+
           fresh_digest=$(ls /tmp/digests/search-server | head -1)
           docker run -d --name search-smoke \
             -e HOST=0.0.0.0 -e PORT=5632 \
             ${{ env.IMAGE_PREFIX }}/search-server@sha256:$fresh_digest
-          # Base image is ~7GB and cold JVM startup can take ~30s on the runner.
-          fresh_body=""
-          for i in $(seq 1 40); do
-            state=$(docker inspect -f '{{.State.Status}}' search-smoke 2>/dev/null || echo missing)
-            if [ "$state" != "running" ]; then
-              echo "::error::search-server exited early (state=$state)"
-              docker logs search-smoke 2>&1 || true
-              docker rm -f search-smoke 2>/dev/null || true
-              exit 1
-            fi
-            fresh_body=$(docker exec search-smoke python -c 'import urllib.request, json; print(json.dumps(json.loads(urllib.request.urlopen("http://localhost:5632/health", timeout=3).read())))' 2>/dev/null || echo "")
-            [ -n "$fresh_body" ] && break
-            sleep 3
-          done
-          if [ -z "$fresh_body" ]; then
-            echo "::error::search-server /health never returned within 120s"
+          if ! fresh_body=$(wait_for_health search-smoke); then
+            echo "::error::search-server (fresh) /health never returned within 120s"
             docker logs search-smoke 2>&1 | tail -80 || true
-            docker rm -f search-smoke
+            docker rm -f search-smoke 2>/dev/null || true
             exit 1
           fi
           echo "fresh /health:"
           echo "$fresh_body" | python3 -m json.tool
 
-          # Pull the currently-promoted :stable image and record its
-          # /health identity for the drift comparison below. If :stable
-          # doesn't exist yet (first-ever search-server publish through
-          # this workflow), skip the comparison but log clearly.
+          # Probe :stable presence via `docker manifest inspect` and
+          # distinguish "manifest absent" (legit skip on first publish)
+          # from operational errors (transient GHCR / network / auth
+          # blip). Operational errors MUST hard-fail — silently skipping
+          # the drift compare would let a mismatched-index build reach
+          # :latest and, via a later promote, :stable. The manifest
+          # unknown detection is the whole point of this smoke step.
           stable_body=""
-          if docker pull ${{ env.IMAGE_PREFIX }}/search-server:stable >/dev/null 2>&1; then
+          manifest_stderr=$(mktemp)
+          if docker manifest inspect \
+              ${{ env.IMAGE_PREFIX }}/search-server:stable \
+              >/dev/null 2>"$manifest_stderr"; then
+            stable_present=1
+          else
+            manifest_msg=$(cat "$manifest_stderr")
+            case "$manifest_msg" in
+              *"manifest unknown"*|*"MANIFEST_UNKNOWN"*|*"no such manifest"*|*"not found"*|*"NAME_UNKNOWN"*)
+                stable_present=0
+                echo "::warning::search-server:stable not present in registry (manifest unknown) — skipping identity-drift comparison (first publish)"
+                ;;
+              *)
+                echo "::error::search-server:stable presence probe failed with operational error — refusing to skip drift check"
+                echo "$manifest_msg" >&2
+                docker rm -f search-smoke 2>/dev/null || true
+                rm -f "$manifest_stderr"
+                exit 1
+                ;;
+            esac
+          fi
+          rm -f "$manifest_stderr"
+
+          if [ "${stable_present:-0}" -eq 1 ]; then
+            docker pull ${{ env.IMAGE_PREFIX }}/search-server:stable
             docker run -d --name stable-search-smoke \
               -e HOST=0.0.0.0 -e PORT=5632 \
               ${{ env.IMAGE_PREFIX }}/search-server:stable
-            for i in $(seq 1 40); do
-              state=$(docker inspect -f '{{.State.Status}}' stable-search-smoke 2>/dev/null || echo missing)
-              if [ "$state" != "running" ]; then
-                echo "::error::stable search-server exited early during identity fetch"
-                docker logs stable-search-smoke 2>&1 || true
-                docker rm -f stable-search-smoke 2>/dev/null || true
-                docker rm -f search-smoke 2>/dev/null || true
-                exit 1
-              fi
-              stable_body=$(docker exec stable-search-smoke python -c 'import urllib.request, json; print(json.dumps(json.loads(urllib.request.urlopen("http://localhost:5632/health", timeout=3).read())))' 2>/dev/null || echo "")
-              [ -n "$stable_body" ] && break
-              sleep 3
-            done
-            docker rm -f stable-search-smoke
-            if [ -z "$stable_body" ]; then
-              echo "::error:::stable search-server /health never returned within 120s (cannot compare identity)"
-              docker rm -f search-smoke
+            if ! stable_body=$(wait_for_health stable-search-smoke); then
+              echo "::error::search-server:stable /health never returned within 120s (cannot compare identity)"
+              docker logs stable-search-smoke 2>&1 | tail -80 || true
+              docker rm -f stable-search-smoke search-smoke 2>/dev/null || true
               exit 1
             fi
-          else
-            echo "::warning::search-server:stable not present in registry — skipping identity-drift comparison (first publish)"
+            docker rm -f stable-search-smoke
           fi
 
           FRESH_BODY="$fresh_body" STABLE_BODY="$stable_body" python3 <<'PY'
