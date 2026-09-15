@@ -128,7 +128,7 @@ retrieval_recall                   mean 0.71  1/1 passed
   TF2-retrieval_recall-300003      completed         0.71
 
 recovery                           mean 0.00  0/1 passed
-  TF6-recovery-300005              environment_error 0.00  environment: tool call exceeded 10.000s
+  TF6-recovery-300005              completed         0.00
 
 Aggregate score  0.564286
 Artifacts        logs/environment-runs/local-7c1f2a
