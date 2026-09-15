@@ -44,6 +44,12 @@ class ProgressReporter:
     # How long to wait with no new output before giving up (seconds)
     IDLE_TIMEOUT = 120.0
 
+    # Bounded wait for scoring futures still running when the monitoring
+    # loop exits (hard timeout / no-output-file) before giving up on them.
+    # See wait_for_completion().
+    DRAIN_TIMEOUT = 30.0
+    DRAIN_POLL_INTERVAL = 0.5
+
     def __init__(
         self,
         backend_client: BackendClient,
@@ -136,6 +142,15 @@ class ProgressReporter:
 
         The loop exits when all problems are confirmed reported to the backend,
         or when the hard timeout expires (remaining marked as TIMED_OUT).
+
+        The monitoring loop's hard-timeout and no-output-file paths can exit
+        while a problem is still being scored (mark_remaining_timed_out()
+        deliberately leaves those out of _results rather than writing a
+        known-wrong TIMED_OUT — see EnvelopeDispatcher). Give any such
+        in-flight score a bounded chance to actually land here, then sweep
+        whatever is still missing and flush once more, so the aggregate score
+        this run actually reports reflects real scoring outcomes rather than
+        stopping short of them.
         """
         join_timeout = timeout or (self.scoring_timeout + 60)
         if self._thread is not None:
@@ -144,6 +159,28 @@ class ProgressReporter:
                 logging.warning(
                     f"Monitoring thread did not finish within {join_timeout}s"
                 )
+
+        drain_deadline = time.time() + self.DRAIN_TIMEOUT
+        while (
+            self._scoring_pool.pending_count() > 0 and time.time() < drain_deadline
+        ):
+            self._scoring_pool.collect_completed()
+            time.sleep(self.DRAIN_POLL_INTERVAL)
+
+        still_pending = self._scoring_pool.pending_count()
+        if still_pending > 0:
+            abandoned = self._scoring_pool.abandon_pending()
+            logging.warning(
+                f"{len(abandoned)} scoring task(s) still running after "
+                f"{self.DRAIN_TIMEOUT}s drain; marking as TIMED_OUT"
+            )
+
+        # Sweep whatever the drain didn't resolve, then send a final batch so
+        # the backend sees the (possibly now-correct) results, not just what
+        # was known at the moment the loop broke.
+        self._envelope_dispatcher.mark_remaining_timed_out()
+        self._batcher.batch_report()
+
         self._scoring_pool.shutdown()
 
     def get_aggregate_score(self) -> Optional[AggregateScore]:

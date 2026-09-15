@@ -256,3 +256,72 @@ class TestSweepNarrowing:
         assert reporter._results[_P1].score == 1.0
         assert reporter._results[_P2].status == ProblemStatus.TIMED_OUT
         assert reporter._results[_P3].status == ProblemStatus.TIMED_OUT
+
+
+class TestWaitForCompletionDrain:
+    """wait_for_completion() must give an in-flight score a bounded chance
+    to actually land -- otherwise mark_remaining_timed_out() correctly
+    refusing to write a bogus TIMED_OUT (see TestEnvelopeSweep above) just
+    means the problem is silently missing from the aggregate instead of
+    wrongly zeroed, with no improvement to the miner's actual score. See
+    review discussion on PR #295.
+    """
+
+    def test_drain_waits_for_in_flight_score_before_finalizing(self, reporter):
+        import threading
+
+        real_result = ProblemResult(
+            problem_id=_P1, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+        release = threading.Event()
+
+        def slow_worker():
+            release.wait(timeout=5)
+            with reporter._lock:
+                reporter._results[_P1] = real_result
+
+        future = reporter._scoring_pool._executor.submit(slow_worker)
+        reporter._scoring_pool.futures[_P1] = future
+
+        # p2/p3 already resolved normally before wait_for_completion runs.
+        reporter._results[_P2] = ProblemResult(
+            problem_id=_P2, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+        reporter._results[_P3] = ProblemResult(
+            problem_id=_P3, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+
+        # Release the "worker" well inside the drain window, simulating a
+        # score that lands a moment after the monitoring loop already broke.
+        threading.Timer(0.2, release.set).start()
+
+        reporter.DRAIN_TIMEOUT = 5.0
+        reporter.DRAIN_POLL_INTERVAL = 0.05
+        reporter.wait_for_completion()
+
+        assert reporter._results[_P1] is real_result
+        assert reporter._results[_P1].status == ProblemStatus.SUCCESS
+        assert reporter._results[_P1].score == 1.0
+        reporter.backend_client.report_progress.assert_called()
+
+    def test_drain_gives_up_after_timeout_and_marks_timed_out(self, reporter):
+        import threading
+        from concurrent.futures import Future
+
+        # A future that never completes within the (shortened) drain window.
+        never_done: Future = Future()
+        reporter._scoring_pool.futures[_P1] = never_done
+
+        reporter._results[_P2] = ProblemResult(
+            problem_id=_P2, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+        reporter._results[_P3] = ProblemResult(
+            problem_id=_P3, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+
+        reporter.DRAIN_TIMEOUT = 0.2
+        reporter.DRAIN_POLL_INTERVAL = 0.05
+        reporter.wait_for_completion()
+
+        assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
+        reporter.backend_client.report_progress.assert_called()

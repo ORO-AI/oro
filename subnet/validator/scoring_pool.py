@@ -77,6 +77,22 @@ class ScoringPool:
     def pending_count(self) -> int:
         return sum(1 for f in self.futures.values() if not f.done())
 
+    def abandon_pending(self) -> List[str]:
+        """Stop waiting on any futures still running, removing them from
+        tracking so has_pending_future()/has_future() report False for them.
+
+        A ThreadPoolExecutor future that's already executing can't be
+        forcibly cancelled, so the worker thread may keep running in the
+        background and may still write to self._results later -- but the
+        caller has decided (after a bounded drain) not to wait any longer,
+        so a subsequent sweep needs to be able to mark these TIMED_OUT
+        instead of treating them as perpetually in flight.
+        """
+        abandoned = [pid for pid, f in self.futures.items() if not f.done()]
+        for pid in abandoned:
+            self.futures.pop(pid, None)
+        return abandoned
+
     def submit(self, problem_id: str, dialogue: list) -> None:
         future = self._executor.submit(self._score_problem, dialogue, problem_id)
         self.futures[problem_id] = future
