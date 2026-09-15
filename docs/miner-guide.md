@@ -102,8 +102,6 @@ command works without additional networking flags. Run one local test at a
 time per Compose project. Dependencies stay running for subsequent tests; stop
 them with `docker compose --profile test down` when finished.
 
-**Note on `find_product`:** the `q` parameter matches against product title and the values within `attributes` / `sku_options`. Field names (keys) themselves are not searchable.
-
 ### Output
 
 The command prints a run header, the finalized tasks grouped by family with

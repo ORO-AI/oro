@@ -5,7 +5,7 @@ This directory contains Docker configuration for running ShoppingBench services 
 ## Services
 
 - **Search Server**: Provides product search functionality
-- **Proxy**: Nginx reverse proxy that routes requests to search server and Chutes API
+- **Proxy**: Nginx reverse proxy that routes agent requests to the session runtime and the inference providers
 
 ## Search Server
 
@@ -232,8 +232,9 @@ The proxy service acts as a gateway for sandboxed agent containers, providing co
 - **Proxy Container**: Only container with internet access, runs nginx reverse proxy
 - **Sandbox Network**: Internal Docker network (no internet access) for agent containers
 - **Path-based Routing**:
-  - `/search/*` → search-server
+  - `/environment/call` → session runtime (ORO Bench tool actions)
   - `/inference/*` → Chutes API (external, auth forwarded from sandbox client)
+  - `/search/*` → 410 Gone (ShoppingBench routes, removed in ORO-2246)
 
 ### Network Topology
 
@@ -242,7 +243,7 @@ Internet
   ↓
 Bridge Network (default, has internet)
   ├─→ search-server (accessible from host via port mapping)
-  └─→ proxy (connected to bridge for internet + search-server access)
+  └─→ proxy (connected to bridge for internet access)
         ↓
         └─→ sandbox network (internal, no internet)
               ├─→ proxy (accessible from agent containers)
@@ -282,13 +283,14 @@ SANDBOX_PROXY_URL=http://proxy:80
 ```
 
 This allows agent containers to access services through the proxy:
-- `http://proxy:80/search/find_product` → search-server
+- `http://proxy:80/environment/call` → session runtime
+- `http://proxy:80/inference/chat/completions` → inference providers
 
 ### Network Isolation
 
 - **Agent containers** are placed on the `sandbox` network (internal, no internet access)
-- **Proxy** is on both `bridge` (for internet + search-server) and `sandbox` (for agent containers)
-- **Search-server** is on default `bridge` network (accessible from host and proxy)
+- **Proxy** is on both `bridge` (for internet) and `sandbox` (for agent containers)
+- **Search-server** is on default `bridge` network (accessible from host and the validator runtime, never from the sandbox)
 
 ### Verifying the Proxy
 
@@ -296,6 +298,6 @@ This allows agent containers to access services through the proxy:
 # Health check
 curl http://localhost:8080/health
 
-# Test search routing through proxy
-curl "http://localhost:8080/search/find_product?q=shoes&page=1"
+# Legacy search routes are gone
+curl -i "http://localhost:8080/search/find_product?q=shoes"   # HTTP 410
 ```

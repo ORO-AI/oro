@@ -54,8 +54,6 @@ services:
       dockerfile: docker/proxy/Dockerfile
     container_name: shoppingbench-proxy
     environment:
-      - SEARCH_SERVER_URL=${SEARCH_SERVER_URL:-search-server}
-      - SEARCH_SERVER_PORT=${SEARCH_SERVER_PORT:-5632}
       - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
       # Backend URL for fetching the live model allowlist. Defaults to
       # production; staging/dev override via BACKEND_URL env var.
