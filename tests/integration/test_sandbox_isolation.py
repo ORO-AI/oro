@@ -129,7 +129,7 @@ class TestSandboxIsolation:
         assert "healthy" in result.stdout.lower() or result.stdout.strip() == "healthy"
 
     def test_legacy_search_routes_are_gone(self, sandbox_container):
-        """The ShoppingBench /search/* routes answer 410 and never reach search-server (ORO-2246)."""
+        """The ShoppingBench /search/* routes answer 410 and never reach search-server."""
         result = exec_in_container(
             sandbox_container,
             [
@@ -150,6 +150,33 @@ class TestSandboxIsolation:
         assert result.stdout.strip() == "410", (
             f"Expected 410 for a legacy search route, got: {result.stdout[:200]}"
         )
+
+    def test_inference_route_is_live(self, sandbox_container):
+        """/inference/* is owned by the njs validator: a body without a model is rejected there, not by the default deny."""
+        result = exec_in_container(
+            sandbox_container,
+            [
+                "curl",
+                "-s",
+                "--max-time",
+                "5",
+                "-w",
+                "\n%{http_code}",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                "{}",
+                "http://proxy:80/inference/chat/completions",
+            ],
+            timeout=10,
+        )
+
+        assert result.returncode == 0, result.stderr
+        body, status = result.stdout.rsplit("\n", 1)
+        assert status == "400", (
+            f"Expected the model validator to answer, got {status}: {body[:200]}"
+        )
+        assert "model" in json.loads(body)["error"]
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""

@@ -234,7 +234,7 @@ The proxy service acts as a gateway for sandboxed agent containers, providing co
 - **Path-based Routing**:
   - `/environment/call` → session runtime (ORO Bench tool actions)
   - `/inference/*` → Chutes API (external, auth forwarded from sandbox client)
-  - `/search/*` → 410 Gone (ShoppingBench routes, removed in ORO-2246)
+  - `/search/*` → 410 Gone (ShoppingBench routes, removed)
 
 ### Network Topology
 
