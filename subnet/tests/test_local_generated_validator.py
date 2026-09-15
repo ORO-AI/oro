@@ -176,9 +176,15 @@ def test_local_pack_selects_first_five_tasks_from_each_generated_family() -> Non
         for task_index in range(5)
     ]
 
-    missing = sorted(GENERATED_FAMILIES)[:-1]
-    with pytest.raises(ValueError, match="missing="):
-        validate_local_pack(_pack(missing))
+    # A subset pack (one supported family omitted) is valid — omitted families
+    # are allowed, so long as every present family has enough tasks.
+    subset = sorted(GENERATED_FAMILIES)[:-1]
+    subset_roster = [family for family in subset for _ in range(6)]
+    assert validate_local_pack(_pack(subset_roster)) == [
+        f"task-{family_index * 6 + task_index}"
+        for family_index in range(len(subset))
+        for task_index in range(5)
+    ]
 
     unexpected = sorted(GENERATED_FAMILIES) + ["unsupported"]
     with pytest.raises(ValueError, match="unexpected="):

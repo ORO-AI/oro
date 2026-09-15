@@ -134,7 +134,10 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "verifier": VERIFIER_VERSION,
     }
     family_counts = manifest["epoch"]["family_counts"]
-    assert set(family_counts) == local.GENERATED_FAMILIES
+    # The bundled pack may ship a subset of the supported families (currently
+    # six of seven — preference_reasoning is omitted); every present family
+    # must still carry a full qualifying quota.
+    assert set(family_counts) and set(family_counts) <= local.GENERATED_FAMILIES
     assert all(
         count >= local.QUALIFYING_TASKS_PER_FAMILY for count in family_counts.values()
     )
