@@ -325,3 +325,46 @@ class TestWaitForCompletionDrain:
 
         assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
         reporter.backend_client.report_progress.assert_called()
+
+    def test_abandoned_future_late_write_does_not_clobber_timed_out(self, reporter):
+        # p1's future is still running when the drain gives up: it gets
+        # abandoned (removed from tracking) and the sweep marks it
+        # TIMED_OUT, already reported. If that background worker then
+        # actually finishes and calls the real _score_problem write path,
+        # that write must be discarded -- not overwrite the TIMED_OUT the
+        # caller has already sent out with no way to correct it.
+        from concurrent.futures import Future
+        from unittest.mock import MagicMock
+
+        never_done: Future = Future()
+        pool = reporter._scoring_pool
+        pool.futures[_P1] = never_done
+
+        reporter._results[_P2] = ProblemResult(
+            problem_id=_P2, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+        reporter._results[_P3] = ProblemResult(
+            problem_id=_P3, category="product", status=ProblemStatus.SUCCESS, score=1.0
+        )
+
+        reporter.DRAIN_TIMEOUT = 0.2
+        reporter.DRAIN_POLL_INTERVAL = 0.05
+        reporter.wait_for_completion()
+
+        assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
+        assert str(_P1) in pool._abandoned
+
+        # Simulate the abandoned worker finally finishing in the background:
+        # wire up just enough for _score_problem to reach its write site.
+        fake_scorer = MagicMock()
+        fake_scorer.score_problem.return_value = {"success": True}
+        pool.scorers = {"product": fake_scorer}
+        pool._reasoning_judge.score = MagicMock(
+            return_value={"reasoning_score": None, "reasoning_explanation": None}
+        )
+        dialogue = [{"role": "u", "content": "x", "extra_info": {"step": 1}}]
+
+        pool._score_problem(dialogue, _P1)
+
+        assert reporter._results[_P1].status == ProblemStatus.TIMED_OUT
+        assert reporter._results[_P1].score == 0.0

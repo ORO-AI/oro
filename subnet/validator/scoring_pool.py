@@ -53,6 +53,10 @@ class ScoringPool:
         )
         self.futures: Dict[str, Future] = {}
         self.scorers: Dict[str, Any] = {}
+        # problem_ids abandon_pending() gave up on and the caller has already
+        # finalized as TIMED_OUT elsewhere; _score_problem must not let a
+        # late-arriving write from that (still-running) worker clobber it.
+        self._abandoned: set = set()
         self._initialize_scorers(problems)
 
     def has_future(self, problem_id: str) -> bool:
@@ -83,14 +87,18 @@ class ScoringPool:
 
         A ThreadPoolExecutor future that's already executing can't be
         forcibly cancelled, so the worker thread may keep running in the
-        background and may still write to self._results later -- but the
-        caller has decided (after a bounded drain) not to wait any longer,
-        so a subsequent sweep needs to be able to mark these TIMED_OUT
-        instead of treating them as perpetually in flight.
+        background and may still try to write to self._results later --
+        but the caller has decided (after a bounded drain) not to wait any
+        longer, so a subsequent sweep needs to be able to mark these
+        TIMED_OUT instead of treating them as perpetually in flight. Also
+        records each id in self._abandoned, so _score_problem discards
+        that late write instead of overwriting the (already reported)
+        TIMED_OUT result with a real score no one will ever see reported.
         """
         abandoned = [pid for pid, f in self.futures.items() if not f.done()]
         for pid in abandoned:
             self.futures.pop(pid, None)
+            self._abandoned.add(str(pid))
         return abandoned
 
     def submit(self, problem_id: str, dialogue: list) -> None:
@@ -203,6 +211,13 @@ class ScoringPool:
                 **reasoning,
             )
             with self._lock:
+                if str(problem_id) in self._abandoned:
+                    logging.warning(
+                        f"Discarding late score for {problem_id}: already "
+                        f"finalized as TIMED_OUT after the drain timeout "
+                        f"gave up waiting on it"
+                    )
+                    return
                 self._results[str(problem_id)] = result
                 completed = len(self._results)
 
