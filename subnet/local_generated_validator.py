@@ -39,7 +39,6 @@ GENERATED_FAMILIES = frozenset(
         "intent_decomposition",
         "retrieval_recall",
         "constraint_satisfaction",
-        "preference_reasoning",
         "ranking",
         "recovery",
         "justification",
@@ -789,7 +788,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         default=None,
         help=(
             "How many problems to run, sampled at random and spread across the "
-            "seven families. Defaults to the full qualifying roster."
+            "generated families. Defaults to the full qualifying roster."
         ),
     )
     parser.add_argument(
