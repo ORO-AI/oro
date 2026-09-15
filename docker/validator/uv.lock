@@ -1264,7 +1264,7 @@ wheels = [
 
 [[package]]
 name = "oro-env-runtime"
-version = "0.2.18"
+version = "1.0.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "iso4217" },
@@ -1272,7 +1272,7 @@ dependencies = [
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b8/38/e970996479d793acf7b89126a299c41ec072a7e2006d31d5b957ec517a56/oro_env_runtime-0.2.18-py3-none-any.whl", hash = "sha256:1af7552998e490128cccad53ae18670fee91108d6eff6cc80d57770335ba6144", size = 170531, upload-time = "2026-09-14T04:54:45.599Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/a5/000423509c7436449b59abaf343bb42d36db2114c5578221db8dd683aabd/oro_env_runtime-1.0.6-py3-none-any.whl", hash = "sha256:f572e92cca21cf592fd7f43a82c17b8bdde6df8059e645271610e23b676046fb", size = 178728, upload-time = "2026-09-15T05:18:00.479Z" },
 ]
 
 [[package]]
@@ -1324,7 +1324,7 @@ requires-dist = [
     { name = "bittensor-wallet", specifier = "==4.1.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "openai", specifier = "==2.44.0" },
-    { name = "oro-env-runtime", specifier = "==0.2.18" },
+    { name = "oro-env-runtime", specifier = "==1.0.6" },
     { name = "oro-sdk", specifier = "==1.0.121" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=5.9.0" },

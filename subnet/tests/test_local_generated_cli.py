@@ -21,7 +21,7 @@ from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a"
+    "46d1198c035b582b7c4e75b138364e7a50242e8af3fb75acc44fa8b23e96011d"
 )
 
 
@@ -117,7 +117,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "0.2.18"
+    assert version("oro-env-runtime") == "1.0.6"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
@@ -134,7 +134,10 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "verifier": VERIFIER_VERSION,
     }
     family_counts = manifest["epoch"]["family_counts"]
-    assert set(family_counts) == local.GENERATED_FAMILIES
+    # The bundled pack may ship a subset of the supported families (currently
+    # six of seven — preference_reasoning is omitted); every present family
+    # must still carry a full qualifying quota.
+    assert set(family_counts) and set(family_counts) <= local.GENERATED_FAMILIES
     assert all(
         count >= local.QUALIFYING_TASKS_PER_FAMILY for count in family_counts.values()
     )

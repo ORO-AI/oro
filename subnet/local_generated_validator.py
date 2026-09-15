@@ -150,21 +150,22 @@ def validate_local_pack(
         raise ValueError("tasks_per_family must be positive")
 
     counts = Counter(task.family for task in pack.task_specs)
-    missing = sorted(expected_families - set(counts))
+    # A pack may ship a SUBSET of the supported families (e.g. a six-family
+    # pack that omits preference_reasoning). Only an *unknown* family, or a
+    # present family with too few tasks for a full qualifying run, is invalid;
+    # an omitted family is allowed.
     unexpected = sorted(set(counts) - expected_families)
     insufficient = (
         []
         if problem_count is not None
         else sorted(
             f"{family}:{counts[family]}"
-            for family in expected_families
+            for family in counts
             if counts[family] < tasks_per_family
         )
     )
-    if missing or unexpected or insufficient:
+    if unexpected or insufficient:
         details = [f"task_count={len(pack.task_specs)}"]
-        if missing:
-            details.append(f"missing={','.join(missing)}")
         if unexpected:
             details.append(f"unexpected={','.join(unexpected)}")
         if insufficient:
@@ -850,7 +851,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         inference_base_url=base_url,
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
-        or "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a",
+        or "46d1198c035b582b7c4e75b138364e7a50242e8af3fb75acc44fa8b23e96011d",
         problem_count=args.problems,
         seed=seed,
         max_workers=max_workers,
