@@ -39,10 +39,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The search image is pack-bound because it contains the catalog and
-        # Lucene index. It is published separately after that index is built;
-        # a source-only build must never replace the indexed `latest` image.
-        image: [proxy, sandbox, validator]
+        # `search-server` is a source-only build on top of the pre-indexed
+        # `search-server-base:latest`. That base carries the Lucene index +
+        # its `documents_sha256` / `index_sha256` identity; this workflow
+        # rebuilds only the code layer (entrypoint.sh, server.py, runtime
+        # catalog helpers) so its output inherits the current base's
+        # search identity byte-for-byte. The smoke-test job asserts that
+        # invariant on every publish — see the "Smoke test search-server
+        # image" step below for the identity guardrail that catches an
+        # empty or missing index before the manifest lands (ORO-2244).
+        image: [proxy, sandbox, validator, search-server]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -55,7 +61,13 @@ jobs:
             file: docker/sandbox/Dockerfile
           - image: validator
             file: docker/validator/Dockerfile
+          - image: search-server
+            file: docker/search-server/Dockerfile
     steps:
+      - name: Free disk space (search-server base image is ~7GB)
+        if: matrix.image == 'search-server'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
       - name: Prepare platform pair
         run: |
           platform=${{ matrix.platform }}
@@ -107,6 +119,13 @@ jobs:
     permissions:
       packages: read
     steps:
+      # The search-server smoke step pulls the ~7GB indexed base image
+      # (via the just-built digest) AND the current `:stable` digest for
+      # identity comparison. The build job frees disk before pulling;
+      # mirror that here so pulls don't fail with ENOSPC.
+      - name: Free disk space (search-server pulls ~7GB baked-index images)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -131,6 +150,12 @@ jobs:
         with:
           name: digest-proxy-linux-amd64
           path: /tmp/digests/proxy
+
+      - name: Download search-server digest (amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: digest-search-server-linux-amd64
+          path: /tmp/digests/search-server
 
       # Use the baked-in venv at .venv/bin/python — the same interpreter the
       # ENTRYPOINT runs in production. Going through `uv run` instead would
@@ -178,6 +203,182 @@ jobs:
           echo "Proxy nginx config rendered and started cleanly"
           docker rm -f proxy-smoke
 
+      # Boot the search-server on the same image contract miners run:
+      # `/app/indexes` populated by the indexed base, gunicorn spawning +
+      # /health returning `status: healthy` with a non-empty search
+      # identity. #277 removed search-server from this workflow out of
+      # (valid) concern that a source-only rebuild could publish an
+      # image whose baked-in index drifted from the active pack. This
+      # step is the guardrail that answers that concern in two parts:
+      #
+      # 1. Assert the fresh image's `/health` reports a healthy state +
+      #    the expected contract + non-empty 64-char SHAs.
+      # 2. Compare the fresh image's `documents_sha256` +
+      #    `index_sha256` against the *currently-promoted* `:stable`
+      #    image's identity. If they differ, the base advanced to a
+      #    different indexed pack — this workflow refuses to promote
+      #    it because only the private-fork pack-bound publish pipeline
+      #    is authorized to change search identity. Fresh publishes of
+      #    :stable in that case must go through that pipeline.
+      #
+      # Also verifies the sync-worker fix from ORO-2244 stays live:
+      # greps the process command line for `--worker-class sync` so a
+      # future entrypoint edit that reintroduces gthread trips CI.
+      - name: Smoke test search-server image
+        run: |
+          set -euo pipefail
+
+          # Poll a search-server container's /health until it returns.
+          # Base image is ~7GB and cold JVM startup can take ~30s on the
+          # runner; give up to ~120s. Echoes the JSON body on success,
+          # empty on timeout. Caller checks for empty + inspects logs.
+          wait_for_health() {
+            local ctr="$1" body=""
+            for _ in $(seq 1 40); do
+              local state
+              state=$(docker inspect -f '{{.State.Status}}' "$ctr" 2>/dev/null || echo missing)
+              if [ "$state" != "running" ]; then
+                echo "::error::search-server container $ctr exited early (state=$state)"
+                docker logs "$ctr" 2>&1 || true
+                docker rm -f "$ctr" 2>/dev/null || true
+                return 1
+              fi
+              body=$(docker exec "$ctr" python -c 'import urllib.request, json; print(json.dumps(json.loads(urllib.request.urlopen("http://localhost:5632/health", timeout=3).read())))' 2>/dev/null || echo "")
+              if [ -n "$body" ]; then
+                printf '%s' "$body"
+                return 0
+              fi
+              sleep 3
+            done
+            return 2
+          }
+
+          fresh_digest=$(ls /tmp/digests/search-server | head -1)
+          docker run -d --name search-smoke \
+            -e HOST=0.0.0.0 -e PORT=5632 \
+            ${{ env.IMAGE_PREFIX }}/search-server@sha256:$fresh_digest
+          if ! fresh_body=$(wait_for_health search-smoke); then
+            echo "::error::search-server (fresh) /health never returned within 120s"
+            docker logs search-smoke 2>&1 | tail -80 || true
+            docker rm -f search-smoke 2>/dev/null || true
+            exit 1
+          fi
+          echo "fresh /health:"
+          echo "$fresh_body" | python3 -m json.tool
+
+          # Probe :stable presence via `docker manifest inspect` and
+          # distinguish "manifest absent" (legit skip on first publish)
+          # from operational errors (transient GHCR / network / auth
+          # blip). Operational errors MUST hard-fail — silently skipping
+          # the drift compare would let a mismatched-index build reach
+          # :latest and, via a later promote, :stable. The manifest
+          # unknown detection is the whole point of this smoke step.
+          stable_body=""
+          manifest_stderr=$(mktemp)
+          if docker manifest inspect \
+              ${{ env.IMAGE_PREFIX }}/search-server:stable \
+              >/dev/null 2>"$manifest_stderr"; then
+            stable_present=1
+          else
+            manifest_msg=$(cat "$manifest_stderr")
+            case "$manifest_msg" in
+              *"manifest unknown"*|*"MANIFEST_UNKNOWN"*|*"no such manifest"*|*"not found"*|*"NAME_UNKNOWN"*)
+                stable_present=0
+                echo "::warning::search-server:stable not present in registry (manifest unknown) — skipping identity-drift comparison (first publish)"
+                ;;
+              *)
+                echo "::error::search-server:stable presence probe failed with operational error — refusing to skip drift check"
+                echo "$manifest_msg" >&2
+                docker rm -f search-smoke 2>/dev/null || true
+                rm -f "$manifest_stderr"
+                exit 1
+                ;;
+            esac
+          fi
+          rm -f "$manifest_stderr"
+
+          if [ "${stable_present:-0}" -eq 1 ]; then
+            docker pull ${{ env.IMAGE_PREFIX }}/search-server:stable
+            docker run -d --name stable-search-smoke \
+              -e HOST=0.0.0.0 -e PORT=5632 \
+              ${{ env.IMAGE_PREFIX }}/search-server:stable
+            if ! stable_body=$(wait_for_health stable-search-smoke); then
+              echo "::error::search-server:stable /health never returned within 120s (cannot compare identity)"
+              docker logs stable-search-smoke 2>&1 | tail -80 || true
+              docker rm -f stable-search-smoke search-smoke 2>/dev/null || true
+              exit 1
+            fi
+            docker rm -f stable-search-smoke
+          fi
+
+          FRESH_BODY="$fresh_body" STABLE_BODY="$stable_body" python3 <<'PY'
+          import json
+          import os
+          import sys
+
+          fresh = json.loads(os.environ["FRESH_BODY"])
+          errs = []
+          if fresh.get("status") != "healthy":
+              errs.append(f"status={fresh.get('status')!r} != healthy")
+          search = fresh.get("search") or {}
+          if search.get("index_contract") != "oro.lucene.catalog.v2":
+              errs.append(f"index_contract={search.get('index_contract')!r}")
+          for field in ("documents_sha256", "index_sha256"):
+              value = search.get(field)
+              if not (isinstance(value, str) and len(value) == 64):
+                  errs.append(f"{field}={value!r} is not a 64-char hex SHA")
+          if errs:
+              print("Fresh /health rejected:", file=sys.stderr)
+              for e in errs:
+                  print(f"  - {e}", file=sys.stderr)
+              sys.exit(f"search-server /health rejected: {len(errs)} issue(s)")
+          print(f"fresh identity OK: documents={search['documents_sha256'][:12]} index={search['index_sha256'][:12]}")
+
+          # Drift comparison against currently-promoted :stable (if any).
+          stable_raw = os.environ.get("STABLE_BODY") or ""
+          if not stable_raw:
+              print("no :stable image to compare against; skipping drift check", file=sys.stderr)
+              sys.exit(0)
+          stable = json.loads(stable_raw)
+          stable_search = stable.get("search") or {}
+          drift = []
+          for field in ("documents_sha256", "index_sha256"):
+              if search.get(field) != stable_search.get(field):
+                  drift.append(
+                      f"{field}: fresh={search.get(field)!r} != stable={stable_search.get(field)!r}"
+                  )
+          if drift:
+              print(
+                  "Fresh build's search identity does not match the currently-promoted"
+                  " :stable image. Only the private-fork pack-bound publish pipeline is"
+                  " authorized to advance search identity; this code-only publish"
+                  " workflow must not replace :stable with a different indexed pack.",
+                  file=sys.stderr,
+              )
+              for line in drift:
+                  print(f"  - {line}", file=sys.stderr)
+              sys.exit("search identity drift blocked")
+          print("identity matches currently-promoted :stable — safe to publish")
+          PY
+
+          # ORO-2244 guardrail: pyjnius / pyserini are not thread-safe. If
+          # someone re-adds `--worker-class gthread --threads N` we want CI
+          # to fail before miners get the buggy image again.
+          cmdline=$(docker exec search-smoke sh -c 'cat /proc/1/cmdline | tr "\0" " "')
+          echo "gunicorn cmdline: $cmdline"
+          if ! echo "$cmdline" | grep -q -- '--worker-class sync'; then
+            echo "::error::search-server is NOT using --worker-class sync (see ORO-2244)"
+            docker rm -f search-smoke
+            exit 1
+          fi
+          if echo "$cmdline" | grep -q -- '--threads'; then
+            echo "::error::search-server is passing --threads (pyjnius races, see ORO-2244)"
+            docker rm -f search-smoke
+            exit 1
+          fi
+
+          docker rm -f search-smoke
+
   merge:
     needs: [determine-tag, smoke-test]
     runs-on: ubuntu-latest
@@ -185,7 +386,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        image: [proxy, sandbox, validator]
+        image: [proxy, sandbox, validator, search-server]
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
