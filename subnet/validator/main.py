@@ -694,8 +694,7 @@ class Validator:
         """Trigger Watchtower update check and pull sandbox image.
 
         Called between evaluation cycles. All errors are caught — never crashes the main loop.
-        After Watchtower restarts services, waits for proxy /health (which transitively
-        covers search-server) before returning.
+        After Watchtower restarts services, waits for proxy /health before returning.
         """
         if not AUTO_UPDATE_ENABLED:
             return
@@ -718,8 +717,8 @@ class Validator:
         except Exception as e:
             logging.warning(f"Watchtower update check failed: {e}")
 
-        # Wait for proxy to be healthy (covers search-server transitively).
-        # Watchtower blocks during restarts but doesn't wait for Docker healthchecks.
+        # Wait for proxy to be healthy. Watchtower blocks during restarts but
+        # doesn't wait for Docker healthchecks.
         for attempt in range(30):
             try:
                 if requests.get("http://proxy:80/health", timeout=5).ok:

@@ -188,8 +188,6 @@ jobs:
         run: |
           digest=$(ls /tmp/digests/proxy | head -1)
           docker run -d --name proxy-smoke \
-            -e SEARCH_SERVER_URL=search-server \
-            -e SEARCH_SERVER_PORT=5632 \
             -e CHUTES_HOST=llm.chutes.ai \
             ${{ env.IMAGE_PREFIX }}/proxy@sha256:$digest
           sleep 5

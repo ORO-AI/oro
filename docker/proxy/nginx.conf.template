@@ -41,7 +41,7 @@ http {
 
     # Combined access log + upstream metadata + per-request outcome label.
     # `$upstream_status` propagates the upstream HTTP status when a parent
-    # location uses `proxy_pass` (e.g. /search/*) but stays `-` when the
+    # location uses `proxy_pass` (e.g. /environment/call) but stays `-` when the
     # parent uses `js_content` and dispatches to upstream via an njs
     # subrequest (e.g. /inference/). `$proxy_outcome` covers the gap for the
     # inference path — see js_set above and validate_model.js. CloudWatch
@@ -79,32 +79,21 @@ http {
 
         # Default deny — block any path not explicitly handled below
         location / {
+            default_type application/json;
             return 403 '{"error": "forbidden"}\n';
-            add_header Content-Type application/json;
         }
 
-        # Route only the two agent-facing search operations. Keeping this an
-        # allowlist prevents alternate spellings or newly-added search-server
-        # endpoints from exposing scoring/private product data by default.
-        location ~ ^/search/(find_product|view_product_information)$ {
-            limit_req zone=agent burst=50 nodelay;
-
-            # Re-resolve Docker DNS on every request so container IP changes
-            # (e.g. from Watchtower image updates) are picked up automatically.
-            resolver 127.0.0.11 valid=10s;
-            set $search_upstream http://${SEARCH_SERVER_URL}:${SEARCH_SERVER_PORT};
-
-            # Strip /search prefix and forward to search-server
-            rewrite ^/search/(.*) /$1 break;
-            proxy_pass $search_upstream;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-
-            proxy_connect_timeout 300s;
-            proxy_send_timeout 300s;
-            proxy_read_timeout 300s;
+        # ShoppingBench-era search routes. The ORO Bench runtime talks to the
+        # search-server directly on /internal/*; agents only ever see catalog
+        # data through /environment/call. The raw product record exposed here
+        # carried the verifier's normalized attribute keys straight to the
+        # sandbox with no turn cost and no trace, so the routes are
+        # gone rather than forwarded. 410 (not the generic 403) so a client
+        # can tell a removal from a permissions error. `return` consults
+        # default_type, not add_header, for the Content-Type of its body.
+        location ~ ^/search(/|$) {
+            default_type application/json;
+            return 410 '{"error": "ShoppingBench search routes were removed; use the ORO Bench environment tools via /environment/call"}\n';
         }
 
         # Route /inference/* requests through njs model validation

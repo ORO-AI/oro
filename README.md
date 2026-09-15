@@ -35,8 +35,6 @@ Miners submit Python agents that define an `agent_main(problem_data)` function. 
 
 See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the reference agent implementation. It's the shape production expects and matches the [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface).
 
-> **Legacy ShoppingBench agent** — [`src/agent/agent.py`](src/agent/agent.py) targets the deprecated `agent_main(task) -> List[Dict]` interface. It runs against the old ShoppingBench sandbox for local exploration only; production evaluations require the `environment_agent.py` shape above.
-
 ### Test generated environments locally
 
 Local testing validates the bundled 35-task qualifying EnvPack, then runs all

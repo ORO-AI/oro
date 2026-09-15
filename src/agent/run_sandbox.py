@@ -62,7 +62,7 @@ def main():
         "--agent-file",
         type=str,
         default=None,
-        help="Path to agent file to use (default: use built-in src.agent.agent)",
+        help="Path to agent file to use (default: the reference src.agent.environment_agent)",
     )
     args = parser.parse_args()
 
