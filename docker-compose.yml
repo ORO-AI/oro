@@ -10,10 +10,9 @@ services:
     environment:
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-5632}
-      # gunicorn worker processes (default nproc/2, floor 2) x threads/worker.
-      # Keep workers <= free cores so the extra JVMs don't oversubscribe.
+      # gunicorn sync worker processes (default nproc/2, floor 2). Keep
+      # workers <= free cores so the extra JVMs don't oversubscribe.
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
-      - SEARCH_THREADS=${SEARCH_THREADS:-4}
       # Per-worker JVM heap. Must match the Dockerfile default (this compose var
       # overrides the image ENV). Index is off-heap/mmap, so 1g/worker is plenty;
       # keeps total heap modest across N workers on memory-constrained hosts.
@@ -30,8 +29,8 @@ services:
       test: ["CMD-SHELL", "python -c \"import os; import urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('PORT', '5632') + '/health').read()\""]
       interval: 10s
       # 10s (was 5s): under a heavy concurrent search burst a health probe may
-      # briefly wait for a gthread slot; a tighter timeout risks false unhealthy
-      # flaps on the contended hosts this change targets.
+      # briefly wait for a sync worker slot; a tighter timeout risks false
+      # unhealthy flaps on the contended hosts this change targets.
       timeout: 10s
       retries: 3
       start_period: 30s
@@ -280,7 +279,6 @@ services:
       - HOST=0.0.0.0
       - PORT=5632
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
-      - SEARCH_THREADS=${SEARCH_THREADS:-4}
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5632/health').read()\""]
