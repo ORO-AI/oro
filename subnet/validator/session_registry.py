@@ -551,9 +551,25 @@ class SessionRegistry:
                 ) from exc
             tool_latency_ms = _elapsed_ms(tool_started)
 
-            public_observations = [
-                _public_step_result(observation) for observation in observations
-            ]
+            try:
+                public_observations = [
+                    _public_step_result(observation) for observation in observations
+                ]
+            except HarnessResponseError as exc:
+                # Unlike the future.result() failures above, this runs after
+                # the environment step already succeeded and mutated session
+                # state -- so without this handler, the exception would
+                # escape uncaught with quarantined_reason never set. A
+                # retry on the same session_id would then find
+                # solver_turn_count already advanced past the turn it's
+                # still trying to submit, permanently rejecting every future
+                # call with a confusing "turn does not match session
+                # sequence" instead of a clear quarantine reason.
+                state.quarantined_reason = f"malformed step result: {exc}"
+                record_error("HarnessExecutionError", state.quarantined_reason)
+                raise HarnessExecutionError(
+                    f"{state.quarantined_reason}; session quarantined"
+                ) from exc
             call_results = [
                 {
                     "call_id": item["call_id"],
