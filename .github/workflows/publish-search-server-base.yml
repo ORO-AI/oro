@@ -63,11 +63,21 @@ jobs:
       - name: Fetch index + manifest
         run: |
           set -euo pipefail
-          mkdir -p build-context/indexes
+          mkdir -p build-context
+          # Dockerfile.base does `COPY index /app/index` on the extracted
+          # shard directory (raw dir, not tarball — BuildKit's ADD-extract
+          # produced a file-set the sealed manifest could not verify). The
+          # tarball must expand to `index/` at build-context root.
           aws s3 cp "${{ inputs.index_s3_uri }}" /tmp/index.tar.gz \
             --only-show-errors
-          tar xzf /tmp/index.tar.gz -C build-context/indexes --strip-components=1
+          tar xzf /tmp/index.tar.gz -C build-context
+          test -d build-context/index || {
+            echo "index.tar.gz did not expand to build-context/index/"; exit 1;
+          }
           rm /tmp/index.tar.gz
+          # Dockerfile.base also does a standalone `COPY lucene_manifest.json`;
+          # the file must exist at context root, else COPY hard-fails before
+          # any RUN validation can execute.
           aws s3 cp "${{ inputs.lucene_manifest_s3_uri }}" \
             build-context/lucene_manifest.json --only-show-errors
           # Assert manifest identity fields are populated — the publish
@@ -80,7 +90,6 @@ jobs:
               if not (isinstance(v, str) and len(v) == 64):
                   sys.exit(f"{f}={v!r} is not a 64-char hex SHA")
           '
-          cp docker/search-server/Dockerfile.base build-context/
           cp -r docker build-context/docker
 
       - name: Log in to GHCR

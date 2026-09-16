@@ -30,12 +30,13 @@ RUN python /tmp/patch_pyserini.py && \
 # image (ORO-2244 root cause).
 COPY lucene_manifest.json /app/lucene_manifest.json
 
-# Keep the large archive compressed in the build context. ADD expands it into
-# one image layer, avoiding a second host copy of the full Lucene index.
-# If `index.tar.gz` also carries a top-level `lucene_manifest.json`, ADD's
-# extraction wins over the COPY above — that is the intended behavior when
-# the tarball is authoritative (e.g. built by the pack pipeline).
-ADD index.tar.gz /app/
+# Copy the pre-built Lucene index directory. Was `ADD index.tar.gz /app/` —
+# BuildKit's tarball-decompression path silently produced a file set that did
+# not match the sealed manifest, breaking the RUN validation below (root cause
+# not diagnosed; Lucene shard files themselves are already binary + poorly
+# compressible, so the tarball indirection buys ~0 %). `COPY index /app/index`
+# is a straightforward directory copy the validation can trust byte-for-byte.
+COPY index /app/index
 
 # Validate every expanded index file before this base image can be published.
 RUN test -d /app/index && \

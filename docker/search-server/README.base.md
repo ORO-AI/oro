@@ -32,14 +32,19 @@ let `publish-images.yml` layer the code on top of the current base.
 - `docker/search-server/requirements.txt`
 - `docker/search-server/patch_pyserini.py`
 - `docker/search-server/Dockerfile.base` (this Dockerfile)
-- `index.tar.gz` — root has an `index/` directory holding the
-  Lucene shard files. Optionally bundles `lucene_manifest.json` at
-  the tarball root; when it does, `ADD` will overwrite the COPY'd
-  version below.
-- `lucene_manifest.json` — the sealed identity manifest. `files`
-  must map to every regular file inside `index/` with the expected
-  `size_bytes` + `sha256`, and `java_version` must match the JDK
-  the image ships with.
+- `index/` — a directory (not a tarball) of the Lucene shard files.
+  `Dockerfile.base` uses `COPY index /app/index` — the raw-directory
+  form is authoritative because BuildKit's `ADD index.tar.gz`
+  decompression path produced a file set the sealed manifest could
+  not verify.
+- `lucene_manifest.json` — the sealed identity manifest, at context
+  root. `files` must map to every regular file inside `index/` with
+  the expected `size_bytes` + `sha256`, and `java_version` must
+  match the JDK the image ships with. `Dockerfile.base` `COPY`s this
+  file directly, so it must exist as a standalone file in the build
+  context — any producer of a base build context (this runbook, the
+  workflow scaffold, and any future pack-pipeline callers) must
+  place it there.
 
 The `RUN` steps inside `Dockerfile.base` validate every index file's
 size + SHA against `files`, and verify `java_version` matches the
@@ -59,7 +64,7 @@ machine.
 
 ```bash
 # 1. Extract index + manifest from the currently-promoted :stable image
-#    (which was baked through the private-fork pipeline).
+#    (or from wherever your authoritative sealed pack lives).
 mkdir -p /tmp/base-inputs
 CID=$(docker create ghcr.io/oro-ai/oro/search-server:stable)
 # :stable has /app/indexes as a symlink → /app/index; copy the real dir.
@@ -67,29 +72,30 @@ docker cp "$CID:/app/index" /tmp/base-inputs/index
 docker cp "$CID:/app/lucene_manifest.json" /tmp/base-inputs/
 docker rm "$CID"
 
-# 2. Repackage as index.tar.gz with `index/` at the tarball root — that is
-#    what Dockerfile.base's `ADD index.tar.gz /app/` expects.
-( cd /tmp/base-inputs && tar czf /tmp/base-inputs/index.tar.gz index )
-
-# 3. Assemble the build context (all paths relative to the checkout root
-#    that the Dockerfile references directly).
+# 2. Assemble the build context. Dockerfile.base does `COPY index /app/index`
+#    and `COPY lucene_manifest.json /app/lucene_manifest.json`, so both must
+#    sit at context root.
 BUILD_CTX=$(mktemp -d)
 cp -r docker "$BUILD_CTX/"
-cp /tmp/base-inputs/index.tar.gz "$BUILD_CTX/"
+cp -r /tmp/base-inputs/index "$BUILD_CTX/"
 cp /tmp/base-inputs/lucene_manifest.json "$BUILD_CTX/"
 
-# 4. Authenticate to GHCR with a PAT that has `write:packages`.
+# 3. Authenticate to GHCR with a PAT that has `write:packages`.
 echo "$GHCR_PAT" | docker login ghcr.io -u <your-github-username> --password-stdin
 
-# 5. Set up a multi-arch builder if not already.
+# 4. Set up a multi-arch builder if not already.
 docker buildx create --name multi --driver docker-container --use \
   || docker buildx use multi
 
-# 6. Build + push multi-arch. This IS the publish — multi-arch push cannot
+# 5. Build + push multi-arch. This IS the publish — multi-arch push cannot
 #    go through a local single-arch cache. amd64 leg goes through QEMU on
 #    Apple Silicon (and vice versa); expect ~30-60 min per arch on 14GB.
+#    Multi-arch export doubles peak disk (both layers exported in parallel);
+#    on constrained Docker Desktop VMs, build one arch at a time to
+#    per-arch tags and then merge with `docker buildx imagetools create`.
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --provenance=false --sbom=false \
   --push \
   -t ghcr.io/oro-ai/oro/search-server-base:latest \
   -f "$BUILD_CTX/docker/search-server/Dockerfile.base" \
