@@ -23,6 +23,7 @@ from .env_pack_loader import LoadedPack
 from .session_errors import (
     HarnessError,
     HarnessExecutionError,
+    HarnessResponseError,
     HarnessTimeoutError,
     InvalidSessionError,
 )
@@ -82,10 +83,10 @@ def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
     """Project a runtime result without its validator-only ledger entries."""
 
     if not isinstance(result, dict):
-        raise TypeError("environment step result must be an object")
+        raise HarnessResponseError("environment step result must be an object")
     observation = result.get("observation")
     if not isinstance(observation, dict):
-        raise TypeError("environment observation must be an object")
+        raise HarnessResponseError("environment observation must be an object")
     return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
 
 
@@ -206,7 +207,7 @@ class SessionRegistry:
             )
         decision = asyncio.run(state.simulator.respond(state.transcript, signal))
         if not isinstance(decision, dict):
-            raise TypeError("simulator response must be an object")
+            raise HarnessResponseError("simulator response must be an object")
         if signal is not None:
             decision = state.simulator.ensure_react(decision, signal)
         return decision
@@ -218,7 +219,7 @@ class SessionRegistry:
             return []
         trace = exporter()
         if not isinstance(trace, list):
-            raise TypeError("simulator exchange trace must be a list")
+            raise HarnessResponseError("simulator exchange trace must be a list")
         return copy.deepcopy(trace)
 
     def _shopper_turn_decisions(
