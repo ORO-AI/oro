@@ -16,11 +16,12 @@ observations, simulator and harness events, state changes, verdict checks,
 reward, and provenance, with the raw JSON one click away. Use **Open JSON** or
 drag `.json` files onto the page to compare episodes from other runs.
 
-The runtime hands the agent one string containing the shopper's goal followed by
-a `Task rules` block with the family's system prompt. The viewer shows the goal
-in the header and keeps the rules in a collapsed panel, so the header stays
-readable. It is not sticky: the goal and rules vary in height, and a tall sticky
-header covered the first turns.
+From `oro-env-runtime` 1.0.7 the runtime hands the agent the shopper's goal
+only. Trajectories recorded on runtime 1.0.6 and earlier carry a `Task rules`
+block with the family's system prompt after a blank line. The viewer shows the
+goal in the header and still splits the rules out into a collapsed panel, which
+is empty for newer runs. The header is not sticky: the goal and rules vary in
+height, and a tall sticky header covered the first turns.
 
 ORO artifacts preserve assistant messages emitted through the `message` tool.
 They do not contain hidden model reasoning, so the viewer cannot show reasoning
