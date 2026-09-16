@@ -148,17 +148,17 @@ def load_agent_from_file(file_path: str) -> Callable:
 
 
 def _load_agent(agent_file: Optional[str] = None) -> Callable:
-    """Load agent_main function from file or default module.
+    """Load agent_main function from file or the reference environment agent.
 
     Args:
-        agent_file: Optional path to agent file. If None, uses default src.agent.agent.
+        agent_file: Optional path to agent file. If None, uses src.agent.environment_agent.
 
     Returns:
         The agent_main callable.
     """
     if agent_file:
         return load_agent_from_file(agent_file)
-    from src.agent.agent import agent_main
+    from src.agent.environment_agent import agent_main
 
     return agent_main
 
@@ -313,7 +313,7 @@ def execute_single_problem(
         problem: Problem dictionary with 'query' key (reward removed).
         timeout: Maximum execution time in seconds.
         agent_file: Path to agent file (loaded in child process). If None,
-            uses default ``src.agent.agent``.
+            uses the reference ``src.agent.environment_agent``.
 
     Returns:
         ExecutionResult with execution outcome.
@@ -554,7 +554,7 @@ def execute_problems_parallel(
     if agent_file:
         logger.info(f"Using agent from {agent_file}")
     else:
-        logger.info("Using default agent from src.agent.agent")
+        logger.info("Using reference agent from src.agent.environment_agent")
 
     logger.info(
         f"Executing {len(problems)} problems with {max_workers} workers, timeout={timeout_per_problem}s"
