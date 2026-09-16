@@ -23,6 +23,7 @@ from .env_pack_loader import LoadedPack
 from .session_errors import (
     HarnessError,
     HarnessExecutionError,
+    HarnessResponseError,
     HarnessTimeoutError,
     InvalidSessionError,
 )
@@ -82,10 +83,10 @@ def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
     """Project a runtime result without its validator-only ledger entries."""
 
     if not isinstance(result, dict):
-        raise TypeError("environment step result must be an object")
+        raise HarnessResponseError("environment step result must be an object")
     observation = result.get("observation")
     if not isinstance(observation, dict):
-        raise TypeError("environment observation must be an object")
+        raise HarnessResponseError("environment observation must be an object")
     return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
 
 
@@ -206,7 +207,7 @@ class SessionRegistry:
             )
         decision = asyncio.run(state.simulator.respond(state.transcript, signal))
         if not isinstance(decision, dict):
-            raise TypeError("simulator response must be an object")
+            raise HarnessResponseError("simulator response must be an object")
         if signal is not None:
             decision = state.simulator.ensure_react(decision, signal)
         return decision
@@ -218,7 +219,7 @@ class SessionRegistry:
             return []
         trace = exporter()
         if not isinstance(trace, list):
-            raise TypeError("simulator exchange trace must be a list")
+            raise HarnessResponseError("simulator exchange trace must be a list")
         return copy.deepcopy(trace)
 
     def _shopper_turn_decisions(
@@ -550,9 +551,25 @@ class SessionRegistry:
                 ) from exc
             tool_latency_ms = _elapsed_ms(tool_started)
 
-            public_observations = [
-                _public_step_result(observation) for observation in observations
-            ]
+            try:
+                public_observations = [
+                    _public_step_result(observation) for observation in observations
+                ]
+            except HarnessResponseError as exc:
+                # Unlike the future.result() failures above, this runs after
+                # the environment step already succeeded and mutated session
+                # state -- so without this handler, the exception would
+                # escape uncaught with quarantined_reason never set. A
+                # retry on the same session_id would then find
+                # solver_turn_count already advanced past the turn it's
+                # still trying to submit, permanently rejecting every future
+                # call with a confusing "turn does not match session
+                # sequence" instead of a clear quarantine reason.
+                state.quarantined_reason = f"malformed step result: {exc}"
+                record_error("HarnessExecutionError", state.quarantined_reason)
+                raise HarnessExecutionError(
+                    f"{state.quarantined_reason}; session quarantined"
+                ) from exc
             call_results = [
                 {
                     "call_id": item["call_id"],

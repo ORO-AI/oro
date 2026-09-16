@@ -853,6 +853,39 @@ def test_timeout_quarantines_session_and_blocks_verdict(
         assert result["call_trace"][0]["latency_ms"] == timing["total"]
 
 
+def test_malformed_step_result_quarantines_session_and_blocks_verdict(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The environment step itself succeeds (and mutates session state), but
+    # its result isn't the object shape _public_step_result requires. This
+    # used to escape uncaught with quarantined_reason never set: a retry on
+    # the same session would silently hit "turn does not match session
+    # sequence" (since solver_turn_count already advanced) instead of a
+    # clear quarantine reason.
+    with SessionRegistry(loaded_pack) as registry:
+        _start(registry)
+        session = registry._sessions["session-1"].session
+        monkeypatch.setattr(session, "step", lambda action: "not an object")
+        envelope = _call_envelope(registry)
+        with pytest.raises(HarnessExecutionError, match="session quarantined"):
+            registry.call(envelope)
+
+        # The session must now be clearly quarantined -- not silently
+        # broken with a confusing turn-mismatch on the next attempt.
+        retry_envelope = _call_envelope(
+            registry, call_id="call-2", idempotency_key="idem-2"
+        )
+        with pytest.raises(InvalidSessionError, match="quarantined"):
+            registry.call(retry_envelope)
+        with pytest.raises(InvalidSessionError, match="quarantined"):
+            registry.verdict(envelope)
+
+        result = registry.finalized_results()[0]
+        assert result["outcome"] == "environment_error"
+        assert result["call_trace"][0]["error"]["type"] == "HarnessExecutionError"
+        assert "malformed step result" in result["error_detail"]
+
+
 def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) -> None:
     _start(registry)
     session = registry._sessions["session-1"].session

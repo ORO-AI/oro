@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException
 
 from .session_errors import (
     HarnessExecutionError,
+    HarnessResponseError,
     HarnessTimeoutError,
     InvalidSessionError,
 )
@@ -78,6 +79,22 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
                 detail={"error": str(exc), "environment_error": True},
             ) from exc
         except HarnessExecutionError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={"error": str(exc), "environment_error": True},
+            ) from exc
+        except HarnessResponseError as exc:
+            # session_registry's own named response-shape guards (e.g.
+            # _public_step_result, _simulator_response, _simulator_exchanges)
+            # raise this when the runtime/simulator returns a malformed
+            # result -- an environment-side failure, not caller input. Left
+            # uncaught (this used to be a bare TypeError, unhandled here),
+            # this fell through FastAPI's default handler as a bare 500 with
+            # no body, unlike every other harness failure here. Deliberately
+            # narrower than "except TypeError": an unrelated internal
+            # TypeError from other registry logic should NOT be reported as
+            # environment_error, since that would misattribute a validator
+            # defect as an environment failure.
             raise HTTPException(
                 status_code=500,
                 detail={"error": str(exc), "environment_error": True},
