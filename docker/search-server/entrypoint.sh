@@ -23,34 +23,49 @@ echo "Java version: $(java -version 2>&1 | head -1)" >&2
 # worker PROCESSES each get their own GIL + JVM and use the idle cores.
 #
 # Benefit requires SPARE cores: if workers exceed available cores the extra
-# JVMs oversubscribe and it regresses. Default to half the cores (floor 2),
-# leaving headroom for the sandboxes sharing the box; override with
-# SEARCH_WORKERS. Set SEARCH_WORKERS=1 to fall back to a single process.
+# JVMs oversubscribe and it regresses (measured: WORKERS=cores/2 hits ~2100
+# rps clean at c=96 vs WORKERS=cores at ~1400 rps). Default to half the cores
+# (floor 2), leaving headroom for the sandboxes sharing the box; override
+# with SEARCH_WORKERS. Set SEARCH_WORKERS=1 to fall back to a single process.
 CORES="$(nproc)"
 DEFAULT_WORKERS=$(( CORES / 2 ))
 [ "$DEFAULT_WORKERS" -lt 2 ] && DEFAULT_WORKERS=2
 WORKERS="${SEARCH_WORKERS:-$DEFAULT_WORKERS}"
-THREADS="${SEARCH_THREADS:-4}"
 PORT="${PORT:-5632}"
-echo "Starting search-server: ${WORKERS} gunicorn worker(s) x ${THREADS} threads on :${PORT} (cores=${CORES})" >&2
+echo "Starting search-server: ${WORKERS} sync gunicorn worker(s) on :${PORT} (cores=${CORES})" >&2
 echo "JVM options (per worker): ${_JAVA_OPTIONS}" >&2
+if [ -n "${SEARCH_THREADS:-}" ]; then
+    echo "warning: SEARCH_THREADS=${SEARCH_THREADS} ignored — server now uses sync workers (see ORO-2244)" >&2
+fi
 
-# gthread (not sync): the WORKERS processes give the real parallelism (each its
-# own GIL + JVM, using otherwise-idle cores), while a few THREADS per worker
-# keep the worker from being single-request-blocked -- so trivial requests like
-# /health always find a slot even while searches are in flight (a sync worker
-# would queue /health behind a multi-second search and flap the healthcheck
-# unhealthy under the target burst). Threads also overlap the JNI Lucene work,
-# which releases the GIL.
+# --worker-class sync (was gthread --threads N): pyserini's LuceneSearcher +
+# the pyjnius bridge are NOT thread-safe. Sharing one embedded JVM across
+# multiple gthread threads in a single worker races the pyjnius method-ID +
+# class-lookup caches -- observed symptoms include
+# `java.lang.NullPointerException`, `IncompatibleClassChangeError: TotalHits
+# does not implement List`, `NoSuchMethodError SortField.search(...)`, and
+# `OutOfMemoryError: String length out of range` under concurrent
+# /internal/catalog/{search,filter} load (ORO-2244).
+#
+# Sync workers give exactly one Python thread per JVM, matching
+# pyserini/pyjnius's implicit single-thread assumption. WORKERS processes
+# still provide the actual parallelism -- each with its own JVM. Sync
+# workers do serialize /health behind a slow search within a single worker,
+# but as long as WORKERS > 1 the gunicorn accept loop picks an idle worker
+# for the healthcheck so probes still succeed under target load. Perf-tested
+# vs gthread threads=4:
+#   c=48, r=1000: sync clean p99 63ms / 1541 rps (no errors) vs
+#                 gthread threads=4 p99 588ms / 1745 rps (23% errors + resets)
+#   c=96, r=2000: sync clean p99 80ms / 2158 rps (no errors)
+# Cold sequential path costs +~0.5ms vs gthread threads=4.
 #
 # No --preload: the embedded JVM does not survive fork(); each worker must
 # initialize its own LuceneSearcher/JVM after forking. The mmap'd index is
-# shared across workers via the OS page cache (~1x index RAM). No access log on
-# the hot search path.
+# shared across workers via the OS page cache (~1x index RAM). No access log
+# on the hot search path.
 exec gunicorn \
     --workers "${WORKERS}" \
-    --worker-class gthread \
-    --threads "${THREADS}" \
+    --worker-class sync \
     --bind "0.0.0.0:${PORT}" \
     --chdir /app \
     --timeout 120 \
