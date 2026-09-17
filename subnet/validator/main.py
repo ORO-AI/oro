@@ -1343,16 +1343,25 @@ class Validator:
             reporter.stop()
             self.session_runtime.clear(registry)
 
-        if registry.key_exhausted.is_set():
-            self._complete_with_failure(
-                eval_run_id,
-                TerminalStatus.FAILED,
-                "Miner inference key exhausted",
-                sandbox_metadata=sandbox_metadata,
+        key_exhausted = registry.key_exhausted.is_set()
+        if key_exhausted:
+            # Miner ran out of inference budget mid-run. Instead of failing
+            # the whole run and discarding all completed work, score the
+            # tasks that already finished. Sessions that had not started yet
+            # (or were mid-flight when the key hit its cap) are surfaced by
+            # `finalized_results` as `agent_error` and count as zero reward
+            # in `aggregate_results`, so the score is `paid_reward_sum /
+            # roster_size`. Miner gets partial credit for the episodes they
+            # completed instead of a cliff-drop to a full failure. The
+            # sandbox will have stopped early via `stop_event`, so an empty
+            # `sandbox_output` is expected on this path and is not a real
+            # sandbox failure.
+            logging.info(
+                "Miner inference key exhausted; scoring completed episodes only"
             )
-            return None
-
-        if not sandbox_output:
+            sandbox_metadata = dict(sandbox_metadata)
+            sandbox_metadata["_miner_inference_key_exhausted"] = True
+        elif not sandbox_output:
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
