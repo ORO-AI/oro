@@ -89,6 +89,30 @@ def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
     assert client.post_verbose.call_count == simulator_completion._MAX_ATTEMPTS
 
 
+@pytest.mark.parametrize(
+    "status,body,exhausted",
+    [
+        (403, '{"error":{"message":"Key limit exceeded (total limit)"}}', True),
+        (403, "rate limit exceeded", False),
+        (429, "Key limit exceeded (total limit)", False),
+    ],
+)
+def test_key_exhaustion_is_narrowly_detected_and_not_retried(
+    status: int, body: str, exhausted: bool
+) -> None:
+    client = MagicMock()
+    client.post_verbose.return_value = _err(status, body)
+    completion = SimulatorCompletion("miner-token", client=client)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("model", []))
+
+    assert excinfo.value.key_exhausted is exhausted
+    assert client.post_verbose.call_count == (
+        1 if exhausted else simulator_completion._MAX_ATTEMPTS
+    )
+
+
 def test_backoff_walks_full_schedule_before_giving_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

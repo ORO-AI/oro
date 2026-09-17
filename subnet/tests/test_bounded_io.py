@@ -13,11 +13,12 @@ from __future__ import annotations
 import io
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
-from validator.bounded_io import drain_capped, read_text_lossy, run_capped
+from validator.bounded_io import RunStoppedEarly, drain_capped, read_text_lossy, run_capped
 
 
 def test_under_cap_writes_everything_verbatim():
@@ -93,6 +94,26 @@ def test_run_capped_kills_on_timeout(tmp_path):
         )
     # process was killed at the timeout, not waited out for 30s
     assert time.monotonic() - start < 10
+
+
+def test_run_capped_stops_early_on_terminal_condition(tmp_path):
+    stop = threading.Event()
+    timer = threading.Timer(0.1, stop.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(RunStoppedEarly):
+            run_capped(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout_path=tmp_path / "o.log",
+                stderr_path=tmp_path / "e.log",
+                max_bytes=4096,
+                timeout=30,
+                stop_event=stop,
+            )
+    finally:
+        timer.join()
+    assert time.monotonic() - started < 5
 
 
 def test_run_capped_reaps_child_when_log_open_fails(tmp_path, monkeypatch):

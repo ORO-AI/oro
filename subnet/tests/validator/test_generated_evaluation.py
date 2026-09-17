@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -211,6 +212,7 @@ def test_generated_runner_delivers_failed_completion(
         "pack_sha256": "a" * 64,
     }
     registry = MagicMock()
+    registry.key_exhausted = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
@@ -236,6 +238,41 @@ def test_generated_runner_delivers_failed_completion(
     )
     reporter.flush.assert_called_once_with([result])
     validator.session_runtime.clear.assert_called_once_with(registry)
+
+
+def test_generated_runner_stops_when_miner_key_is_exhausted(tmp_path, monkeypatch):
+    result = {
+        **_result("task", correct=False, outcome="agent_error"),
+        "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
+        "pack_sha256": "a" * 64,
+    }
+    registry = MagicMock()
+    registry.key_exhausted = threading.Event()
+    registry.key_exhausted.set()
+    registry.finalized_results.return_value = [result]
+    reporter = MagicMock()
+    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
+    validator = Validator.__new__(Validator)
+    validator._create_environment_sessions = MagicMock(return_value=(
+        registry,
+        [{"session_id": "session", "policy_view": {"query": "query", "tool_contract_version": "v1"}}],
+        {"task": "right"},
+    ))
+    validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator.run_sandbox = MagicMock(return_value=(None, {}))
+    validator.session_runtime = MagicMock()
+    validator.backend_client = MagicMock()
+    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
+
+    assert validator._run_generated_evaluation(
+        work, tmp_path / "agent.py", inference_access_token="synthetic",
+        inference_provider="openrouter", inference_base_url="https://example.test/v1",
+    ) is None
+    assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
+    validator.backend_client.complete_run.assert_called_once_with(
+        eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
+        failure_reason="Miner inference key exhausted", sandbox_metadata={},
+    )
 
 
 @pytest.mark.parametrize(
@@ -495,6 +532,7 @@ def test_generated_runner_noncritical_failures_do_not_change_score(
         "verdict": {"correct": True, "paid_reward": 0.5},
     }
     registry = MagicMock()
+    registry.key_exhausted = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
     reporter.flush.side_effect = RuntimeError("backend unavailable")

@@ -21,6 +21,7 @@ from oro_env_runtime.user_sim import UserSim
 
 from .env_pack_loader import LoadedPack
 from .session_errors import (
+    AgentInferenceBudgetError,
     HarnessError,
     HarnessExecutionError,
     HarnessTimeoutError,
@@ -115,6 +116,7 @@ class _SessionState:
     delivered_interventions: set[int] = field(default_factory=set)
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
+    quarantined_outcome: str = "environment_error"
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -164,6 +166,7 @@ class SessionRegistry:
         self._lock = threading.Lock()
         self._closed = False
         self._finalized = False
+        self.key_exhausted = threading.Event()
 
     def _default_simulator(self, state: _SessionState) -> UserSim:
         if self._inference_access_token is None:
@@ -344,6 +347,8 @@ class SessionRegistry:
             raise InvalidSessionError(
                 f"session is quarantined: {state.quarantined_reason}"
             )
+        if self.key_exhausted.is_set():
+            raise AgentInferenceBudgetError("miner inference key exhausted")
 
     @staticmethod
     def _required_string(envelope: dict[str, Any], key: str) -> str:
@@ -665,13 +670,22 @@ class SessionRegistry:
                     # arbitrary exceptions whose message may echo private
                     # task material (see ORO-1866 disclosure canary). Any
                     # other exception collapses to its class name only.
-                    if isinstance(exc, InferenceProviderError):
+                    if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
+                        self.key_exhausted.set()
+                        state.quarantined_outcome = "agent_error"
+                        exc_summary = "miner inference key exhausted"
+                    elif isinstance(exc, InferenceProviderError):
                         exc_summary = f"upstream status={exc.status} body={exc.body!r}"
                     else:
                         exc_summary = type(exc).__name__
                     state.quarantined_reason = f"user simulator failed: {exc_summary}"
-                    record_error("HarnessExecutionError", state.quarantined_reason)
-                    raise HarnessExecutionError(
+                    error_type = (
+                        AgentInferenceBudgetError
+                        if state.quarantined_outcome == "agent_error"
+                        else HarnessExecutionError
+                    )
+                    record_error(error_type.__name__, state.quarantined_reason)
+                    raise error_type(
                         f"{state.quarantined_reason}; session quarantined"
                     ) from exc
                 simulator_latency_ms = _elapsed_ms(simulator_started)
@@ -839,7 +853,7 @@ class SessionRegistry:
                     results.append(copy.deepcopy(state.final_result))
                     continue
                 if state.quarantined_reason is not None:
-                    outcome = "environment_error"
+                    outcome = state.quarantined_outcome
                     verdict = None
                     error_detail = state.quarantined_reason
                 elif state.terminal_reason is None:
@@ -910,6 +924,7 @@ class SessionRegistry:
 
 
 __all__ = [
+    "AgentInferenceBudgetError",
     "DEFAULT_SIMULATOR_TIMEOUT_S",
     "DEFAULT_TOOL_TIMEOUT_S",
     "MAX_CALLS_PER_TURN",
