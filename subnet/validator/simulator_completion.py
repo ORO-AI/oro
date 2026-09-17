@@ -51,6 +51,11 @@ class InferenceProviderError(RuntimeError):
             f"(status={status} body={body!r})"
         )
 
+    @property
+    def key_exhausted(self) -> bool:
+        """OpenRouter's per-run key budget is spent, not a transient outage."""
+        return self.status == 403 and "key limit exceeded" in self.body.lower()
+
 
 class SimulatorCompletion:
     """Expose the validator proxy as an ``oro-env-runtime`` completion callable."""
@@ -146,16 +151,17 @@ class SimulatorCompletion:
             log_detail = (
                 f"{failure_label} status={upstream_status} body={upstream_body!r}"
             )
+            provider_error = InferenceProviderError(upstream_status, upstream_body)
+            if provider_error.key_exhausted:
+                logger.warning("miner inference key budget exhausted during user simulation")
+                raise provider_error
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
                     "user simulator inference failed after %d attempts (%s)",
                     _MAX_ATTEMPTS,
                     log_detail,
                 )
-                raise InferenceProviderError(
-                    status=upstream_status,
-                    body=upstream_body,
-                )
+                raise provider_error
             backoff_s = _RETRY_BACKOFFS_S[attempt - 1]
             projected_s = (
                 (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
@@ -169,10 +175,7 @@ class SimulatorCompletion:
                     projected_s,
                     _WALL_BUDGET_S,
                 )
-                raise InferenceProviderError(
-                    status=upstream_status,
-                    body=upstream_body,
-                )
+                raise provider_error
             logger.warning(
                 "user simulator inference failed on attempt %d/%d (%s); "
                 "retrying in %.2fs",

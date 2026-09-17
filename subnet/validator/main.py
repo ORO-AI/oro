@@ -6,6 +6,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -30,7 +31,7 @@ from src.agent.sandbox_executor import (
 )
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
-from .bounded_io import read_text_lossy, run_capped
+from .bounded_io import RunStoppedEarly, read_text_lossy, run_capped
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -499,6 +500,7 @@ class Validator:
         inference_access_token: Optional[str] = None,
         inference_provider: Optional[str] = None,
         inference_base_url: Optional[str] = None,
+        stop_event: threading.Event | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         """Run sandbox with downloaded agent, return output file path and metadata.
 
@@ -564,6 +566,7 @@ class Validator:
                 output_file=output_file,
                 eval_run_id=eval_run_id,
                 metadata=metadata,
+                stop_event=stop_event,
             )
         finally:
             duration = time.time() - start_time
@@ -580,6 +583,7 @@ class Validator:
         output_file: Path,
         eval_run_id: str,
         metadata: SandboxMetadata,
+        stop_event: threading.Event | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
             # Capture through a byte cap so a runaway agent's stdout/stderr can't
@@ -591,6 +595,7 @@ class Validator:
                 stderr_path=stderr_log,
                 max_bytes=self.config.sandbox_log_max_bytes,
                 timeout=self.config.sandbox_timeout,
+                stop_event=stop_event,
             )
             metadata["exit_code"] = returncode
 
@@ -641,6 +646,10 @@ class Validator:
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
 
+        except RunStoppedEarly:
+            metadata["exit_code"] = -1
+            self._kill_sandbox_container(eval_run_id)
+            return None, metadata
         except subprocess.TimeoutExpired:
             metadata["exit_code"] = -1
             # run_capped SIGKILLs the `docker run` CLI, but the container keeps
@@ -1306,6 +1315,7 @@ class Validator:
                     inference_access_token=inference_access_token,
                     inference_provider=inference_provider,
                     inference_base_url=inference_base_url,
+                    stop_event=registry.key_exhausted,
                 )
             finally:
                 reporter.stop()
@@ -1332,6 +1342,15 @@ class Validator:
         finally:
             reporter.stop()
             self.session_runtime.clear(registry)
+
+        if registry.key_exhausted.is_set():
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "Miner inference key exhausted",
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
 
         if not sandbox_output:
             self._complete_with_failure(

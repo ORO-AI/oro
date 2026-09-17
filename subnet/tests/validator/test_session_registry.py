@@ -205,6 +205,52 @@ def test_default_simulator_failure_is_an_environment_error(
     assert private_detail not in json.dumps(result)
 
 
+def test_miner_key_exhaustion_is_agent_error_and_stops_run(
+    loaded_pack: LoadedPack,
+) -> None:
+    from src.agent.proxy_client import PostResult
+
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        post = MagicMock(
+            return_value=PostResult(
+                data=None,
+                error={
+                    "kind": "upstream",
+                    "status": 403,
+                    "body": '{"error":{"message":"Key limit exceeded (total limit)"}}',
+                },
+            )
+        )
+        state.simulator._completion._client.post_verbose = post
+        with pytest.raises(HarnessExecutionError, match="miner inference key exhausted"):
+            registry.call(
+                _call_envelope(
+                    registry,
+                    action={"name": "message", "args": {"content": "Any preference?"}},
+                )
+            )
+        _start(registry, session_id="session-2")
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call",
+            json=_call_envelope(registry, session_id="session-2"),
+        )
+        assert response.status_code == 402
+        assert response.json()["detail"]["environment_error"] is False
+        result = registry.finalized_results()[0]
+        assert registry.key_exhausted.is_set()
+
+    assert post.call_count == 1
+    assert result["outcome"] == "agent_error"
+    assert result["environment_error"] is False
+    assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
+    assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
+
+
 def test_default_simulator_rejects_missing_miner_credentials(
     loaded_pack: LoadedPack,
 ) -> None:
