@@ -126,9 +126,12 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         )
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
-    if outcomes.keys() & _HARNESS_OUTCOMES:
-        # Keep the existing count-form completion protocol understood by older
-        # Backends. Include all outcomes; integrity failures took precedence above.
+    harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
+    if harness_count == len(results):
+        # Every episode failed on the validator harness — the eval couldn't
+        # run at all, so surface it as an infrastructure failure. Keeps the
+        # existing count-form completion protocol understood by older
+        # Backends; integrity failures took precedence above.
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )
@@ -136,6 +139,11 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
             f"generated evaluation infrastructure failure: {detail}"
         )
 
+    # A subset of harness failures is scored the same as agent failures:
+    # each counts as zero reward against the roster denominator. Prior
+    # behavior hard-failed the whole run on any environment_error /
+    # verifier_error episode, so a random tool-timeout on 1 of 90 tasks
+    # threw away the other 89 completed episodes.
     reward_total = Decimal("0")
     for result in results:
         verdict = result.get("verdict") or {}

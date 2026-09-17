@@ -140,28 +140,46 @@ def test_integrity_outcomes_reject_the_run(outcome) -> None:
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("count", [1, 7, 10, 35])
-def test_one_harness_failure_rejects_entire_run(outcome, count) -> None:
+@pytest.mark.parametrize("count", [10, 30, 90])
+def test_partial_harness_failure_scores_completed_episodes(outcome, count) -> None:
+    """A subset of environment_error / verifier_error episodes counts as 0
+    reward against the roster denominator, same as agent_error. Prior
+    behavior hard-failed the whole run on a single infra episode, throwing
+    away every completed task."""
     results = [_result(f"task-{i}", correct=True, reward=1.0) for i in range(count - 1)]
-    results.append(_result("failed", correct=False, outcome=outcome))
-    with pytest.raises(ValueError) as caught:
-        aggregate_results(results)
-    detail = f"completed={count - 1}, " if count > 1 else ""
-    assert str(caught.value) == (
-        f"generated evaluation infrastructure failure: {detail}{outcome}=1"
-    )
+    results.append(_result("hiccup", correct=False, outcome=outcome))
+    # (count-1) correct at 1.0 each, 1 harness failure at 0.0, over `count` total
+    expected = (count - 1) / count
+    assert aggregate_results(results) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("failed", [2, 3, 4])
-def test_former_tolerance_boundary_always_rejects(outcome, failed) -> None:
-    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(10 - failed)]
+@pytest.mark.parametrize("failed", [2, 3, 20])
+def test_mixed_harness_and_completed_scores_completed(outcome, failed) -> None:
+    """Multi-episode harness failures still score, not hard-fail. The
+    denominator is the full roster size."""
+    total = 30
+    completed = total - failed
+    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(completed)]
     results.extend(
         _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(failed)
     )
+    assert aggregate_results(results) == pytest.approx(completed / total)
 
-    with pytest.raises(ValueError, match="infrastructure failure"):
+
+@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
+def test_all_harness_failures_hard_fail(outcome) -> None:
+    """When EVERY episode failed on the validator harness the eval couldn't
+    run at all — surface it as an infrastructure failure so the Backend
+    classifier shields it from the auto-discard counter."""
+    results = [
+        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(5)
+    ]
+    with pytest.raises(ValueError) as caught:
         aggregate_results(results)
+    assert str(caught.value) == (
+        f"generated evaluation infrastructure failure: {outcome}=5"
+    )
 
 
 @pytest.mark.parametrize("integrity", ["leakage", "exploit"])
