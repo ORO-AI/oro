@@ -240,39 +240,60 @@ def test_generated_runner_delivers_failed_completion(
     validator.session_runtime.clear.assert_called_once_with(registry)
 
 
-def test_generated_runner_stops_when_miner_key_is_exhausted(tmp_path, monkeypatch):
-    result = {
-        **_result("task", correct=False, outcome="agent_error"),
-        "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
-        "pack_sha256": "a" * 64,
-    }
+def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monkeypatch):
+    """When the miner's per-run inference key hits its cap mid-run, the
+    completed episodes are scored and the run is marked SUCCESS with a
+    partial score. Prior behavior discarded all completed work and marked
+    the run FAILED, wasting validator compute and cliff-dropping the miner's
+    score to 0."""
+    # Fixture: 2 tasks completed correctly (0.5 reward each), 2 tasks
+    # quarantined as agent_error when the key was exhausted. Expected score
+    # = 1.0 total paid_reward / 4 tasks = 0.25.
+    results = [
+        {**_result("t1", correct=True, reward=0.5), "family": "right",
+         "evaluation_run_id": "run", "agent_version_id": "agent",
+         "pack_sha256": "a" * 64},
+        {**_result("t2", correct=True, reward=0.5), "family": "right",
+         "evaluation_run_id": "run", "agent_version_id": "agent",
+         "pack_sha256": "a" * 64},
+        {**_result("t3", correct=False, outcome="agent_error"), "family": "right",
+         "evaluation_run_id": "run", "agent_version_id": "agent",
+         "pack_sha256": "a" * 64},
+        {**_result("t4", correct=False, outcome="agent_error"), "family": "right",
+         "evaluation_run_id": "run", "agent_version_id": "agent",
+         "pack_sha256": "a" * 64},
+    ]
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
     registry.key_exhausted.set()
-    registry.finalized_results.return_value = [result]
+    registry.finalized_results.return_value = results
     reporter = MagicMock()
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
     validator = Validator.__new__(Validator)
     validator._create_environment_sessions = MagicMock(return_value=(
         registry,
         [{"session_id": "session", "policy_view": {"query": "query", "tool_contract_version": "v1"}}],
-        {"task": "right"},
+        {"t1": "right", "t2": "right", "t3": "right", "t4": "right"},
     ))
     validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator._simulator_inference_stats_file = MagicMock(return_value=tmp_path / "sim.jsonl")
+    # sandbox stopped early via stop_event → empty output is expected on this path
     validator.run_sandbox = MagicMock(return_value=(None, {}))
     validator.session_runtime = MagicMock()
     validator.backend_client = MagicMock()
     work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
 
-    assert validator._run_generated_evaluation(
+    completion = validator._run_generated_evaluation(
         work, tmp_path / "agent.py", inference_access_token="synthetic",
         inference_provider="openrouter", inference_base_url="https://example.test/v1",
-    ) is None
-    assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
-    validator.backend_client.complete_run.assert_called_once_with(
-        eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
-        failure_reason="Miner inference key exhausted", sandbox_metadata={},
     )
+    assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
+    # Not a run-level failure — the completion is returned to the caller so
+    # the outer scoring path finalizes SUCCESS with the partial score.
+    assert completion is not None
+    assert completion.score == pytest.approx(0.25)
+    assert completion.sandbox_metadata["_miner_inference_key_exhausted"] is True
+    validator.backend_client.complete_run.assert_not_called()
 
 
 @pytest.mark.parametrize(
