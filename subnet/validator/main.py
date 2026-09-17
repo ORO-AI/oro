@@ -1737,9 +1737,12 @@ class Validator:
                         f"Reported logs_s3_key for {len(uploaded_keys)} problems"
                     )
                 except Exception as e:
+                    # ORO-702 removed the progress retry queue on purpose ("no
+                    # disk retry queue for progress reports"). This post-run
+                    # logs_s3_key report has no retry path; on failure we drop it
+                    # (the affected problems keep a broken download link) and let
+                    # the warning above surface the real error. See ORO-2315.
                     logging.warning(f"Failed to report logs_s3_key: {e}")
-                    for update in progress_updates:
-                        self.retry_queue.add_progress(eval_run_id, update)
 
             return last_s3_key
         except Exception as e:
