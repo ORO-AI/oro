@@ -16,9 +16,14 @@ GENERATED_PROBLEM_SCHEMA = "oro.generated_environment_problem.v1"
 # a run where the agent broke the sealed contract.
 _CHEATING_OUTCOMES = frozenset({"leakage", "exploit"})
 
-# Any harness failure makes the evaluation unusable, matching Backend's
-# acceptance rule. Infrastructure failures are not zero-reward agent outcomes;
-# never accept a partial score or change the frozen roster's denominator.
+# Harness failures (environment_error / verifier_error) score as zero
+# reward alongside agent_error and are averaged against the frozen roster
+# denominator. `aggregate_results` only hard-fails with an infrastructure
+# ValueError when EVERY episode is a harness failure — that case is the
+# eval couldn't run at all. This mirrors PR #319's key-exhaustion handling
+# and covers the residual class of validator-side hiccups (tool timeouts,
+# HTTPError, URLError) that used to nuke otherwise-successful runs where
+# 87 of 90 tasks completed cleanly.
 _HARNESS_OUTCOMES = frozenset({"environment_error", "verifier_error"})
 
 
@@ -126,9 +131,12 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         )
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
-    if outcomes.keys() & _HARNESS_OUTCOMES:
-        # Keep the existing count-form completion protocol understood by older
-        # Backends. Include all outcomes; integrity failures took precedence above.
+    harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
+    if harness_count == len(results):
+        # Every episode failed on the validator harness — the eval couldn't
+        # run at all, so surface it as an infrastructure failure. Keeps the
+        # existing count-form completion protocol understood by older
+        # Backends; integrity failures took precedence above.
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )
@@ -136,6 +144,11 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
             f"generated evaluation infrastructure failure: {detail}"
         )
 
+    # A subset of harness failures is scored the same as agent failures:
+    # each counts as zero reward against the roster denominator. Prior
+    # behavior hard-failed the whole run on any environment_error /
+    # verifier_error episode, so a random tool-timeout on 1 of 90 tasks
+    # threw away the other 89 completed episodes.
     reward_total = Decimal("0")
     for result in results:
         verdict = result.get("verdict") or {}
