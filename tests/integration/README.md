@@ -21,8 +21,12 @@ Integration tests verify that ShoppingBench services work correctly when running
    **Note:** `build_index.sh` automatically skips building if indexes already exist.
 
 3. **Start required services:**
+
+   The integration tests rely on `docker-compose.test.yml` for the
+   `session-runtime` service required by the sandbox isolation tests:
+
    ```bash
-   docker compose up -d search-server proxy sandbox
+   docker compose -f docker-compose.yml -f docker-compose.test.yml up -d search-server proxy session-runtime sandbox
    ```
 
    **Note:** Docker automatically reuses cached images if they exist, making this step fast.
@@ -35,11 +39,11 @@ Integration tests verify that ShoppingBench services work correctly when running
 ## Troubleshooting
 
 **Tests skip with "Container not running":**
-- Start all services: `docker compose up -d search-server proxy sandbox`
-- Check status: `docker compose ps`
+- Start all services: `docker compose -f docker-compose.yml -f docker-compose.test.yml up -d search-server proxy session-runtime sandbox`
+- Check status: `docker compose -f docker-compose.yml -f docker-compose.test.yml ps`
 
 **Tests fail with connection errors:**
-- Verify services are healthy: `docker compose ps`
+- Verify services are healthy: `docker compose -f docker-compose.yml -f docker-compose.test.yml ps`
 - Check logs: `docker compose logs <service-name>`
 - Ensure ports are not in use
 
