@@ -520,17 +520,18 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     families = sorted(GENERATED_FAMILIES)
-    # Verifier errors prevent aggregation; the sandbox exit code must still
-    # take precedence over the aggregate failure.
+    # Stay UNDER the 30% infra threshold so aggregation still succeeds
+    # with a partial score — verifier count 2/7 = 28.6%. The sandbox exit
+    # code must still take precedence over the aggregate.
     results = [
         _episode(0, families[0]),
         *[
             _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[1:4], 1)
+            for index, family in enumerate(families[1:3], 1)
         ],
         *[
             _episode(index, family, outcome="agent_error")
-            for index, family in enumerate(families[4:], 4)
+            for index, family in enumerate(families[3:], 3)
         ],
     ]
     _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
@@ -549,13 +550,10 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
 
     assert caught.value.classification == "infrastructure"
     assert "sandbox exited with code 17" in str(caught.value)
-    # aggregate_score is populated with the partial score even under a
-    # sandbox failure — env/verifier errors count as 0 like agent_error
-    # now, so aggregation succeeds and the sandbox failure fires later.
-    # Assert the partial score is preserved in the failure summary so a
-    # regression that drops it or miscalculates still trips the test.
-    # Fixture: 1 completed (reward=1) + 3 verifier_error + 3 agent_error,
-    # so aggregate = 1 / 7.
+    # Fixture: 1 completed (reward=1) + 2 verifier_error + 4 agent_error,
+    # so aggregate = 1 / 7. Verifier ratio 2/7 = 28.6% stays under the
+    # 30% infra threshold so aggregation succeeds and the sandbox failure
+    # fires later.
     summary = _failure_summary(caught.value)
     assert summary["aggregate_score"] == pytest.approx(1 / 7)
 
@@ -873,24 +871,24 @@ def test_isolated_harness_failure_scores_local_run(
     assert len(summary["tasks"]) == len(families)
 
 
-def test_multiple_verifier_failures_score_local_run(
+def test_multiple_verifier_failures_below_threshold_score_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multiple harness failures also score partially — 3 verifier errors +
-    4 completed tasks average to 4/7."""
+    """Multiple harness failures below the 30% infra threshold still score
+    partially — 2 verifier errors + 5 completed = 2/7 = 28.6% < 30%."""
     families = sorted(GENERATED_FAMILIES)
     results = [
         *[
             _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[:3])
+            for index, family in enumerate(families[:2])
         ],
-        *[_episode(index, family) for index, family in enumerate(families[3:], 3)],
+        *[_episode(index, family) for index, family in enumerate(families[2:], 2)],
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
     completed = run_local_generated_validator(_config(tmp_path))
-    assert completed.aggregate_score == pytest.approx(4 / 7)
+    assert completed.aggregate_score == pytest.approx(5 / 7)
     summary = json.loads(completed.summary_path.read_text())
     assert summary["tasks"][0]["error_classification"] == "verifier"
 
