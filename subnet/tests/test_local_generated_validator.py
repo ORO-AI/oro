@@ -549,8 +549,9 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
 
     assert caught.value.classification == "infrastructure"
     assert "sandbox exited with code 17" in str(caught.value)
-    summary = _failure_summary(caught.value)
-    assert summary["aggregate_score"] is None
+    # aggregate_score is populated with the partial score even under a
+    # sandbox failure — env/verifier errors count as 0 like agent_error
+    # now, so aggregation succeeds and the sandbox failure fires later.
 
 
 def test_sandbox_failure_takes_precedence_when_receipt_roster_is_incomplete(
@@ -842,13 +843,15 @@ def test_summary_ignores_sandbox_inference_failure_claims(
 @pytest.mark.parametrize("outcome,classification", [
     ("verifier_error", "verifier"), ("environment_error", "environment")
 ])
-def test_isolated_harness_failure_rejects_local_run(
+def test_isolated_harness_failure_scores_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
     classification: str,
 ) -> None:
-    """A single harness failure invalidates the run without losing diagnostics."""
+    """A subset of harness failures no longer rejects the run — the completed
+    episodes are scored (env/verifier errors count as 0 reward alongside
+    agent errors), matching production `aggregate_results` semantics."""
     families = sorted(GENERATED_FAMILIES)
     results = [
         _episode(0, families[0], outcome=outcome),
@@ -856,20 +859,20 @@ def test_isolated_harness_failure_rejects_local_run(
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-    assert caught.value.classification == classification
-    summary = _failure_summary(caught.value)
+    completed = run_local_generated_validator(_config(tmp_path))
+    # 6 completed with reward=1.0 (via _episode default), 1 harness failure at 0
+    assert completed.aggregate_score == pytest.approx(6 / 7)
+    summary = json.loads(completed.summary_path.read_text())
     assert summary["tasks"][0]["error_classification"] == classification
-    assert summary["aggregate_score"] is None
     assert len(summary["tasks"]) == len(families)
 
 
-def test_multiple_verifier_failures_reject_local_run(
+def test_multiple_verifier_failures_score_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multiple harness failures also preserve per-task diagnostics."""
+    """Multiple harness failures also score partially — 3 verifier errors +
+    4 completed tasks average to 4/7."""
     families = sorted(GENERATED_FAMILIES)
     results = [
         *[
@@ -880,11 +883,9 @@ def test_multiple_verifier_failures_reject_local_run(
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "verifier"
-    summary = _failure_summary(caught.value)
+    completed = run_local_generated_validator(_config(tmp_path))
+    assert completed.aggregate_score == pytest.approx(4 / 7)
+    summary = json.loads(completed.summary_path.read_text())
     assert summary["tasks"][0]["error_classification"] == "verifier"
 
 
