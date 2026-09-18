@@ -552,6 +552,12 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
     # aggregate_score is populated with the partial score even under a
     # sandbox failure — env/verifier errors count as 0 like agent_error
     # now, so aggregation succeeds and the sandbox failure fires later.
+    # Assert the partial score is preserved in the failure summary so a
+    # regression that drops it or miscalculates still trips the test.
+    # Fixture: 1 completed (reward=1) + 3 verifier_error + 3 agent_error,
+    # so aggregate = 1 / 7.
+    summary = _failure_summary(caught.value)
+    assert summary["aggregate_score"] == pytest.approx(1 / 7)
 
 
 def test_sandbox_failure_takes_precedence_when_receipt_roster_is_incomplete(

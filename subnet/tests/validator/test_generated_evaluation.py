@@ -168,17 +168,20 @@ def test_mixed_harness_and_completed_scores_completed(outcome, failed) -> None:
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-def test_all_harness_failures_hard_fail(outcome) -> None:
+@pytest.mark.parametrize("count", [1, 5, 90])
+def test_all_harness_failures_hard_fail(outcome, count) -> None:
     """When EVERY episode failed on the validator harness the eval couldn't
     run at all — surface it as an infrastructure failure so the Backend
-    classifier shields it from the auto-discard counter."""
+    classifier shields it from the auto-discard counter. Covers the
+    boundary at count=1 (single-episode all-harness) that used to be
+    guarded by test_one_harness_failure_rejects_entire_run."""
     results = [
-        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(5)
+        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(count)
     ]
     with pytest.raises(ValueError) as caught:
         aggregate_results(results)
     assert str(caught.value) == (
-        f"generated evaluation infrastructure failure: {outcome}=5"
+        f"generated evaluation infrastructure failure: {outcome}={count}"
     )
 
 

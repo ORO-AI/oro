@@ -16,9 +16,14 @@ GENERATED_PROBLEM_SCHEMA = "oro.generated_environment_problem.v1"
 # a run where the agent broke the sealed contract.
 _CHEATING_OUTCOMES = frozenset({"leakage", "exploit"})
 
-# Any harness failure makes the evaluation unusable, matching Backend's
-# acceptance rule. Infrastructure failures are not zero-reward agent outcomes;
-# never accept a partial score or change the frozen roster's denominator.
+# Harness failures (environment_error / verifier_error) score as zero
+# reward alongside agent_error and are averaged against the frozen roster
+# denominator. `aggregate_results` only hard-fails with an infrastructure
+# ValueError when EVERY episode is a harness failure — that case is the
+# eval couldn't run at all. This mirrors PR #319's key-exhaustion handling
+# and covers the residual class of validator-side hiccups (tool timeouts,
+# HTTPError, URLError) that used to nuke otherwise-successful runs where
+# 87 of 90 tasks completed cleanly.
 _HARNESS_OUTCOMES = frozenset({"environment_error", "verifier_error"})
 
 
