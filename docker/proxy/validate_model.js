@@ -246,12 +246,26 @@ function validate(r) {
     r.error("stripped inference routing fields: " + stripped.join(","));
   }
 
+  // OpenRouter only returns `usage.cost` (USD) on the response when the
+  // request body sets `usage.include=true`. Force it on so per-call cost
+  // lands in every response — both InferenceStats (per-episode budget
+  // tracking) and miner agent code can then read `resp.usage.cost`
+  // deterministically. Chutes ignores unknown top-level fields but skip
+  // there to keep the outbound body untouched.
+  var usageInjected = false;
+  if (provider === "openrouter") {
+    parsed.usage = { include: true };
+    usageInjected = true;
+  }
+
   var rewritten = rewriteModelFor(provider, parsed.model);
   if (rewritten !== null) {
     parsed.model = rewritten;
   }
   var forwardBody =
-    rewritten !== null || stripped.length > 0 ? JSON.stringify(parsed) : body;
+    rewritten !== null || stripped.length > 0 || usageInjected
+      ? JSON.stringify(parsed)
+      : body;
 
   getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
