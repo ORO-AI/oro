@@ -133,11 +133,11 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
     harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
-    if harness_count / len(results) >= _INFRA_FAILURE_THRESHOLD:
-        # Infrastructure is degraded enough that the completed episodes
-        # aren't a representative sample of miner performance. Hard-fail so
-        # the run is re-queued and the miner isn't penalized for infra we
-        # own. Integrity failures took precedence above.
+    # Strict > matches Backend's `_is_generated_infra_failure` classifier
+    # (`failed * 10 > total * 3`). A `>=` here would trip at exactly 3/10
+    # while the classifier does NOT recognize that as infra, letting the
+    # miner's auto-discard counter increment for infra we own.
+    if harness_count * 10 > len(results) * 3:
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )

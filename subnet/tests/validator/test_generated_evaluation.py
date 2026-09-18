@@ -154,12 +154,12 @@ def test_partial_harness_failure_scores_completed_episodes(outcome, count) -> No
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("failed", [2, 3, 8])
-def test_below_threshold_harness_failures_score_normally(outcome, failed) -> None:
-    """Harness failures BELOW the 30% infra threshold score at zero
-    reward against the full roster denominator, same as agent_error."""
+@pytest.mark.parametrize("failed", [2, 3, 8, 9])
+def test_at_or_below_threshold_harness_failures_score_normally(outcome, failed) -> None:
+    """Harness failures AT or BELOW the 30% infra threshold score at
+    zero reward against the full roster. Strict > matches Backend's
+    classifier — 9/30 = 30% exactly is NOT infra."""
     total = 30
-    # 2/30 = 6.7%, 3/30 = 10%, 8/30 = 26.7% — all under 30%
     completed = total - failed
     results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(completed)]
     results.extend(
@@ -169,11 +169,11 @@ def test_below_threshold_harness_failures_score_normally(outcome, failed) -> Non
 
 
 @pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("failed", [9, 15, 27, 30])
-def test_at_or_above_threshold_harness_failures_hard_fail(outcome, failed) -> None:
-    """When >= 30% of episodes are harness failures the completed sample
+@pytest.mark.parametrize("failed", [10, 15, 27, 30])
+def test_above_threshold_harness_failures_hard_fail(outcome, failed) -> None:
+    """When > 30% of episodes are harness failures the completed sample
     isn't representative of miner performance — hard-fail so the run
-    re-queues once infra recovers. Boundary is at count=9/30 = 30% exactly."""
+    re-queues once infra recovers. First fail boundary: 10/30 = 33.3%."""
     total = 30
     completed = total - failed
     results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(completed)]
