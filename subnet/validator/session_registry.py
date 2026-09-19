@@ -90,6 +90,16 @@ def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
     return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
 
 
+def _strip_undeclared_arguments(
+    action: dict[str, Any], tool_parameters: dict[str, frozenset[str]]
+) -> dict[str, Any]:
+    args = action.get("args")
+    allowed = tool_parameters.get(action.get("name"))
+    if allowed is not None and isinstance(args, dict):
+        action["args"] = {key: value for key, value in args.items() if key in allowed}
+    return action
+
+
 @dataclass
 class _CachedResponse:
     call_id: str
@@ -107,6 +117,7 @@ class _SessionState:
     simulator: Any | None
     transcript: list[dict[str, Any]]
     bootstrap: dict[str, Any]
+    tool_parameters: dict[str, frozenset[str]]
     started_at: float
     finished_at: float | None = None
     call_trace: list[dict[str, Any]] = field(default_factory=list)
@@ -302,6 +313,12 @@ class SessionRegistry:
                     max_calls_per_turn=self.max_calls_per_turn,
                 ),
             }
+            tool_parameters = {}
+            for spec in bootstrap["policy_view"]["tools"]:
+                function = spec["function"]
+                tool_parameters[function["name"]] = frozenset(
+                    function["parameters"].get("properties", {})
+                )
             state = _SessionState(
                 session_id=session_id,
                 evaluation_run_id=evaluation_run_id,
@@ -311,6 +328,7 @@ class SessionRegistry:
                 simulator=None,
                 transcript=[{"role": "user", "content": session.task.goal_text}],
                 bootstrap=bootstrap,
+                tool_parameters=tool_parameters,
                 started_at=time.perf_counter(),
             )
             self._sessions[session_id] = state
@@ -376,7 +394,7 @@ class SessionRegistry:
         if action is not None:
             if not isinstance(action, dict):
                 raise ValueError("action must be an object")
-            call_group = [{"call_id": call_id, "action": action}]
+            call_group = [{"call_id": call_id, "action": copy.deepcopy(action)}]
             is_group = False
         else:
             if not isinstance(calls, list) or not calls:
@@ -399,10 +417,11 @@ class SessionRegistry:
                 if not isinstance(inner_action, dict):
                     raise ValueError("each call action must be an object")
                 inner_call_ids.add(inner_call_id)
-                call_group.append({"call_id": inner_call_id, "action": inner_action})
+                call_group.append(
+                    {"call_id": inner_call_id, "action": copy.deepcopy(inner_action)}
+                )
             is_group = True
 
-        actions = [item["action"] for item in call_group]
         call_ids_to_bind = [call_id]
         call_ids_to_bind.extend(
             item["call_id"] for item in call_group if item["call_id"] != call_id
@@ -446,6 +465,13 @@ class SessionRegistry:
                     "turn does not match session sequence: "
                     f"expected {expected_turn}, got {turn}"
                 )
+
+            # Ignore undeclared top-level arguments for compatibility with
+            # agents that relied on the runtime's previously wider surface.
+            actions = [
+                _strip_undeclared_arguments(item["action"], state.tool_parameters)
+                for item in call_group
+            ]
 
             started = time.perf_counter()
             tool_latency_ms: float | None = None
