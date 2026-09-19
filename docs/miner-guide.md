@@ -37,6 +37,20 @@ swap it in with `--agent-file my_agent.py`.
 > a session against `binding.session_id` terminates as `agent_error` on every
 > task with zero score. Migrate to `agent_main(problem_data)` before submitting.
 
+### Tool argument handling
+
+Use only the tool names and top-level arguments listed in
+`policy_view.tools[].function.parameters.properties`. Qualifying, race, and
+local validator sessions remove undeclared top-level arguments before tool
+execution. Declared arguments retain the runtime's existing defaulting,
+coercion, and bounds behavior.
+
+For example, `max_price` is declared on `filter`, not `search`. A search call
+that includes it still runs without that argument; use the filter tool for a
+price-constrained catalog lookup. Search still uses BM25 internally. The
+sandbox cannot call the shared search server directly, and legacy `/search/*`
+proxy routes return 410.
+
 ### Setup and configuration
 
 Keep your existing `.env`, or copy `.env.example` for a new checkout. Set

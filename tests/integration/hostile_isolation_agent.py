@@ -32,6 +32,8 @@ _FORBIDDEN_PATHS = (
     "/mnt/host",
 )
 _PRIVATE_PROXY_REQUESTS = (
+    ("GET", "/internal/bm25?q=phone&k=100"),
+    ("GET", "/internal/catalog/search?q=phone&k=100"),
     ("POST", "/environment/start"),
     ("POST", "/environment/verdict"),
     ("POST", "/environment/call/../start"),

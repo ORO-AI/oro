@@ -104,6 +104,8 @@ class TestSandboxIsolation:
         "url",
         [
             "http://search-server:5632/health",
+            "http://search-server:5632/internal/bm25?q=phone&k=100",
+            "http://search-server:5632/internal/catalog/search?q=phone&k=100",
             "http://session-runtime:9101/health",
         ],
     )

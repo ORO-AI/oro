@@ -71,6 +71,34 @@ def _call_envelope(
     }
 
 
+def test_undeclared_tool_arguments_are_removed_before_execution(registry):
+    _start(registry)
+    state = registry._sessions["session-1"]
+    step = MagicMock(wraps=state.session.step)
+    state.session.step = step
+    envelope = _call_envelope(
+        registry,
+        action={
+            "name": "search",
+            "args": {
+                "query": "phone",
+                "k": "2",
+                "max_price": "100",
+                "category": "phones",
+            },
+        },
+    )
+    result = registry.call(envelope)
+
+    assert result["observation"]["error"] is None
+    step.assert_called_once_with(
+        {"name": "search", "args": {"query": "phone", "k": "2"}}
+    )
+    assert state.call_trace[0]["request"] == envelope
+    assert envelope["action"]["args"]["max_price"] == "100"
+    assert registry.call(envelope)["replayed"] is True
+
+
 @pytest.mark.parametrize("proxy_url", ["http://proxy:80", "http://127.0.0.1:80"])
 def test_default_simulator_uses_the_miner_funded_proxy(
     loaded_pack: LoadedPack,
