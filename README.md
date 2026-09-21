@@ -37,8 +37,8 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 
 ### Test generated environments locally
 
-Local testing validates the bundled 35-task qualifying EnvPack, then runs all
-five tasks from each TF1 through TF7 family through the
+Local testing validates the bundled 30-task qualifying EnvPack, then runs all
+five tasks from each of the six included families through the
 generated runtime and family verifiers. The exact release pack is included at
 `data/local-test/env-pack.tar.gz` using Git LFS.
 
