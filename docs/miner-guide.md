@@ -4,17 +4,19 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-The local workflow validates the sealed 35-task qualifying EnvPack, then runs
-all five tasks from each TF1 through TF7 family. It uses the generated
+The local workflow validates the sealed 30-task qualifying EnvPack, then runs
+all five tasks from each of the six included families. It uses the generated
 validator's `oro-env-runtime` sessions, family verifiers, rewards, proxy,
 search server, and sandbox. It does not compile tasks or fetch evaluation work
 from the Backend. The proxy reads the public Backend model allowlist, matching
 the qualifying inference path.
 
 The exact qualifying EnvPack is included at `data/local-test/env-pack.tar.gz`
-using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.11, runtime
-contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
-`9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a`.
+using Git LFS. The archive targets `oro-env-runtime` 1.0.6, runtime contract
+0.3.4, tools v5, and verifier 0.3.6. Its SHA-256 is
+`f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5`.
+Local testing deliberately remains on this v5 pack and runtime even when the
+hosted qualifying/race validator advances to a newer sealed pack contract.
 The local runner verifies the pack, its runtime contracts, and the matching
 search-index identity before it starts the agent sandbox.
 Your agent file must define a synchronous callable

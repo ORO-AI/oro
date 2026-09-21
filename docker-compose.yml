@@ -289,11 +289,13 @@ services:
     restart: unless-stopped
 
   test:
-    image: ghcr.io/oro-ai/oro/validator:${IMAGE_TAG:-stable}
+    image: ${LOCAL_TEST_IMAGE:-oro-local-test:local}
     pull_policy: build
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
+      args:
+        RUNTIME_PROFILE: local-test
     profiles:
       - test
     depends_on:
