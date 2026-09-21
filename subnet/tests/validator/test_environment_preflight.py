@@ -310,6 +310,21 @@ def test_enabled_feature_flag_requires_valid_pack_sha() -> None:
         validator._run_environment_preflight_if_enabled()
 
 
+def test_invalid_preflight_config_fails_before_session_server_starts() -> None:
+    validator = main.Validator.__new__(main.Validator)
+    validator.config = SimpleNamespace(
+        environment_runtime_enabled=True,
+        environment_preflight_pack_sha256="",
+    )
+    validator.session_server = MagicMock()
+
+    with pytest.raises(RuntimeError, match="64 lowercase hex"):
+        validator.run()
+
+    validator.session_server.start.assert_not_called()
+    validator.session_server.stop.assert_not_called()
+
+
 def test_finalize_submits_all_sessions_and_clears_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

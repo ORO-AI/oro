@@ -755,6 +755,11 @@ class Validator:
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
 
+        # Validate the optional startup gate before starting any background
+        # service.  A mixed configuration (runtime enabled without a valid
+        # pack pin) must fail fast; otherwise startup enters the HTTP server
+        # cleanup path even though no preflight can possibly run.
+        self._validate_environment_preflight_config()
         self.session_server.start()
         logging.info(
             "Session runtime listening on "
@@ -955,15 +960,8 @@ class Validator:
             logging.info("Environment runtime feature flag is disabled")
             return None
 
+        self._validate_environment_preflight_config()
         pack_sha256 = self.config.environment_preflight_pack_sha256
-        if len(pack_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in pack_sha256
-        ):
-            raise RuntimeError(
-                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
-                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
-            )
-
         loaded_pack = asyncio.run(
             fetch_and_validate_pack(
                 pack_sha256,
@@ -992,6 +990,20 @@ class Validator:
         )
         logging.info(f"Environment preflight passed: pack={pack_sha256}")
         return summary
+
+    def _validate_environment_preflight_config(self) -> None:
+        """Reject an unusable opt-in preflight before starting services."""
+
+        if not self.config.environment_runtime_enabled:
+            return
+        pack_sha256 = self.config.environment_preflight_pack_sha256
+        if len(pack_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in pack_sha256
+        ):
+            raise RuntimeError(
+                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
+                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
+            )
 
     def prepare_environment_sessions(
         self,
