@@ -28,6 +28,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Callable
@@ -35,17 +36,22 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 import httpx
+from oro_env_runtime.schema import LedgerEntry, TaskSpec, VerifierResult
+from oro_env_runtime.verify import verify
 from oro_sdk import Client
 from oro_sdk.api.validator import presign_episode_artifact, submit_episode_results
-from oro_sdk.models.episode_artifact_presign_request import EpisodeArtifactPresignRequest
-from oro_sdk.models.episode_artifact_presign_response import EpisodeArtifactPresignResponse
+from oro_sdk.models.episode_artifact_presign_request import (
+    EpisodeArtifactPresignRequest,
+)
+from oro_sdk.models.episode_artifact_presign_response import (
+    EpisodeArtifactPresignResponse,
+)
 from oro_sdk.models.submit_episode_results_request import SubmitEpisodeResultsRequest
 from oro_sdk.models.submit_episode_results_response import SubmitEpisodeResultsResponse
 from oro_sdk.retry import compute_delay, parse_retry_after
-from oro_env_runtime.schema import LedgerEntry, TaskSpec, VerifierResult
-from oro_env_runtime.verify import verify
 
 from .backend_client import BackendError
 from .env_backend import call_environment_api, environment_client
@@ -55,12 +61,16 @@ INFERENCE_TRANSCRIPT_SCHEMA_VERSION = "oro.internal_inference_transcript.v1"
 _REQUEST_ATTEMPTS = 3
 
 _SECRET_KEY = re.compile(
-    r"^(?:authorization|proxy[_-]authorization|token|api[_-]key|access[_-]token|"
-    r"management[_-]token|credential|credentials|password|secret)$|"
-    r"(?:^|_)(?:api_key|access_token|management_token|credential|credentials|password|secret)$",
-    re.IGNORECASE,
+    r"^(?:authorization|proxy_authorization|token|api_key|access_token|"
+    r"management_token|session_token|security_token|auth_token|refresh_token|"
+    r"credential|credentials|password|secret|"
+    r"signature|sig|cookie|set_cookie)$|"
+    r"(?:^|_)(?:api_key|access_token|management_token|session_token|security_token|"
+    r"auth_token|refresh_token|credential|credentials|password|secret|signature|"
+    r"sig|cookie)$"
 )
 _URL = re.compile(r"https?://[^\s\"'<>]+")
+logger = logging.getLogger(__name__)
 
 
 # Backend requires terminal_state_hash for these outcomes (state exists).
@@ -111,17 +121,45 @@ async def _request(
     raise AssertionError("request retry loop exhausted unexpectedly")
 
 
-def _sanitize_transcript_value(value: Any) -> Any:
+def _normalized_key(value: Any) -> str:
+    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value))
+    return re.sub(r"[^a-zA-Z0-9]+", "_", key).strip("_").lower()
+
+
+def _sanitize_url(value: str) -> str:
+    parts = urlsplit(value)
+    query = []
+    for item in parts.query.split("&"):
+        key, separator, _ = item.partition("=")
+        if separator and _SECRET_KEY.search(_normalized_key(unquote_plus(key))):
+            query.append(f"{key}=[REDACTED]")
+        else:
+            query.append(item)
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, "&".join(query), parts.fragment)
+    )
+
+
+def _sanitize_transcript_value(
+    value: Any, *, secret_values: tuple[str, ...] = ()
+) -> Any:
     if isinstance(value, dict):
         return {
-            key: _sanitize_transcript_value(item)
+            key: _sanitize_transcript_value(item, secret_values=secret_values)
             for key, item in value.items()
-            if _SECRET_KEY.search(str(key).replace("-", "_")) is None
+            if _SECRET_KEY.search(_normalized_key(key)) is None
         }
     if isinstance(value, list):
-        return [_sanitize_transcript_value(item) for item in value]
+        return [
+            _sanitize_transcript_value(item, secret_values=secret_values)
+            for item in value
+        ]
     if isinstance(value, str):
-        return _URL.sub(lambda match: match.group(0).split("?", 1)[0], value)
+        sanitized = _URL.sub(lambda match: _sanitize_url(match.group(0)), value)
+        for secret in secret_values:
+            if secret:
+                sanitized = sanitized.replace(secret, "[REDACTED]")
+        return sanitized
     return value
 
 
@@ -132,8 +170,7 @@ def _inference_calls(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     calls = [
         call
         for call in raw_calls
-        if isinstance(call, dict)
-        and "/inference/" in str(call.get("path") or "")
+        if isinstance(call, dict) and "/inference/" in str(call.get("path") or "")
     ]
     return sorted(calls, key=lambda call: call.get("timestamp", 0))
 
@@ -149,21 +186,32 @@ def _transcript_agent_output(envelope: dict[str, Any]) -> dict[str, Any]:
     return agent_output
 
 
-def load_inference_transcripts(output_file: str | Path) -> dict[str, dict[str, Any]]:
+def load_inference_transcripts(
+    output_file: str | Path, *, secret_values: tuple[str, ...] = ()
+) -> dict[str, dict[str, Any]]:
     """Join each sandbox output envelope to its ordered inference calls."""
 
     path = Path(output_file)
     transcripts: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
         if not line.strip():
             continue
         try:
             envelope = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise EpisodeEmitError("sandbox output contains invalid JSON") from exc
+        except json.JSONDecodeError:
+            logger.warning("Ignoring malformed sandbox output line %d", line_number)
+            continue
         session_id = envelope.get("problem_id") if isinstance(envelope, dict) else None
         if not isinstance(session_id, str) or not session_id:
-            raise EpisodeEmitError("sandbox output is missing episode identifier")
+            logger.warning(
+                "Ignoring sandbox output line %d without an episode ID", line_number
+            )
+            continue
+        if session_id in transcripts:
+            logger.warning("Ignoring duplicate sandbox output line %d", line_number)
+            continue
 
         transcripts[session_id] = _sanitize_transcript_value(
             {
@@ -172,7 +220,8 @@ def load_inference_transcripts(output_file: str | Path) -> dict[str, dict[str, A
                 "final_status": envelope.get("status"),
                 "agent_output": _transcript_agent_output(envelope),
                 "calls": _inference_calls(envelope),
-            }
+            },
+            secret_values=secret_values,
         )
     return transcripts
 
@@ -401,10 +450,7 @@ def _transcript_for_result(
 ) -> dict[str, Any] | None:
     if transcripts is None:
         return None
-    transcript = transcripts.get(str(result.get("session_id")))
-    if transcript is None and _classify_outcome(result) == "completed":
-        raise EpisodeEmitError("completed episode is missing its inference transcript")
-    return transcript
+    return transcripts.get(str(result.get("session_id")))
 
 
 # ---------------------------------------------------------------------------

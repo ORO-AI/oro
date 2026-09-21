@@ -1318,11 +1318,20 @@ class Validator:
         sandbox_output = None
         sandbox_metadata: SandboxMetadata = {}
         output_path = self._eval_dir(eval_run_id_str) / "output.jsonl"
+        sandbox_finished = False
 
         def emit_with_transcripts(batch: list[dict[str, Any]]) -> None:
             transcripts = (
-                load_inference_transcripts(output_path) if output_path.exists() else {}
+                load_inference_transcripts(
+                    output_path, secret_values=(inference_access_token,)
+                )
+                if output_path.exists()
+                else {}
             )
+            if not sandbox_finished and any(
+                str(result.get("session_id")) not in transcripts for result in batch
+            ):
+                raise RuntimeError("inference transcript is not ready")
             self._emit_environment_result_batch(
                 work,
                 batch,
@@ -1348,6 +1357,7 @@ class Validator:
                 )
             finally:
                 reporter.stop()
+            sandbox_finished = True
             results = registry.finalized_results()
             env_pack_sha256 = _claim_environment_binding(work)
             if env_pack_sha256 is None:
@@ -1394,21 +1404,6 @@ class Validator:
             )
             return None
 
-        if emission_failure is not None:
-            logging.error(
-                "Generated episode transcript persistence failed for "
-                f"{eval_run_id_str}: {type(emission_failure).__name__}: "
-                f"{emission_failure}"
-            )
-            self._complete_with_failure(
-                eval_run_id,
-                TerminalStatus.FAILED,
-                "generated evaluation infrastructure failure: "
-                f"environment_error={len(results)}",
-                sandbox_metadata=sandbox_metadata,
-            )
-            return None
-
         try:
             score = aggregate_results(results)
         except ValueError as exc:
@@ -1419,6 +1414,12 @@ class Validator:
                 sandbox_metadata=sandbox_metadata,
             )
             return None
+        if emission_failure is not None:
+            logging.warning(
+                "Generated episode transcript persistence failed for "
+                f"{eval_run_id_str}; scoring is unaffected: "
+                f"{type(emission_failure).__name__}: {emission_failure}"
+            )
         logging.info(
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )

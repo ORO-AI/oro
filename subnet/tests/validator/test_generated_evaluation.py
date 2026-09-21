@@ -268,12 +268,23 @@ def test_duplicate_task_result_is_rejected() -> None:
         )
 
 
-@pytest.mark.parametrize("outcome,expected_reason,flush_failure", [
-    ("environment_error", "generated evaluation infrastructure failure: environment_error=1", False),
-    ("verifier_error", "generated evaluation infrastructure failure: verifier_error=1", False),
-    ("exploit", "generated evaluation integrity failure: exploit=1", False),
-    ("completed", "generated evaluation infrastructure failure: environment_error=1", True),
-])
+@pytest.mark.parametrize(
+    "outcome,expected_reason,flush_failure",
+    [
+        (
+            "environment_error",
+            "generated evaluation infrastructure failure: environment_error=1",
+            False,
+        ),
+        (
+            "verifier_error",
+            "generated evaluation infrastructure failure: verifier_error=1",
+            False,
+        ),
+        ("exploit", "generated evaluation integrity failure: exploit=1", False),
+        ("completed", None, True),
+    ],
+)
 def test_generated_runner_delivers_failed_completion(
     tmp_path, monkeypatch, outcome, expected_reason, flush_failure
 ):
@@ -304,11 +315,16 @@ def test_generated_runner_delivers_failed_completion(
         work, tmp_path / "agent.py", inference_access_token="synthetic",
         inference_provider="openrouter", inference_base_url="https://example.test/v1",
     )
-    assert completion is None
-    validator.backend_client.complete_run.assert_called_once_with(
-        eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
-        failure_reason=expected_reason, sandbox_metadata={},
-    )
+    if expected_reason is None:
+        assert completion is not None
+        assert completion.score == 0
+        validator.backend_client.complete_run.assert_not_called()
+    else:
+        assert completion is None
+        validator.backend_client.complete_run.assert_called_once_with(
+            eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
+            failure_reason=expected_reason, sandbox_metadata={},
+        )
     reporter.flush.assert_called_once_with([result])
     validator.session_runtime.clear.assert_called_once_with(registry)
 
