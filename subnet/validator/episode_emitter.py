@@ -25,12 +25,15 @@ the source of truth.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
+import re
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -48,7 +51,16 @@ from .backend_client import BackendError
 from .env_backend import call_environment_api, environment_client
 
 EPISODE_ARTIFACT_SCHEMA_VERSION = "oro.environment_episode.v1"
+INFERENCE_TRANSCRIPT_SCHEMA_VERSION = "oro.internal_inference_transcript.v1"
 _REQUEST_ATTEMPTS = 3
+
+_SECRET_KEY = re.compile(
+    r"^(?:authorization|proxy[_-]authorization|token|api[_-]key|access[_-]token|"
+    r"management[_-]token|credential|credentials|password|secret)$|"
+    r"(?:^|_)(?:api_key|access_token|management_token|credential|credentials|password|secret)$",
+    re.IGNORECASE,
+)
+_URL = re.compile(r"https?://[^\s\"'<>]+")
 
 
 # Backend requires terminal_state_hash for these outcomes (state exists).
@@ -99,7 +111,75 @@ async def _request(
     raise AssertionError("request retry loop exhausted unexpectedly")
 
 
-def build_episode_artifact(result: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_transcript_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_transcript_value(item)
+            for key, item in value.items()
+            if _SECRET_KEY.search(str(key).replace("-", "_")) is None
+        }
+    if isinstance(value, list):
+        return [_sanitize_transcript_value(item) for item in value]
+    if isinstance(value, str):
+        return _URL.sub(lambda match: match.group(0).split("?", 1)[0], value)
+    return value
+
+
+def _inference_calls(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = envelope.get("_shadow_proxy_calls")
+    if not isinstance(raw_calls, list):
+        return []
+    calls = [
+        call
+        for call in raw_calls
+        if isinstance(call, dict)
+        and "/inference/" in str(call.get("path") or "")
+    ]
+    return sorted(calls, key=lambda call: call.get("timestamp", 0))
+
+
+def _transcript_agent_output(envelope: dict[str, Any]) -> dict[str, Any]:
+    agent_output = copy.deepcopy(envelope)
+    agent_output.pop("_shadow_inference_usage", None)
+    agent_output.pop("_shadow_proxy_calls", None)
+    for step in agent_output.get("dialogue") or []:
+        extra = step.get("extra_info") if isinstance(step, dict) else None
+        if isinstance(extra, dict):
+            extra.pop("proxy_calls", None)
+    return agent_output
+
+
+def load_inference_transcripts(output_file: str | Path) -> dict[str, dict[str, Any]]:
+    """Join each sandbox output envelope to its ordered inference calls."""
+
+    path = Path(output_file)
+    transcripts: dict[str, dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            envelope = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EpisodeEmitError("sandbox output contains invalid JSON") from exc
+        session_id = envelope.get("problem_id") if isinstance(envelope, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            raise EpisodeEmitError("sandbox output is missing episode identifier")
+
+        transcripts[session_id] = _sanitize_transcript_value(
+            {
+                "schema_version": INFERENCE_TRANSCRIPT_SCHEMA_VERSION,
+                "session_id": session_id,
+                "final_status": envelope.get("status"),
+                "agent_output": _transcript_agent_output(envelope),
+                "calls": _inference_calls(envelope),
+            }
+        )
+    return transcripts
+
+
+def build_episode_artifact(
+    result: dict[str, Any], *, inference_transcript: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Wrap existing runtime snapshots without inventing a parallel trace model."""
 
     if not isinstance(result.get("bootstrap"), dict):
@@ -108,10 +188,13 @@ def build_episode_artifact(result: dict[str, Any]) -> dict[str, Any]:
         raise EpisodeEmitError("finalized result is missing ordered call trace")
     if not isinstance(result.get("ledger"), list):
         raise EpisodeEmitError("finalized result is missing environment ledger")
-    return {
+    artifact = {
         "schema_version": EPISODE_ARTIFACT_SCHEMA_VERSION,
         "episode": result,
     }
+    if inference_transcript is not None:
+        artifact["inference_transcript"] = inference_transcript
+    return artifact
 
 
 def serialize_episode_artifact(artifact: dict[str, Any]) -> bytes:
@@ -263,19 +346,25 @@ async def upload_episode_artifact(
     *,
     backend: Client,
     result: dict[str, Any],
+    inference_transcript: dict[str, Any] | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> str:
     """Presign and upload one content-addressed episode artifact."""
 
-    artifact = build_episode_artifact(result)
+    artifact = build_episode_artifact(
+        result,
+        inference_transcript=inference_transcript,
+    )
     body = serialize_episode_artifact(artifact)
     artifact_sha256 = episode_artifact_sha256(body)
-    request = EpisodeArtifactPresignRequest.from_dict({
-        "eval_run_id": result.get("evaluation_run_id"),
-        "env_pack_sha256": result.get("pack_sha256"),
-        "artifact_sha256": artifact_sha256,
-        "content_length": len(body),
-    })
+    request = EpisodeArtifactPresignRequest.from_dict(
+        {
+            "eval_run_id": result.get("evaluation_run_id"),
+            "env_pack_sha256": result.get("pack_sha256"),
+            "artifact_sha256": artifact_sha256,
+            "content_length": len(body),
+        }
+    )
     try:
         response = await call_environment_api(
             presign_episode_artifact.asyncio_detailed,
@@ -304,6 +393,18 @@ async def upload_episode_artifact(
         headers={"Content-Type": "application/json"},
     )
     return artifact_uri
+
+
+def _transcript_for_result(
+    transcripts: dict[str, dict[str, Any]] | None,
+    result: dict[str, Any],
+) -> dict[str, Any] | None:
+    if transcripts is None:
+        return None
+    transcript = transcripts.get(str(result.get("session_id")))
+    if transcript is None and _classify_outcome(result) == "completed":
+        raise EpisodeEmitError("completed episode is missing its inference transcript")
+    return transcript
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +467,7 @@ async def emit_finalized_results(
     validator_keypair: Any,
     env_pack_sha256: str,
     results: list[dict[str, Any]],
+    inference_transcripts: dict[str, dict[str, Any]] | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
     http_client: httpx.AsyncClient | None = None,
     backend_transport: httpx.AsyncBaseTransport | None = None,
@@ -382,10 +484,12 @@ async def emit_finalized_results(
         ) as backend:
             payloads = []
             for result in results:
+                transcript = _transcript_for_result(inference_transcripts, result)
                 artifact_uri = await upload_episode_artifact(
                     client,
                     backend=backend,
                     result=result,
+                    inference_transcript=transcript,
                     download_url_rewriter=download_url_rewriter,
                 )
                 payloads.append(
@@ -510,6 +614,7 @@ __all__ = [
     "emit_finalized_results",
     "episode_artifact_sha256",
     "load_episode_artifact",
+    "load_inference_transcripts",
     "replay_ledger",
     "serialize_episode_artifact",
     "submit_episode_batch",

@@ -22,6 +22,7 @@ from validator.episode_emitter import (
     emit_finalized_results,
     episode_artifact_sha256,
     load_episode_artifact,
+    load_inference_transcripts,
     replay_ledger,
     serialize_episode_artifact,
     submit_episode_batch,
@@ -129,6 +130,53 @@ def test_episode_artifact_is_content_addressed_and_round_trips():
     assert load_episode_artifact(body, expected_sha256=digest) == artifact
     with pytest.raises(EpisodeEmitError, match="sha256 mismatch"):
         load_episode_artifact(body, expected_sha256="0" * 64)
+
+
+def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path):
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 2,
+        "json_data": {
+            "model": "requested/model",
+            "messages": [{"role": "user", "content": "full prompt"}],
+            "Authorization": "Bearer secret",
+            "nested": {"openrouter_api_key": "also-secret"},
+        },
+        "response": {
+            "model": "served/model",
+            "reasoning": "full reasoning",
+            "usage": {"prompt_tokens": 4, "completion_tokens": 7},
+            "url": "https://example.test/object?signature=secret",
+        },
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {
+                "problem_id": "sess-1",
+                "status": "SUCCESS",
+                "dialogue": [
+                    {
+                        "role": "assistant",
+                        "content": "final answer",
+                        "extra_info": {"proxy_calls": [call]},
+                    }
+                ],
+                "_shadow_proxy_calls": [call],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    transcript = load_inference_transcripts(output)["sess-1"]
+
+    assert transcript["calls"][0]["response"]["reasoning"] == "full reasoning"
+    assert transcript["calls"][0]["response"]["url"] == "https://example.test/object"
+    assert "Authorization" not in transcript["calls"][0]["json_data"]
+    assert transcript["calls"][0]["json_data"]["nested"] == {}
+    assert "proxy_calls" not in transcript["agent_output"]["dialogue"][0]["extra_info"]
 
 
 # ---------------------------------------------------------------------------
@@ -370,11 +418,17 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     sleep = AsyncMock()
     monkeypatch.setattr(episode_emitter.asyncio, "sleep", sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transcript = {
+            "schema_version": "oro.internal_inference_transcript.v1",
+            "session_id": "sess-1",
+            "calls": [{"response": {"reasoning": "retained"}}],
+        }
         result = await emit_finalized_results(
             backend_url="https://api.example",
             validator_keypair=_keypair(),
             env_pack_sha256=_PACK_SHA,
             results=[_base_verdict()],
+            inference_transcripts={"sess-1": transcript},
             http_client=client,
             backend_transport=client._transport,
         )
@@ -389,8 +443,26 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
         expected_sha256=presign_request["artifact_sha256"],
     )
     assert artifact["episode"]["call_trace"][0]["request"]["call_id"] == "call-1"
+    assert artifact["inference_transcript"] == transcript
     assert submitted is not None
     assert submitted["results"][0]["ledger_uri"].startswith("s3://episodes/")
+
+
+@_run_async
+async def test_completed_episode_cannot_emit_without_required_transcript():
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(500))
+    ) as client:
+        with pytest.raises(EpisodeEmitError, match="missing its inference transcript"):
+            await emit_finalized_results(
+                backend_url="https://api.example",
+                validator_keypair=_keypair(),
+                env_pack_sha256=_PACK_SHA,
+                results=[_base_verdict()],
+                inference_transcripts={},
+                http_client=client,
+                backend_transport=client._transport,
+            )
 
 
 @pytest.mark.parametrize("bad_receipt", ["missing", "duplicate", "wrong_run", "unexpected"])

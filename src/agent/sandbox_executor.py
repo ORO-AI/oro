@@ -174,15 +174,56 @@ _INFERENCE_COUNTERS = (
 )
 
 
+def _numeric_counter_map(entry: dict, keys: tuple[str, ...]) -> dict[str, int | float]:
+    numeric = {}
+    for key in keys:
+        value = entry.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            numeric[key] = value
+    return numeric
+
+
 def _numeric_inference_counters(entry: dict) -> dict[str, int | float]:
-    return {
-        counter: value
-        for counter in _INFERENCE_COUNTERS
-        if isinstance((value := entry.get(counter)), (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value >= 0
-    }
+    return _numeric_counter_map(entry, _INFERENCE_COUNTERS)
+
+
+def _model_inference_counters(
+    entry: dict, distribution: str
+) -> dict[str, dict[str, int | float]]:
+    models = entry.get(distribution)
+    if not isinstance(models, dict):
+        return {}
+    sanitized = {}
+    for model, counters in models.items():
+        if not isinstance(model, str) or not isinstance(counters, dict):
+            continue
+        numeric = _numeric_counter_map(
+            counters,
+            (
+                "requests",
+                "failed_requests",
+                "prompt_tokens",
+                "completion_tokens",
+                "cost_usd",
+                "cost_missing",
+            ),
+        )
+        if numeric:
+            sanitized[model[:200] or "Unknown model"] = numeric
+    return sanitized
+
+
+def _merge_model_inference_counters(total: dict, entry: dict) -> None:
+    for distribution in ("requested_models", "served_models"):
+        for model, counters in _model_inference_counters(entry, distribution).items():
+            model_total = total.setdefault(distribution, {}).setdefault(model, {})
+            for key, value in counters.items():
+                model_total[key] = model_total.get(key, 0) + value
 
 
 def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
@@ -220,6 +261,7 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
         total = totals.setdefault(problem_id, {"problem_id": problem_id})
         for counter in _INFERENCE_COUNTERS:
             total[counter] = total.get(counter, 0) + numeric.get(counter, 0)
+        _merge_model_inference_counters(total, entry)
     return totals
 
 
@@ -237,6 +279,7 @@ def merge_inference_stats(*sources: dict[str, dict]) -> dict[str, dict]:
             total = totals.setdefault(problem_id, {"problem_id": problem_id})
             for counter, value in numeric.items():
                 total[counter] = total.get(counter, 0) + value
+            _merge_model_inference_counters(total, entry)
     return totals
 
 
@@ -466,6 +509,9 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
     and the HTTP server so consumers see identical envelopes.
     """
     dialogue: Optional[List[Dict]] = None
+    summary_calls = [
+        call for call in (result.proxy_calls or []) if call.get("kind") != "attempt"
+    ]
     if result.success and isinstance(result.result, list):
         dialogue = result.result
         for i, step in enumerate(dialogue):
@@ -478,19 +524,16 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
         # Stamp per-problem execution time onto the first step only — consumers
         # that look at dialogue[0].extra_info still find it there.
         if dialogue:
-            dialogue[0]["extra_info"].setdefault("execution_time", result.execution_time)
+            dialogue[0]["extra_info"].setdefault(
+                "execution_time", result.execution_time
+            )
         # Distribute proxy calls across steps by timestamp approximation.
         # Calls before the first step go to step 0; calls between step N and
         # N+1 go to step N.
         if result.proxy_calls and dialogue:
-            step_timestamps = [
-                s["extra_info"].get("timestamp", 0) for s in dialogue
-            ]
+            step_timestamps = [s["extra_info"].get("timestamp", 0) for s in dialogue]
             # Per-attempt entries (kind="attempt") are diagnostic only — keep
             # them out of the trajectory the judge sees.
-            summary_calls = [
-                c for c in result.proxy_calls if c.get("kind") != "attempt"
-            ]
             buckets: Dict[int, List[Dict]] = {}
             for call in summary_calls:
                 call_ts = call.get("timestamp", 0)
@@ -525,6 +568,8 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
     }
     if result.include_private_usage and result.inference_usage is not None:
         envelope["_shadow_inference_usage"] = result.inference_usage
+    if result.include_private_usage and summary_calls:
+        envelope["_shadow_proxy_calls"] = summary_calls
     return envelope
 
 

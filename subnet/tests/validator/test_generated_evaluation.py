@@ -11,6 +11,7 @@ from validator.generated_evaluation import (
     GENERATED_PROBLEM_SCHEMA,
     aggregate_results,
     select_run_task_roster,
+    summarize_agent_inference_usage,
     summarize_episode_resource_usage,
     validate_run_results,
     write_problem_file,
@@ -88,7 +89,45 @@ def test_episode_inference_usage_status(provider, stats, expected_status) -> Non
     )["task"]
 
     assert usage["inference_cost_status"] == expected_status
-    assert ("inference_cost_usd" in usage) is (stats is not None and provider == "openrouter")
+    assert ("inference_cost_usd" in usage) is (
+        stats is not None and provider == "openrouter"
+    )
+
+
+def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
+    summary = summarize_agent_inference_usage(
+        {
+            "agent-1": {
+                "inference_total": 2,
+                "inference_failed": 0,
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "inference_cost_usd": 0.3,
+                "requested_models": {"requested/a": {"requests": 2}},
+                "served_models": {"served/a": {"requests": 2, "cost_usd": 0.3}},
+            },
+            "agent-2": {
+                "inference_total": 1,
+                "inference_failed": 1,
+                "requested_models": {
+                    "requested/b": {"requests": 1, "failed_requests": 1}
+                },
+            },
+        },
+        "openrouter",
+    )
+
+    assert summary["inference_requests"] == 3
+    assert summary["inference_failed_requests"] == 1
+    assert summary["requested_models"] == {
+        "requested/a": {"requests": 2},
+        "requested/b": {"requests": 1, "failed_requests": 1},
+    }
+    assert summary["served_models"] == {
+        "served/a": {"requests": 2, "cost_usd": 0.3},
+    }
+    assert summary["inference_cost_status"] == "complete"
+    assert summary["inference_cost_usd"] == 0.3
 
 
 def test_episode_resource_usage_counts_single_and_grouped_operations() -> None:
@@ -229,13 +268,14 @@ def test_duplicate_task_result_is_rejected() -> None:
         )
 
 
-@pytest.mark.parametrize("outcome,expected_reason", [
-    ("environment_error", "generated evaluation infrastructure failure: environment_error=1"),
-    ("verifier_error", "generated evaluation infrastructure failure: verifier_error=1"),
-    ("exploit", "generated evaluation integrity failure: exploit=1"),
+@pytest.mark.parametrize("outcome,expected_reason,flush_failure", [
+    ("environment_error", "generated evaluation infrastructure failure: environment_error=1", False),
+    ("verifier_error", "generated evaluation infrastructure failure: verifier_error=1", False),
+    ("exploit", "generated evaluation integrity failure: exploit=1", False),
+    ("completed", "generated evaluation infrastructure failure: environment_error=1", True),
 ])
 def test_generated_runner_delivers_failed_completion(
-    tmp_path, monkeypatch, outcome, expected_reason
+    tmp_path, monkeypatch, outcome, expected_reason, flush_failure
 ):
     result = {
         **_result("task", correct=False, outcome=outcome),
@@ -246,6 +286,8 @@ def test_generated_runner_delivers_failed_completion(
     registry.key_exhausted = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
+    if flush_failure:
+        reporter.flush.side_effect = RuntimeError("artifact upload failed")
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
     validator = Validator.__new__(Validator)
     validator._create_environment_sessions = MagicMock(return_value=(
@@ -570,7 +612,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
         ),
     ],
 )
-def test_generated_runner_noncritical_failures_do_not_change_score(
+def test_generated_runner_retains_agent_inference_summary(
     tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost
 ):
     result = {
@@ -587,7 +629,6 @@ def test_generated_runner_noncritical_failures_do_not_change_score(
     registry.key_exhausted = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
-    reporter.flush.side_effect = RuntimeError("backend unavailable")
     reporter_type = MagicMock(return_value=reporter)
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", reporter_type)
 
