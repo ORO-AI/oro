@@ -555,15 +555,21 @@ class ProxyClient:
             return
         requested_model = request.get("model") if isinstance(request, dict) else None
         if result is None:
-            self.inference_stats.record_failure(requested_model=requested_model)
+            if requested_model is None:
+                self.inference_stats.record_failure()
+            else:
+                self.inference_stats.record_failure(requested_model=requested_model)
             return
         usage = result.get("usage") if isinstance(result, dict) else None
         result_model = result.get("model") if isinstance(result, dict) else None
-        self.inference_stats.record_success(
-            usage,
-            requested_model=requested_model,
-            result_model=result_model,
-        )
+        if requested_model is None and result_model is None:
+            self.inference_stats.record_success(usage)
+        else:
+            self.inference_stats.record_success(
+                usage,
+                requested_model=requested_model,
+                result_model=result_model,
+            )
 
     @staticmethod
     def _full_error(response: Optional[requests.Response]) -> Dict[str, Any]:

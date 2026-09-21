@@ -1177,14 +1177,19 @@ class Validator:
                 pack_sha256=env_pack_sha256,
                 require_complete=require_complete,
             )
+        kwargs = (
+            {"inference_transcripts": inference_transcripts}
+            if inference_transcripts is not None
+            else {}
+        )
         submitted = asyncio.run(
             emit_finalized_results(
                 backend_url=self.config.backend_url,
                 validator_keypair=self.wallet.hotkey,
                 env_pack_sha256=env_pack_sha256,
                 results=results,
-                inference_transcripts=inference_transcripts,
                 download_url_rewriter=_rewrite_localhost_url,
+                **kwargs,
             )
         )
         logging.info(
