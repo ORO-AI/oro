@@ -23,16 +23,17 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 validator = ["oro-env-runtime==2.0.1"]
 local-test = ["oro-env-runtime==1.0.6"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
+default-groups = ["validator"]
 conflicts = [
     [
-        { extra = "validator" },
-        { extra = "local-test" },
+        { group = "validator" },
+        { group = "local-test" },
     ],
 ]
 

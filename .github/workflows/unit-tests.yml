@@ -51,7 +51,7 @@ jobs:
         # the validator lockfile so the test suite exercises the same
         # package versions the validator ships with.
         uv pip install --system --project docker/validator/ \
-          --extra validator -r docker/validator/pyproject.toml
+          --group validator -r docker/validator/pyproject.toml
 
     - name: Run tests with pytest and coverage
       run: |
@@ -97,7 +97,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install pytest-cov requests pydantic
         uv pip install --system --project docker/validator/ \
-          --extra local-test -r docker/validator/pyproject.toml
+          --group local-test -r docker/validator/pyproject.toml
 
     - name: Run miner local-testing tests
       run: |

@@ -19,7 +19,7 @@ WORKDIR /app
 # duplicating the rest of the dependency graph.
 COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
 ARG RUNTIME_PROFILE=validator
-RUN uv sync --frozen --no-dev --no-install-project --extra ${RUNTIME_PROFILE}
+RUN uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}
 
 # Pre-cache the canonical sentence model (avoids runtime download).
 RUN --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \
