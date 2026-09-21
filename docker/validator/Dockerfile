@@ -14,11 +14,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# Install all dependencies from lockfile — fully deterministic builds.
-# The lockfile pins every transitive dependency so fresh builds always
-# get identical packages regardless of upstream releases.
+# Install all dependencies from the shared lockfile. The mutually exclusive
+# profiles select the hosted v6 runtime or miner-local v5 runtime without
+# duplicating the rest of the dependency graph.
 COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
-RUN uv sync --frozen --no-dev --no-install-project
+ARG RUNTIME_PROFILE=validator
+RUN uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}
 
 # Pre-cache the canonical sentence model (avoids runtime download).
 RUN --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \
