@@ -129,34 +129,110 @@ class InferenceStats:
         self._cost_missing = 0
         self._prompt_tokens = 0
         self._completion_tokens = 0
+        self._requested_models: dict[str, dict[str, int | float]] = {}
+        self._served_models: dict[str, dict[str, int | float]] = {}
         self._stats_file = stats_file
         self._problem_id = problem_id
 
-    def record_success(self, usage: Optional[Dict] = None):
+    @staticmethod
+    def _model(value: object) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()[:200]
+
+    @staticmethod
+    def _tokens(usage: object, key: str) -> int | None:
+        value = usage.get(key) if isinstance(usage, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return max(value, 0)
+
+    @staticmethod
+    def _cost(usage: object) -> float | None:
+        value = usage.get("cost") if isinstance(usage, dict) else None
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+            or not math.isfinite(value)
+        ):
+            return None
+        return float(value)
+
+    def _record_model(
+        self,
+        distribution: dict[str, dict[str, int | float]],
+        model: str | None,
+        *,
+        failed: bool,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
+        totals = distribution.setdefault(
+            model or "Unknown model",
+            {
+                "requests": 0,
+                "failed_requests": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cost_usd": 0.0,
+                "cost_missing": 0,
+            },
+        )
+        totals["requests"] += 1
+        totals["failed_requests"] += int(failed)
+        totals["prompt_tokens"] += prompt_tokens or 0
+        totals["completion_tokens"] += completion_tokens or 0
+        if cost_usd is None:
+            totals["cost_missing"] += int(not failed)
+        else:
+            totals["cost_usd"] += cost_usd
+
+    def record_success(
+        self,
+        usage: Optional[Dict] = None,
+        *,
+        requested_model: object = None,
+        result_model: object = None,
+    ):
         with self._lock:
             self._success += 1
-            cost = usage.get("cost") if isinstance(usage, dict) else None
-            if (
-                isinstance(cost, (int, float))
-                and not isinstance(cost, bool)
-                and cost >= 0
-                and math.isfinite(cost)
-            ):
+            cost = self._cost(usage)
+            if cost is not None:
                 self._cost_usd += cost
             else:
                 self._cost_missing += 1
-            if isinstance(usage, dict):
-                prompt_tokens = usage.get("prompt_tokens")
-                completion_tokens = usage.get("completion_tokens")
-                if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
-                    self._prompt_tokens += max(prompt_tokens, 0)
-                if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
-                    self._completion_tokens += max(completion_tokens, 0)
+            prompt_tokens = self._tokens(usage, "prompt_tokens")
+            completion_tokens = self._tokens(usage, "completion_tokens")
+            self._prompt_tokens += prompt_tokens or 0
+            self._completion_tokens += completion_tokens or 0
+            self._record_model(
+                self._requested_models,
+                self._model(requested_model),
+                failed=False,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost,
+            )
+            self._record_model(
+                self._served_models,
+                self._model(result_model),
+                failed=False,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost,
+            )
             self._flush()
 
-    def record_failure(self):
+    def record_failure(self, *, requested_model: object = None):
         with self._lock:
             self._failed += 1
+            self._record_model(
+                self._requested_models,
+                self._model(requested_model),
+                failed=True,
+            )
             self._flush()
 
     def _flush(self) -> None:
@@ -179,6 +255,8 @@ class InferenceStats:
                 "inference_cost_missing": self._cost_missing,
                 "prompt_tokens": self._prompt_tokens,
                 "completion_tokens": self._completion_tokens,
+                "requested_models": self._requested_models,
+                "served_models": self._served_models,
             }
             with open(self._stats_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
@@ -373,12 +451,13 @@ class ProxyClient:
         duration_ms = (time.monotonic() - t0) * 1000
         result = response.json() if response and response.status_code == 200 else None
 
+        error = self._full_error(response) if result is None else None
         self.request_log.record(
             method="GET",
             path=path,
             params=params,
-            status_code=response.status_code if response else None,
-            response_body=result,
+            status_code=response.status_code if response is not None else None,
+            response_body=result if result is not None else error,
             duration_ms=duration_ms,
         )
         return result
@@ -406,14 +485,14 @@ class ProxyClient:
         if response and response.status_code == 200:
             result = response.json()
 
-        self._record_inference_result(path, result)
+        self._record_inference_result(path, result, json_data)
 
         self.request_log.record(
             method="POST",
             path=path,
             json_data=json_data,
-            status_code=response.status_code if response else None,
-            response_body=result,
+            status_code=response.status_code if response is not None else None,
+            response_body=result if result is not None else self._full_error(response),
             duration_ms=duration_ms,
         )
         return result
@@ -452,7 +531,7 @@ class ProxyClient:
         data: Optional[Dict] = None
         if response is not None and response.status_code == 200:
             data = response.json()
-        self._record_inference_result(path, data)
+        self._record_inference_result(path, data, json_data)
 
         error: Optional[Dict[str, Any]] = None
         if data is None:
@@ -462,21 +541,58 @@ class ProxyClient:
             method="POST",
             path=path,
             json_data=json_data,
-            status_code=response.status_code if response else None,
-            response_body=data,
+            status_code=response.status_code if response is not None else None,
+            response_body=data if data is not None else self._full_error(response),
             duration_ms=duration_ms,
         )
         return PostResult(data=data, error=error)
 
-    def _record_inference_result(self, path: str, result: object) -> None:
+    def _record_inference_result(
+        self, path: str, result: object, request: object = None
+    ) -> None:
         """Record one final inference outcome for either POST interface."""
         if "/inference/" not in path:
             return
+        requested_model = request.get("model") if isinstance(request, dict) else None
         if result is None:
-            self.inference_stats.record_failure()
+            if requested_model is None:
+                self.inference_stats.record_failure()
+            else:
+                self.inference_stats.record_failure(requested_model=requested_model)
             return
         usage = result.get("usage") if isinstance(result, dict) else None
-        self.inference_stats.record_success(usage)
+        result_model = result.get("model") if isinstance(result, dict) else None
+        if requested_model is None and result_model is None:
+            self.inference_stats.record_success(usage)
+        else:
+            self.inference_stats.record_success(
+                usage,
+                requested_model=requested_model,
+                result_model=result_model,
+            )
+
+    @staticmethod
+    def _full_error(response: Optional[requests.Response]) -> Dict[str, Any]:
+        """Return the complete final provider error for the private transcript."""
+
+        if response is None:
+            return {
+                "kind": "network",
+                "status": None,
+                "body": "no response (network error or timeout)",
+            }
+        try:
+            body: object = response.json()
+        except (ValueError, requests.RequestException):
+            try:
+                body = response.text
+            except Exception:  # noqa: BLE001 - best-effort forensic capture
+                body = "<unreadable body>"
+        return {
+            "kind": "upstream",
+            "status": response.status_code,
+            "body": body,
+        }
 
     @staticmethod
     def _describe_error(response: Optional[requests.Response]) -> Dict[str, Any]:

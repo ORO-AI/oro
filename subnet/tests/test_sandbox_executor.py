@@ -103,7 +103,27 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
         "inference_cost_missing": 0,
         "prompt_tokens": 10,
         "completion_tokens": 2,
-    }
+            "requested_models": {
+                "Unknown model": {
+                "requests": 1,
+                "failed_requests": 0,
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "cost_usd": 0.25,
+                "cost_missing": 0,
+                }
+            },
+            "served_models": {
+                "Unknown model": {
+                    "requests": 1,
+                    "failed_requests": 0,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cost_usd": 0.25,
+                    "cost_missing": 0,
+                }
+            },
+        }
     assert result.inference_usage == usage["episode-1"]
     output = tmp_path / "runner-output.jsonl"
     envelope = build_result_envelope(result)
