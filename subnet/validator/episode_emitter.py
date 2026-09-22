@@ -444,15 +444,6 @@ async def upload_episode_artifact(
     return artifact_uri
 
 
-def _transcript_for_result(
-    transcripts: dict[str, dict[str, Any]] | None,
-    result: dict[str, Any],
-) -> dict[str, Any] | None:
-    if transcripts is None:
-        return None
-    return transcripts.get(str(result.get("session_id")))
-
-
 # ---------------------------------------------------------------------------
 # Backend POST
 # ---------------------------------------------------------------------------
@@ -530,7 +521,11 @@ async def emit_finalized_results(
         ) as backend:
             payloads = []
             for result in results:
-                transcript = _transcript_for_result(inference_transcripts, result)
+                transcript = (
+                    inference_transcripts.get(str(result.get("session_id")))
+                    if inference_transcripts is not None
+                    else None
+                )
                 artifact_uri = await upload_episode_artifact(
                     client,
                     backend=backend,

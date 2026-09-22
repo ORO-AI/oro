@@ -482,7 +482,7 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
 
 
 def test_completed_episode_allows_missing_transcript():
-    assert episode_emitter._transcript_for_result({}, _base_verdict()) is None
+    assert "inference_transcript" not in build_episode_artifact(_base_verdict())
 
 
 @pytest.mark.parametrize("bad_receipt", ["missing", "duplicate", "wrong_run", "unexpected"])
