@@ -21,9 +21,22 @@ RUN python /tmp/patch_pyserini.py && \
     rm /tmp/patch_pyserini.py && \
     python -c 'from pyserini.search.lucene import LuceneSearcher; print(LuceneSearcher.__name__)'
 
-# Keep the large archive compressed in the build context. ADD expands it into
-# one image layer, avoiding a second host copy of the full Lucene index.
-ADD index.tar.gz /app/
+# Bake the Lucene identity manifest alongside the index. `src/search_engine/
+# server.py` reads `/app/lucene_manifest.json` at import to populate
+# SEARCH_IDENTITY; that identity flows into every `/health` response and the
+# publish pipeline's identity guardrail (`.github/workflows/publish-images.yml`)
+# refuses to promote an image whose /health reports None here. A base that
+# ships the index but forgets the manifest silently publishes an unhealthy
+# image (ORO-2244 root cause).
+COPY lucene_manifest.json /app/lucene_manifest.json
+
+# Copy the pre-built Lucene index directory. Was `ADD index.tar.gz /app/` —
+# BuildKit's tarball-decompression path silently produced a file set that did
+# not match the sealed manifest, breaking the RUN validation below (root cause
+# not diagnosed; Lucene shard files themselves are already binary + poorly
+# compressible, so the tarball indirection buys ~0 %). `COPY index /app/index`
+# is a straightforward directory copy the validation can trust byte-for-byte.
+COPY index /app/index
 
 # Validate every expanded index file before this base image can be published.
 RUN test -d /app/index && \

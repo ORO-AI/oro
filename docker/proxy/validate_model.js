@@ -246,12 +246,47 @@ function validate(r) {
     r.error("stripped inference routing fields: " + stripped.join(","));
   }
 
+  // OpenRouter only returns `usage.cost` (USD) on the response when the
+  // request body sets `usage.include=true`. Force it on so per-call cost
+  // lands in every response — both InferenceStats (per-episode budget
+  // tracking) and miner agent code can then read `resp.usage.cost`
+  // deterministically. Chutes ignores unknown top-level fields but skip
+  // there to keep the outbound body untouched.
+  var usageInjected = false;
+  if (provider === "openrouter") {
+    parsed.usage = { include: true };
+    usageInjected = true;
+  }
+
+  // Proxy-authored fallback for the shopper user-simulator. The validator's
+  // user-simulator runs on Mistral Small, which has been rate-limiting (429) on
+  // OpenRouter and hard-failing episodes. Re-add an OpenRouter `models[]`
+  // candidate list so OpenRouter itself fails over to the Qwen instruct model on
+  // a primary 429/5xx. The strip above (#260) removes a *client-supplied*
+  // models[] to stop a caller steering onto an unvalidated model; this list is
+  // proxy-hardcoded to two known models and is not client-controllable, so that
+  // threat model does not apply. The scalar `parsed.model` stays Mistral, so the
+  // allowlist check below still validates the primary. The fallback entry is
+  // intentionally NOT allowlist-validated (proxy-authored exception). OpenRouter
+  // only. TODO(ORO): replay-parity + record served model before relying on this
+  // for scoring — cross-validator fallback timing adds score variance.
+  var fallbackInjected = false;
+  if (provider === "openrouter" && parsed.model === "mistralai/mistral-small-2603") {
+    parsed.models = [
+      "mistralai/mistral-small-2603",
+      "qwen/qwen3-30b-a3b-instruct-2507",
+    ];
+    fallbackInjected = true;
+  }
+
   var rewritten = rewriteModelFor(provider, parsed.model);
   if (rewritten !== null) {
     parsed.model = rewritten;
   }
   var forwardBody =
-    rewritten !== null || stripped.length > 0 ? JSON.stringify(parsed) : body;
+    rewritten !== null || stripped.length > 0 || usageInjected || fallbackInjected
+      ? JSON.stringify(parsed)
+      : body;
 
   getAllowlist(r, provider, function (allowed) {
     if (!allowed) {
@@ -281,6 +316,22 @@ function validate(r) {
       { method: "POST", body: forwardBody, args: r.variables.args || "" },
       function (reply) {
         _tag(r, _upstreamLabel(reply.status));
+        // Belt-and-suspenders forensic trail for ORO-2191. The Python side
+        // (SimulatorCompletion / ProxyClient.last_error) also captures the
+        // body, but a message posted here survives even for callers that
+        // don't read last_error yet — grep the proxy container logs on any
+        // env_error incident for the actual upstream reason.
+        if (reply.status >= 400) {
+          var body = reply.responseText || "";
+          r.error(
+            "upstream " +
+              reply.status +
+              " on " +
+              r.uri +
+              " body: " +
+              body.substring(0, 800)
+          );
+        }
         for (var h in reply.headersOut) {
           r.headersOut[h] = reply.headersOut[h];
         }

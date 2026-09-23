@@ -25,7 +25,7 @@ class SandboxConfig:
     output_file: Optional[str] = None  # None = print to stdout
 
     # Agent file configuration
-    agent_file: Optional[str] = None  # None = use default src.agent.agent
+    agent_file: Optional[str] = None  # None = reference src.agent.environment_agent
 
     def validate(self) -> None:
         """Validate configuration values."""

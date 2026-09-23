@@ -4,6 +4,7 @@ import importlib.util
 import hashlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import queue
@@ -50,6 +51,8 @@ class ExecutionResult:
     problem_id: Optional[str] = None
     inference_failure_count: int = 0
     inference_total: int = 0
+    inference_usage: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    include_private_usage: bool = field(default=False, repr=False)
     proxy_calls: Optional[List[Dict]] = None
     status: SandboxProblemStatus = field(default=SandboxProblemStatus.FAILED)
 
@@ -141,46 +144,150 @@ def load_agent_from_file(file_path: str) -> Callable:
     if not callable(agent_main):
         raise ImportError(f"'agent_main' in {file_path} is not callable")
 
-    logger.info(f"Succesfully loaded agent from {file_path}")
     return agent_main
 
 
 def _load_agent(agent_file: Optional[str] = None) -> Callable:
-    """Load agent_main function from file or default module.
+    """Load agent_main function from file or the reference environment agent.
 
     Args:
-        agent_file: Optional path to agent file. If None, uses default src.agent.agent.
+        agent_file: Optional path to agent file. If None, uses src.agent.environment_agent.
 
     Returns:
         The agent_main callable.
     """
     if agent_file:
         return load_agent_from_file(agent_file)
-    from src.agent.agent import agent_main
+    from src.agent.environment_agent import agent_main
 
     return agent_main
 
 
-def _read_inference_stats(path: str, problem_id: str) -> tuple:
-    """Read inference stats for a problem from the shared JSONL file.
+_INFERENCE_COUNTERS = (
+    "inference_success",
+    "inference_failed",
+    "inference_total",
+    "inference_cost_usd",
+    "inference_cost_missing",
+    "prompt_tokens",
+    "completion_tokens",
+)
 
-    Multiple problems append to the same file (one line per inference call,
-    cumulative counts). Returns the last matching entry's (failure_count, total).
-    """
-    last_failed, last_total = 0, 0
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                entry = json.loads(line)
-                if str(entry.get("problem_id")) == str(problem_id):
-                    last_failed = entry.get("inference_failed", 0)
-                    last_total = entry.get("inference_total", 0)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
-    return last_failed, last_total
+
+def _numeric_counter_map(entry: dict, keys: tuple[str, ...]) -> dict[str, int | float]:
+    numeric = {}
+    for key in keys:
+        value = entry.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            numeric[key] = value
+    return numeric
+
+
+def _numeric_inference_counters(entry: dict) -> dict[str, int | float]:
+    return _numeric_counter_map(entry, _INFERENCE_COUNTERS)
+
+
+def _model_inference_counters(
+    entry: dict, distribution: str
+) -> dict[str, dict[str, int | float]]:
+    models = entry.get(distribution)
+    if not isinstance(models, dict):
+        return {}
+    sanitized = {}
+    for model, counters in models.items():
+        if not isinstance(model, str) or not isinstance(counters, dict):
+            continue
+        numeric = _numeric_counter_map(
+            counters,
+            (
+                "requests",
+                "failed_requests",
+                "prompt_tokens",
+                "completion_tokens",
+                "cost_usd",
+                "cost_missing",
+            ),
+        )
+        if numeric:
+            sanitized[model[:200] or "Unknown model"] = numeric
+    return sanitized
+
+
+def _merge_model_inference_counters(total: dict, entry: dict) -> None:
+    for distribution in ("requested_models", "served_models"):
+        for model, counters in _model_inference_counters(entry, distribution).items():
+            model_total = total.setdefault(distribution, {}).setdefault(model, {})
+            for key, value in counters.items():
+                model_total[key] = model_total.get(key, 0) + value
+
+
+def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
+    """Merge latest cumulative counters from one or more isolated files."""
+
+    latest_by_source = {}
+    paths = [path] if isinstance(path, str) else path
+    for source, stats_path in enumerate(paths):
+        try:
+            with open(stats_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    if "dialogue" in entry:
+                        nested = entry.get("_shadow_inference_usage")
+                        if not isinstance(nested, dict):
+                            continue
+                        entry = {**nested, "problem_id": entry.get("problem_id")}
+                    key = (str(entry.get("problem_id")), source)
+                    latest_by_source[key] = entry
+        except (FileNotFoundError, OSError):
+            pass
+    totals: dict[str, dict] = {}
+    for (problem_id, _source), entry in latest_by_source.items():
+        numeric = _numeric_inference_counters(entry)
+        if not numeric:
+            continue
+        total = totals.setdefault(problem_id, {"problem_id": problem_id})
+        for counter in _INFERENCE_COUNTERS:
+            total[counter] = total.get(counter, 0) + numeric.get(counter, 0)
+        _merge_model_inference_counters(total, entry)
+    return totals
+
+
+def merge_inference_stats(*sources: dict[str, dict]) -> dict[str, dict]:
+    """Add independent episode counters from trusted or isolated sources."""
+
+    totals: dict[str, dict] = {}
+    for source in sources:
+        for problem_id, entry in source.items():
+            if not isinstance(entry, dict):
+                continue
+            numeric = _numeric_inference_counters(entry)
+            if not numeric:
+                continue
+            total = totals.setdefault(problem_id, {"problem_id": problem_id})
+            for counter, value in numeric.items():
+                total[counter] = total.get(counter, 0) + value
+            _merge_model_inference_counters(total, entry)
+    return totals
+
+
+def _read_inference_stats(path: str, problem_id: str) -> tuple:
+    """Return the latest failure and request counts for one problem."""
+
+    entry = read_inference_stats(path).get(str(problem_id), {})
+    return entry.get("inference_failed", 0), entry.get("inference_total", 0)
 
 
 def _read_request_log(path: str) -> List[Dict]:
@@ -249,7 +356,7 @@ def execute_single_problem(
         problem: Problem dictionary with 'query' key (reward removed).
         timeout: Maximum execution time in seconds.
         agent_file: Path to agent file (loaded in child process). If None,
-            uses default ``src.agent.agent``.
+            uses the reference ``src.agent.environment_agent``.
 
     Returns:
         ExecutionResult with execution outcome.
@@ -297,7 +404,10 @@ def execute_single_problem(
             process.kill()
             process.join()
 
-    inf_failures, inf_total = _read_inference_stats(stats_file, str(problem_id))
+    inference_usage = read_inference_stats(stats_file).get(str(problem_id))
+    include_private_usage = problem.get("category") == "generated_environment"
+    inf_failures = int((inference_usage or {}).get("inference_failed", 0))
+    inf_total = int((inference_usage or {}).get("inference_total", 0))
     proxy_calls = _read_request_log(request_log_file)
 
     if timed_out:
@@ -310,6 +420,8 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            inference_usage=inference_usage,
+            include_private_usage=include_private_usage,
             proxy_calls=proxy_calls or None,
             status=SandboxProblemStatus.TIMED_OUT,
         )
@@ -326,6 +438,8 @@ def execute_single_problem(
                     problem_id=problem_id,
                     inference_failure_count=inf_failures,
                     inference_total=inf_total,
+                    inference_usage=inference_usage,
+                    include_private_usage=include_private_usage,
                     proxy_calls=proxy_calls or None,
                     status=SandboxProblemStatus.SUCCESS,
                 )
@@ -345,6 +459,8 @@ def execute_single_problem(
                 problem_id=problem_id,
                 inference_failure_count=inf_failures,
                 inference_total=inf_total,
+                inference_usage=inference_usage,
+                include_private_usage=include_private_usage,
                 proxy_calls=proxy_calls or None,
                 status=SandboxProblemStatus.FAILED,
             )
@@ -356,6 +472,8 @@ def execute_single_problem(
             problem_id=problem_id,
             inference_failure_count=inf_failures,
             inference_total=inf_total,
+            inference_usage=inference_usage,
+            include_private_usage=include_private_usage,
             proxy_calls=proxy_calls or None,
             status=SandboxProblemStatus.FAILED,
         )
@@ -391,6 +509,9 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
     and the HTTP server so consumers see identical envelopes.
     """
     dialogue: Optional[List[Dict]] = None
+    summary_calls = [
+        call for call in (result.proxy_calls or []) if call.get("kind") != "attempt"
+    ]
     if result.success and isinstance(result.result, list):
         dialogue = result.result
         for i, step in enumerate(dialogue):
@@ -403,19 +524,16 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
         # Stamp per-problem execution time onto the first step only — consumers
         # that look at dialogue[0].extra_info still find it there.
         if dialogue:
-            dialogue[0]["extra_info"].setdefault("execution_time", result.execution_time)
+            dialogue[0]["extra_info"].setdefault(
+                "execution_time", result.execution_time
+            )
         # Distribute proxy calls across steps by timestamp approximation.
         # Calls before the first step go to step 0; calls between step N and
         # N+1 go to step N.
         if result.proxy_calls and dialogue:
-            step_timestamps = [
-                s["extra_info"].get("timestamp", 0) for s in dialogue
-            ]
+            step_timestamps = [s["extra_info"].get("timestamp", 0) for s in dialogue]
             # Per-attempt entries (kind="attempt") are diagnostic only — keep
             # them out of the trajectory the judge sees.
-            summary_calls = [
-                c for c in result.proxy_calls if c.get("kind") != "attempt"
-            ]
             buckets: Dict[int, List[Dict]] = {}
             for call in summary_calls:
                 call_ts = call.get("timestamp", 0)
@@ -439,7 +557,7 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
                 "message": result.error,
             }
 
-    return {
+    envelope = {
         "problem_id": result.problem_id,
         "status": result.status.value,
         "execution_time": result.execution_time,
@@ -448,6 +566,11 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
         "error": error_obj,
         "dialogue": dialogue,
     }
+    if result.include_private_usage and result.inference_usage is not None:
+        envelope["_shadow_inference_usage"] = result.inference_usage
+    if result.include_private_usage and summary_calls:
+        envelope["_shadow_proxy_calls"] = summary_calls
+    return envelope
 
 
 def execute_problems_parallel(
@@ -476,7 +599,7 @@ def execute_problems_parallel(
     if agent_file:
         logger.info(f"Using agent from {agent_file}")
     else:
-        logger.info("Using default agent from src.agent.agent")
+        logger.info("Using reference agent from src.agent.environment_agent")
 
     logger.info(
         f"Executing {len(problems)} problems with {max_workers} workers, timeout={timeout_per_problem}s"

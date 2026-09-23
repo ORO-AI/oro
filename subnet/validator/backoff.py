@@ -28,7 +28,7 @@ class ExponentialBackoff:
         # Apply jitter (+/-20%)
         if self.jitter:
             jitter_factor = 1.0 + random.uniform(-0.2, 0.2)
-            value = value * jitter_factor
+            value = min(value * jitter_factor, self.max_seconds)
 
         # Increase for next call (before cap)
         self._current = min(self._current * 2, self.max_seconds)

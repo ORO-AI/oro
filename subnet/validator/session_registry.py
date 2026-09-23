@@ -21,12 +21,13 @@ from oro_env_runtime.user_sim import UserSim
 
 from .env_pack_loader import LoadedPack
 from .session_errors import (
+    AgentInferenceBudgetError,
     HarnessError,
     HarnessExecutionError,
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import SimulatorCompletion
+from .simulator_completion import InferenceProviderError, SimulatorCompletion
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
@@ -89,6 +90,16 @@ def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
     return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
 
 
+def _strip_undeclared_arguments(
+    action: dict[str, Any], tool_parameters: dict[str, frozenset[str]]
+) -> dict[str, Any]:
+    args = action.get("args")
+    allowed = tool_parameters.get(action.get("name"))
+    if allowed is not None and isinstance(args, dict):
+        action["args"] = {key: value for key, value in args.items() if key in allowed}
+    return action
+
+
 @dataclass
 class _CachedResponse:
     call_id: str
@@ -98,6 +109,7 @@ class _CachedResponse:
 
 @dataclass
 class _SessionState:
+    session_id: str
     evaluation_run_id: str
     agent_version_id: str
     task_id: str
@@ -105,6 +117,9 @@ class _SessionState:
     simulator: Any | None
     transcript: list[dict[str, Any]]
     bootstrap: dict[str, Any]
+    tool_parameters: dict[str, frozenset[str]]
+    started_at: float
+    finished_at: float | None = None
     call_trace: list[dict[str, Any]] = field(default_factory=list)
     event_fired_turn: int | None = None
     event_surfaced: bool = False
@@ -112,6 +127,7 @@ class _SessionState:
     delivered_interventions: set[int] = field(default_factory=set)
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
+    quarantined_outcome: str = "environment_error"
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -135,6 +151,7 @@ class SessionRegistry:
         max_calls_per_turn: int = MAX_CALLS_PER_TURN,
         max_workers: int = 8,
         inference_access_token: str | None = None,
+        inference_stats_file: str | None = None,
         simulator_proxy_url: str = "http://proxy:80",
         simulator_factory: Callable[[TaskSession], Any] | None = None,
     ) -> None:
@@ -151,23 +168,29 @@ class SessionRegistry:
         self.tool_timeout_s = float(tool_timeout_s)
         self.simulator_timeout_s = float(simulator_timeout_s)
         self.max_calls_per_turn = int(max_calls_per_turn)
-        self._simulator_completion = (
-            SimulatorCompletion(inference_access_token, proxy_url=simulator_proxy_url)
-            if inference_access_token
-            else None
-        )
-        self._simulator_factory = simulator_factory or self._default_simulator
+        self._inference_access_token = inference_access_token
+        self._inference_stats_file = inference_stats_file
+        self._simulator_proxy_url = simulator_proxy_url
+        self._simulator_factory = simulator_factory
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self._sessions: dict[str, _SessionState] = {}
         self._lock = threading.Lock()
         self._closed = False
         self._finalized = False
+        self.key_exhausted = threading.Event()
 
-    def _default_simulator(self, session: TaskSession) -> UserSim:
-        if self._simulator_completion is None:
+    def _default_simulator(self, state: _SessionState) -> UserSim:
+        if self._inference_access_token is None:
             raise RuntimeError(
                 "miner inference credentials are required for user simulation"
             )
+        completion = SimulatorCompletion(
+            self._inference_access_token,
+            proxy_url=self._simulator_proxy_url,
+            inference_stats_file=self._inference_stats_file,
+            episode_id=state.session_id,
+        )
+        session = state.session
         family = get_family(session.task.family)
         return UserSim(
             session.task,
@@ -175,7 +198,7 @@ class SessionRegistry:
             surface_events=not session.state_blind,
             sim_context=family.user_sim_context(session.task),
             allow_pushback=family.user_sim_allow_pushback(session.task),
-            completion=self._simulator_completion,
+            completion=completion,
         )
 
     def _simulator_response(
@@ -185,7 +208,11 @@ class SessionRegistry:
         intervention_index: int | None = None,
     ) -> dict[str, Any]:
         if state.simulator is None:
-            state.simulator = self._simulator_factory(state.session)
+            state.simulator = (
+                self._simulator_factory(state.session)
+                if self._simulator_factory is not None
+                else self._default_simulator(state)
+            )
         if intervention_index is not None:
             return state.simulator.ensure_intervention(
                 state.session.task.interventions[intervention_index],
@@ -286,7 +313,14 @@ class SessionRegistry:
                     max_calls_per_turn=self.max_calls_per_turn,
                 ),
             }
+            tool_parameters = {}
+            for spec in bootstrap["policy_view"]["tools"]:
+                function = spec["function"]
+                tool_parameters[function["name"]] = frozenset(
+                    function["parameters"].get("properties", {})
+                )
             state = _SessionState(
+                session_id=session_id,
                 evaluation_run_id=evaluation_run_id,
                 agent_version_id=agent_version_id,
                 task_id=task_id,
@@ -294,6 +328,8 @@ class SessionRegistry:
                 simulator=None,
                 transcript=[{"role": "user", "content": session.task.goal_text}],
                 bootstrap=bootstrap,
+                tool_parameters=tool_parameters,
+                started_at=time.perf_counter(),
             )
             self._sessions[session_id] = state
 
@@ -329,6 +365,8 @@ class SessionRegistry:
             raise InvalidSessionError(
                 f"session is quarantined: {state.quarantined_reason}"
             )
+        if self.key_exhausted.is_set():
+            raise AgentInferenceBudgetError("miner inference key exhausted")
 
     @staticmethod
     def _required_string(envelope: dict[str, Any], key: str) -> str:
@@ -356,7 +394,7 @@ class SessionRegistry:
         if action is not None:
             if not isinstance(action, dict):
                 raise ValueError("action must be an object")
-            call_group = [{"call_id": call_id, "action": action}]
+            call_group = [{"call_id": call_id, "action": copy.deepcopy(action)}]
             is_group = False
         else:
             if not isinstance(calls, list) or not calls:
@@ -379,10 +417,11 @@ class SessionRegistry:
                 if not isinstance(inner_action, dict):
                     raise ValueError("each call action must be an object")
                 inner_call_ids.add(inner_call_id)
-                call_group.append({"call_id": inner_call_id, "action": inner_action})
+                call_group.append(
+                    {"call_id": inner_call_id, "action": copy.deepcopy(inner_action)}
+                )
             is_group = True
 
-        actions = [item["action"] for item in call_group]
         call_ids_to_bind = [call_id]
         call_ids_to_bind.extend(
             item["call_id"] for item in call_group if item["call_id"] != call_id
@@ -426,6 +465,13 @@ class SessionRegistry:
                     "turn does not match session sequence: "
                     f"expected {expected_turn}, got {turn}"
                 )
+
+            # Ignore undeclared top-level arguments for compatibility with
+            # agents that relied on the runtime's previously wider surface.
+            actions = [
+                _strip_undeclared_arguments(item["action"], state.tool_parameters)
+                for item in call_group
+            ]
 
             started = time.perf_counter()
             tool_latency_ms: float | None = None
@@ -473,8 +519,7 @@ class SessionRegistry:
                                 "latency_ms": simulator_latency_ms,
                                 "exchanges": [],
                             }
-                            if snapshot is not None
-                            and simulator_latency_ms is not None
+                            if snapshot is not None and simulator_latency_ms is not None
                             else simulator_evidence()
                         ),
                         "error": {"type": error_type, "detail": detail},
@@ -645,11 +690,28 @@ class SessionRegistry:
                     ) from exc
                 except Exception as exc:
                     simulator_latency_ms = _elapsed_ms(simulator_started)
-                    state.quarantined_reason = (
-                        f"user simulator failed: {type(exc).__name__}"
+                    # Only surface trusted, provider-sourced status+body via
+                    # ``InferenceProviderError`` — bespoke simulators (test
+                    # doubles, future custom implementations) can raise
+                    # arbitrary exceptions whose message may echo private
+                    # task material (see ORO-1866 disclosure canary). Any
+                    # other exception collapses to its class name only.
+                    if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
+                        self.key_exhausted.set()
+                        state.quarantined_outcome = "agent_error"
+                        exc_summary = "miner inference key exhausted"
+                    elif isinstance(exc, InferenceProviderError):
+                        exc_summary = f"upstream status={exc.status} body={exc.body!r}"
+                    else:
+                        exc_summary = type(exc).__name__
+                    state.quarantined_reason = f"user simulator failed: {exc_summary}"
+                    error_type = (
+                        AgentInferenceBudgetError
+                        if state.quarantined_outcome == "agent_error"
+                        else HarnessExecutionError
                     )
-                    record_error("HarnessExecutionError", state.quarantined_reason)
-                    raise HarnessExecutionError(
+                    record_error(error_type.__name__, state.quarantined_reason)
+                    raise error_type(
                         f"{state.quarantined_reason}; session quarantined"
                     ) from exc
                 simulator_latency_ms = _elapsed_ms(simulator_started)
@@ -757,6 +819,8 @@ class SessionRegistry:
         snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         snapshot = snapshot or self._session_snapshot(state)
+        if state.finished_at is None:
+            state.finished_at = time.perf_counter()
         has_terminal_state = outcome in {"completed", "partial", "leakage", "exploit"}
         return {
             "evaluation_run_id": state.evaluation_run_id,
@@ -773,6 +837,7 @@ class SessionRegistry:
                 snapshot["state_hash"] if has_terminal_state else None
             ),
             "step_count": snapshot["step_count"],
+            "wall_seconds": round(max(0.0, state.finished_at - state.started_at), 6),
             "solver_turn_count": snapshot["solver_turn_count"],
             "action_count": snapshot["step_count"],
             "render_budget": snapshot["render_budget"],
@@ -814,7 +879,7 @@ class SessionRegistry:
                     results.append(copy.deepcopy(state.final_result))
                     continue
                 if state.quarantined_reason is not None:
-                    outcome = "environment_error"
+                    outcome = state.quarantined_outcome
                     verdict = None
                     error_detail = state.quarantined_reason
                 elif state.terminal_reason is None:
@@ -885,6 +950,7 @@ class SessionRegistry:
 
 
 __all__ = [
+    "AgentInferenceBudgetError",
     "DEFAULT_SIMULATOR_TIMEOUT_S",
     "DEFAULT_TOOL_TIMEOUT_S",
     "MAX_CALLS_PER_TURN",

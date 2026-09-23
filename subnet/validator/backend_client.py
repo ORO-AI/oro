@@ -19,7 +19,7 @@ from uuid import UUID
 import httpx
 import requests
 from bittensor_wallet import Wallet
-from oro_sdk import BittensorAuthClient, Client
+from oro_sdk import BittensorAuthClient, Client, is_transient_status
 from oro_sdk.api.public import get_top_agent
 from oro_sdk.api.validator import (
     claim_work,
@@ -36,9 +36,7 @@ from oro_sdk.models.complete_run_request import CompleteRunRequest
 from oro_sdk.models.complete_run_response import CompleteRunResponse
 from oro_sdk.models.at_capacity_error import AtCapacityError
 from oro_sdk.models.eval_run_not_found_error import EvalRunNotFoundError
-from oro_sdk.models.invalid_problem_id_error import InvalidProblemIdError
 from oro_sdk.models.lease_expired_error import LeaseExpiredError
-from oro_sdk.models.missing_score_error import MissingScoreError
 from oro_sdk.models.not_run_owner_error import NotRunOwnerError
 from oro_sdk.models.run_already_complete_error import RunAlreadyCompleteError
 from oro_sdk.models.heartbeat_request import HeartbeatRequest as SdkHeartbeatRequest
@@ -100,8 +98,8 @@ class BackendError(Exception):
     @property
     def is_transient(self) -> bool:
         """Return True if this error is transient and may be retried."""
-        if self.status_code is not None and self.status_code >= 500:
-            return True
+        if self.status_code is not None:
+            return is_transient_status(self.status_code)
         # Connection/timeout errors don't have status codes but are transient
         if self.status_code is None and self.sdk_error is None:
             return True
@@ -164,14 +162,6 @@ class BackendError(Exception):
     @property
     def is_eval_run_not_found(self) -> bool:
         return self.is_error(EvalRunNotFoundError)
-
-    @property
-    def is_invalid_problem_id(self) -> bool:
-        return self.is_error(InvalidProblemIdError)
-
-    @property
-    def is_missing_score(self) -> bool:
-        return self.is_error(MissingScoreError)
 
     def __str__(self) -> str:
         return self.message
@@ -395,7 +385,7 @@ class BackendClient:
 
         Raises:
             BackendError: If the request fails.
-                - is_transient=True for 5xx/timeout/connection errors
+                - is_transient=True for 429/5xx/timeout/connection errors
                 - is_conflict=True if at capacity (409)
                 - is_auth_error=True if authentication fails (401/403)
         """

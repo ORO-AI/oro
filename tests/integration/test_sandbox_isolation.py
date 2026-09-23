@@ -104,6 +104,8 @@ class TestSandboxIsolation:
         "url",
         [
             "http://search-server:5632/health",
+            "http://search-server:5632/internal/bm25?q=phone&k=100",
+            "http://search-server:5632/internal/catalog/search?q=phone&k=100",
             "http://session-runtime:9101/health",
         ],
     )
@@ -128,8 +130,8 @@ class TestSandboxIsolation:
         assert result.returncode == 0, f"Container cannot reach proxy: {result.stderr}"
         assert "healthy" in result.stdout.lower() or result.stdout.strip() == "healthy"
 
-    def test_search_server_through_proxy(self, sandbox_container):
-        """Test that sandbox container can reach search-server through proxy."""
+    def test_legacy_search_routes_are_gone(self, sandbox_container):
+        """The ShoppingBench /search/* routes answer 410 and never reach search-server."""
         result = exec_in_container(
             sandbox_container,
             [
@@ -137,19 +139,46 @@ class TestSandboxIsolation:
                 "-s",
                 "--max-time",
                 "5",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
                 "http://proxy:80/search/find_product?q=test&page=1",
             ],
             timeout=10,
         )
 
-        assert result.returncode == 0, (
-            f"Container cannot reach search-server through proxy: {result.stderr}"
+        assert result.returncode == 0, f"Container cannot reach proxy: {result.stderr}"
+        assert result.stdout.strip() == "410", (
+            f"Expected 410 for a legacy search route, got: {result.stdout[:200]}"
         )
 
-        response = result.stdout
-        assert "product_id" in response or "[]" in response, (
-            f"Unexpected response from search-server: {response[:200]}"
+    def test_inference_route_is_live(self, sandbox_container):
+        """/inference/* is owned by the njs validator: a body without a model is rejected there, not by the default deny."""
+        result = exec_in_container(
+            sandbox_container,
+            [
+                "curl",
+                "-s",
+                "--max-time",
+                "5",
+                "-w",
+                "\n%{http_code}",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                "{}",
+                "http://proxy:80/inference/chat/completions",
+            ],
+            timeout=10,
         )
+
+        assert result.returncode == 0, result.stderr
+        body, status = result.stdout.rsplit("\n", 1)
+        assert status == "400", (
+            f"Expected the model validator to answer, got {status}: {body[:200]}"
+        )
+        assert "model" in json.loads(body)["error"]
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""

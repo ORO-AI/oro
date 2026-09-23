@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import BinaryIO
 
 _DEFAULT_CHUNK_SIZE = 64 * 1024
+
+
+class RunStoppedEarly(RuntimeError):
+    """The caller cancelled a running sandbox after a terminal run condition."""
 
 
 def drain_capped(
@@ -71,6 +76,7 @@ def run_capped(
     max_bytes: int,
     timeout: float,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
+    stop_event: threading.Event | None = None,
 ) -> int:
     """Run ``cmd``, capturing stdout/stderr to files each capped at ``max_bytes``.
 
@@ -103,7 +109,19 @@ def run_capped(
             for t in readers:
                 t.start()
             try:
-                proc.wait(timeout=timeout)
+                if stop_event is None:
+                    proc.wait(timeout=timeout)
+                else:
+                    deadline = time.monotonic() + timeout
+                    while proc.poll() is None:
+                        if stop_event.is_set():
+                            proc.kill()
+                            proc.wait()
+                            raise RunStoppedEarly("sandbox stopped after terminal run condition")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(cmd, timeout)
+                        stop_event.wait(min(0.25, remaining))
             except subprocess.TimeoutExpired:
                 # Kill BEFORE joining: the readers only reach EOF once the child
                 # exits, so joining a live child would deadlock.

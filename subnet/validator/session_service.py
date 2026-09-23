@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 
 from .session_errors import (
+    AgentInferenceBudgetError,
     HarnessExecutionError,
     HarnessTimeoutError,
     InvalidSessionError,
@@ -76,6 +77,11 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
             raise HTTPException(
                 status_code=504,
                 detail={"error": str(exc), "environment_error": True},
+            ) from exc
+        except AgentInferenceBudgetError as exc:
+            raise HTTPException(
+                status_code=402,
+                detail={"error": str(exc), "environment_error": False},
             ) from exc
         except HarnessExecutionError as exc:
             raise HTTPException(

@@ -4,17 +4,19 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-The local workflow validates the sealed 35-task qualifying EnvPack, then runs
-all five tasks from each TF1 through TF7 family. It uses the generated
+The local workflow validates the sealed 30-task qualifying EnvPack, then runs
+all five tasks from each of the six included families. It uses the generated
 validator's `oro-env-runtime` sessions, family verifiers, rewards, proxy,
 search server, and sandbox. It does not compile tasks or fetch evaluation work
 from the Backend. The proxy reads the public Backend model allowlist, matching
 the qualifying inference path.
 
 The exact qualifying EnvPack is included at `data/local-test/env-pack.tar.gz`
-using Git LFS. The 6.3 MB archive targets `oro-env-runtime` 0.2.9, runtime
-contract 0.3.2, tools v5, and verifier 0.3.4. Its SHA-256 is
-`9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a`.
+using Git LFS. The archive targets `oro-env-runtime` 1.0.6, runtime contract
+0.3.4, tools v5, and verifier 0.3.6. Its SHA-256 is
+`f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5`.
+Local testing deliberately remains on this v5 pack and runtime even when the
+hosted qualifying/race validator advances to a newer sealed pack contract.
 The local runner verifies the pack, its runtime contracts, and the matching
 search-index identity before it starts the agent sandbox.
 Your agent file must define a synchronous callable
@@ -36,6 +38,20 @@ swap it in with `--agent-file my_agent.py`.
 > contract. Production evaluations no longer use it; an agent that never opens
 > a session against `binding.session_id` terminates as `agent_error` on every
 > task with zero score. Migrate to `agent_main(problem_data)` before submitting.
+
+### Tool argument handling
+
+Use only the tool names and top-level arguments listed in
+`policy_view.tools[].function.parameters.properties`. Qualifying, race, and
+local validator sessions remove undeclared top-level arguments before tool
+execution. Declared arguments retain the runtime's existing defaulting,
+coercion, and bounds behavior.
+
+For example, `max_price` is declared on `filter`, not `search`. A search call
+that includes it still runs without that argument; use the filter tool for a
+price-constrained catalog lookup. Search still uses BM25 internally. The
+sandbox cannot call the shared search server directly, and legacy `/search/*`
+proxy routes return 410.
 
 ### Setup and configuration
 
@@ -78,6 +94,21 @@ reference in the bundled qualifying pack.
 `LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be
 available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
+
+`--problems` runs a subset while you iterate. Pass any number from 1 up to the
+number of problems in the pack, which is 35 for the bundled one. `--seed` only
+applies alongside it.
+The problems are sampled at random and spread across the seven families, so a
+short run still covers as many of TF1 through TF7 as it has room for:
+
+```bash
+docker compose run test --agent-file my_agent.py --problems 7
+```
+
+Each run samples afresh, so repeated runs do not tune the agent against one
+lucky subset. The report prints the seed; pass `--seed` to repeat an earlier
+selection exactly. Scores from a subset are not comparable to qualifying,
+which always runs the pack's full qualifying roster.
 Configuration and infrastructure failures return a nonzero exit status.
 
 Local tests use a dedicated search server and proxy. The proxy fetches the live
@@ -87,28 +118,59 @@ command works without additional networking flags. Run one local test at a
 time per Compose project. Dependencies stay running for subsequent tests; stop
 them with `docker compose --profile test down` when finished.
 
-**Note on `find_product`:** the `q` parameter matches against product title and the values within `attributes` / `sku_options`. Field names (keys) themselves are not searchable.
-
 ### Output
 
-The command prints 35 finalized task results followed by the aggregate and
-artifact location:
+The command prints a run header, the finalized tasks grouped by family with
+a per-family mean, the aggregate, and where the artifacts are:
 
 ```text
-intent_decomposition: completed, reward=...
-intent_decomposition: completed, reward=...
-... 33 more task rows ...
-Aggregate score: ...
-Artifacts: /app/logs/environment-runs/local-...
+ORO Bench local run  local-7c1f2a
+  pack        9e5d11c6…c73a
+  problems    3 of 35, sampled, repeat with --seed 4821993
+  runtime     0.3.2  verifier 0.3.4
+  inference   openrouter
+  agent       my_agent.py  sha256 3f9c1d7b0000…
+  agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, requested by the reference
+              agent and mapped per provider; custom agents choose in code)
+  simulator   mistralai/mistral-small-2603
+  judge       deepseek/deepseek-v4-flash-0731
+
+intent_decomposition               mean 1.00  1/1 passed
+  TF1-intent_decomposition-300003  completed         1.00
+
+retrieval_recall                   mean 0.71  1/1 passed
+  TF2-retrieval_recall-300003      completed         0.71
+
+recovery                           mean 0.00  0/1 passed
+  TF6-recovery-300005              environment_error 0.00  environment: tool call exceeded 10.000s
+
+Aggregate score  0.564286
+Artifacts        logs/environment-runs/local-7c1f2a
+Trajectories     logs/environment-runs/local-7c1f2a/trajectories.html  (open in a browser)
 ```
 
-The family names correspond to TF1 through TF7 in the order shown. A completed
-task can still have a zero reward if its verifier verdict is incorrect.
+Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
+that off. The simulator and judge models are sealed in the pack. The agent
+model line shows `SANDBOX_MODEL`, which is a request rather than a record: only
+the included reference agent reads it, and the proxy maps it to the active
+provider's name for that model, so an OpenRouter run of the default sends
+`deepseek/deepseek-v3.2`. A custom agent chooses its own models in code. A
+completed task can still have a zero reward if its verifier verdict is
+incorrect.
+
+Open `trajectories.html` in any browser to step through every episode: the
+shopper request, your agent's messages and tool calls, observations, simulator
+events, the verdict checks, and the reward. It is a single self-contained file,
+so you can copy it off a remote host. The viewer source lives in
+`trajectory-viewer/`. A failed run writes it too, covering whatever episodes
+finished before the failure, and names it in the error output. A run that fails
+before any episode finalizes has nothing to show, so it writes no viewer.
 
 Each run directory contains:
 
 - `summary.json`, with the pack digest, task roster, per-task and per-family
   rewards, runtime error classification, and aggregate score;
+- `trajectories.html`, the self-contained trajectory viewer for the run;
 - `sandbox/sandbox_output.jsonl`, with the untrusted sandbox trajectory output;
 - `episode_results.jsonl`, with finalized runtime receipts including verifier
   verdicts, call traces, ledgers, and provenance;

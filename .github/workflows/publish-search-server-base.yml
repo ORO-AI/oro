@@ -1,0 +1,113 @@
+name: Publish search-server-base
+
+# The search-server-base image bakes the multi-GB Lucene index + its
+# `lucene_manifest.json` so the code-layer `publish-images.yml` build can
+# layer only entrypoint / server code on top. Index changes are rare
+# (only on pack rebuilds); this workflow exists so operators can refresh
+# the base image on demand, keeping the code-layer publish path fast.
+#
+# Status: SCAFFOLD. GitHub-hosted runners do not have enough disk to
+# assemble the ~14GB index + ~15GB build context + push the resulting
+# ~7GB compressed multi-arch image. Fixes:
+#
+#   1. Use a self-hosted runner with a large disk (preferred for
+#      recurring use).
+#   2. OR run this locally per the runbook in
+#      `docker/search-server/README.base.md`.
+#
+# Until a self-hosted runner is wired up this workflow will not succeed
+# on `ubuntu-latest`; the local script is the working path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      index_s3_uri:
+        description: "s3:// URI for the index.tar.gz to bake"
+        required: true
+        type: string
+      lucene_manifest_s3_uri:
+        description: "s3:// URI for the matching lucene_manifest.json"
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/oro-ai/oro/search-server-base
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # ubuntu-latest ships with ~14GB free after checkout. That's not
+          # enough for a 14GB index + build cache + push staging. This step
+          # reclaims another ~30GB but is STILL insufficient — see the
+          # workflow header for the self-hosted / local paths.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.SEARCH_BASE_ARTIFACT_READ_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Fetch index + manifest
+        run: |
+          set -euo pipefail
+          mkdir -p build-context
+          # Dockerfile.base does `COPY index /app/index` on the extracted
+          # shard directory (raw dir, not tarball — BuildKit's ADD-extract
+          # produced a file-set the sealed manifest could not verify). The
+          # tarball must expand to `index/` at build-context root.
+          aws s3 cp "${{ inputs.index_s3_uri }}" /tmp/index.tar.gz \
+            --only-show-errors
+          tar xzf /tmp/index.tar.gz -C build-context
+          test -d build-context/index || {
+            echo "index.tar.gz did not expand to build-context/index/"; exit 1;
+          }
+          rm /tmp/index.tar.gz
+          # Dockerfile.base also does a standalone `COPY lucene_manifest.json`;
+          # the file must exist at context root, else COPY hard-fails before
+          # any RUN validation can execute.
+          aws s3 cp "${{ inputs.lucene_manifest_s3_uri }}" \
+            build-context/lucene_manifest.json --only-show-errors
+          # Assert manifest identity fields are populated — the publish
+          # workflow's guardrail rejects images with None here anyway.
+          python3 -c '
+          import json, sys
+          m = json.load(open("build-context/lucene_manifest.json"))
+          for f in ("documents_sha256", "index_sha256"):
+              v = m.get(f)
+              if not (isinstance(v, str) and len(v) == 64):
+                  sys.exit(f"{f}={v!r} is not a 64-char hex SHA")
+          '
+          cp -r docker build-context/docker
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push multi-arch
+        uses: docker/build-push-action@v5
+        with:
+          context: build-context
+          file: build-context/Dockerfile.base
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest

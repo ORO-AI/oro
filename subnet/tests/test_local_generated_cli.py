@@ -5,7 +5,6 @@ import json
 import tarfile
 from importlib.metadata import version
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from oro_env_runtime import (
@@ -22,7 +21,7 @@ from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a"
+    "f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5"
 )
 
 
@@ -118,7 +117,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "0.2.11"
+    assert version("oro-env-runtime") == "1.0.6"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
@@ -135,7 +134,10 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "verifier": VERIFIER_VERSION,
     }
     family_counts = manifest["epoch"]["family_counts"]
-    assert set(family_counts) == local.GENERATED_FAMILIES
+    # The bundled pack may ship a subset of the supported families (currently
+    # six of seven — preference_reasoning is omitted); every present family
+    # must still carry a full qualifying quota.
+    assert set(family_counts) and set(family_counts) <= local.GENERATED_FAMILIES
     assert all(
         count >= local.QUALIFYING_TASKS_PER_FAMILY for count in family_counts.values()
     )
@@ -156,7 +158,11 @@ def test_invalid_model_cannot_reach_proxy_configuration(
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("LOCAL_MAX_WORKERS", "0"), ("LOCAL_TIMEOUT", "-1"), ("LOCAL_TIMEOUT", "nan")],
+    [
+        ("LOCAL_MAX_WORKERS", "0"),
+        ("LOCAL_TIMEOUT", "-1"),
+        ("LOCAL_TIMEOUT", "nan"),
+    ],
 )
 def test_invalid_limits_fail_before_evaluation(
     monkeypatch, tmp_path, name, value
@@ -167,6 +173,49 @@ def test_invalid_limits_fail_before_evaluation(
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=name):
         local.parse_config(["--agent-file", str(agent)])
+
+
+def test_problems_flag_selects_a_subset_and_reports_a_repeatable_seed(
+    monkeypatch, tmp_path
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+
+    full = local.parse_config(["--agent-file", str(agent)])
+    assert full.problem_count is None
+    assert full.seed is None
+
+    short = local.parse_config(["--agent-file", str(agent), "--problems", "7"])
+    assert short.problem_count == 7
+    assert short.seed is not None
+    assert short.max_workers == 7
+
+    # A fresh sample per run unless the seed is handed back.
+    other = local.parse_config(["--agent-file", str(agent), "--problems", "7"])
+    assert other.seed != short.seed
+    repeated = local.parse_config(
+        ["--agent-file", str(agent), "--problems", "7", "--seed", str(short.seed)]
+    )
+    assert repeated.seed == short.seed
+
+
+def test_seed_without_problems_is_rejected(monkeypatch, tmp_path) -> None:
+    # A seed alone never samples, so accepting it would record a run as sampled
+    # when it ran the full qualifying roster.
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    with pytest.raises(ValueError, match="--seed only applies"):
+        local.parse_config(["--agent-file", str(agent), "--seed", "5"])
+
+
+def test_problems_flag_rejects_a_non_positive_count(monkeypatch, tmp_path) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    with pytest.raises(ValueError, match="--problems must be positive"):
+        local.parse_config(["--agent-file", str(agent), "--problems", "0"])
 
 
 def test_missing_credentials_fail_without_running_agent(tmp_path) -> None:
@@ -213,9 +262,11 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         local,
         "run_local_generated_validator",
-        lambda config: SimpleNamespace(
+        lambda config: local.LocalGeneratedResult(
+            run_id="local-test",
             results=[
                 {
+                    "task_id": "TF6-recovery-1",
                     "family": "recovery",
                     "outcome": "completed",
                     "verdict": {
@@ -226,10 +277,34 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
             ],
             aggregate_score=0.5,
             artifact_dir=tmp_path / "results",
+            summary_path=tmp_path / "results" / "summary.json",
+            summary={
+                "run_id": "local-test",
+                "pack_sha256": "9e5d" + "0" * 60,
+                "aggregate_score": 0.5,
+                "models": {"user_simulator": "vendor/sim", "judge": "vendor/judge"},
+                "tasks": [
+                    {
+                        "task_id": "TF6-recovery-1",
+                        "family": "recovery",
+                        "outcome": "completed",
+                        "correct": True,
+                        "reward": 0.5,
+                        "error_classification": None,
+                        "error_detail": None,
+                    }
+                ],
+            },
+            report_path=tmp_path / "results" / "trajectories.html",
         ),
     )
     assert local.main(["--agent-file", str(agent)]) == 0
     output = capsys.readouterr().out
-    assert "recovery: completed, reward=0.500000" in output
-    assert "Aggregate score: 0.500000" in output
-    assert f"Artifacts: {tmp_path / 'results'}" in output
+    assert "local-test" in output
+    assert "TF6-recovery-1" in output and "0.50" in output
+    assert "vendor/sim" in output and "vendor/judge" in output
+    assert "deepseek-ai/DeepSeek-V3.2-TEE" in output
+    assert "Aggregate score  0.500000" in output
+    assert str(tmp_path / "results") in output
+    assert str(tmp_path / "results" / "trajectories.html") in output
+    assert "\x1b[" not in output

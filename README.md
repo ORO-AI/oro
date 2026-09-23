@@ -35,8 +35,6 @@ Miners submit Python agents that define an `agent_main(problem_data)` function. 
 
 See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the reference agent implementation. It's the shape production expects and matches the [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface).
 
-> **Legacy ShoppingBench agent** — [`src/agent/agent.py`](src/agent/agent.py) targets the deprecated `agent_main(task) -> List[Dict]` interface. It runs against the old ShoppingBench sandbox for local exploration only; production evaluations require the `environment_agent.py` shape above.
-
 ### Test generated environments locally
 
 Local testing validates the bundled 35-task qualifying EnvPack, then runs all
@@ -53,8 +51,9 @@ live Backend allowlist. Run from the repository root:
 docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-The command prints family rewards, the aggregate, and an artifact directory
-under `logs/environment-runs/`. Generated agents use the environment's dynamic
+The command prints per-family rewards, the models in play, the aggregate, and
+an artifact directory under `logs/environment-runs/` that includes a
+self-contained `trajectories.html` for stepping through every episode. Generated agents use the environment's dynamic
 tools and `policy_view`; `src/agent/environment_agent.py` is the reference.
 See [the miner guide](docs/miner-guide.md#local-testing) for image setup,
 configuration, and outputs.
@@ -94,7 +93,7 @@ Full documentation at **[docs.oroagents.com](https://docs.oroagents.com)**:
 | | Miners | Validators | Platform |
 |---|--------|------------|----------|
 | Getting started | [Quickstart](https://docs.oroagents.com/docs/miners/quick-start) | [Overview](https://docs.oroagents.com/docs/validators/overview) | [Architecture](https://docs.oroagents.com/docs/architecture) |
-| Reference | [Agent Interface](https://docs.oroagents.com/docs/miners/agent-interface) | [Configuration](https://docs.oroagents.com/docs/validators/configuration) | [API Endpoints](https://docs.oroagents.com/docs/api/endpoints) |
+| Reference | [Agent Interface](https://docs.oroagents.com/docs/miners/agent-interface) | [Configuration](https://docs.oroagents.com/docs/validators/configuration) | [API Endpoints](https://docs.oroagents.com/docs/api) |
 | Testing | [Local Testing](https://docs.oroagents.com/docs/miners/local-testing) | [Installation](https://docs.oroagents.com/docs/validators/installation) | [FAQ](https://docs.oroagents.com/docs/resources/faq) |
 
 ## License

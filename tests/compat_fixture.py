@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from oro_env_runtime import contracts
+from oro_env_runtime import contracts, verify as runtime_verify
 from oro_env_runtime.pack import write_checksums
 from oro_env_runtime.reward import (
     TF4_RELEASE_GATE_PATH,
@@ -25,7 +25,9 @@ from oro_env_runtime.schema import TaskSpec
 from oro_env_runtime.tf4_judge_contract import judge_contract
 from validator.env_pack_loader import LoadedPack
 
-COMPAT_ARCHIVE = Path(__file__).with_name("fixtures") / "oro_env_runtime_compat_v1.tar.gz"
+COMPAT_ARCHIVE = (
+    Path(__file__).with_name("fixtures") / "oro_env_runtime_compat_v1.tar.gz"
+)
 COMPAT_METADATA = COMPAT_ARCHIVE.with_name("oro_env_runtime_compat_v1.json")
 COMPAT_PRODUCTS = COMPAT_ARCHIVE.with_name("oro_env_runtime_compat_v1_products.jsonl")
 
@@ -77,13 +79,80 @@ class StubRuntimeFamily:
         }
 
 
+def _migrate_to_sealed_grading(epoch: Path, manifest: dict) -> None:
+    """Upgrade the test-owned fixture copy when the installed runtime uses v6."""
+
+    from oro_env_runtime.grading import GRADING_SCHEMA_VERSION
+    from oro_env_runtime.pack import COMPILED_EPOCH_VERSION, fingerprint
+
+    manifest["pack_version"] = COMPILED_EPOCH_VERSION
+    task_path = epoch / "data/tasks/private_tasks.jsonl"
+    task_rows = [json.loads(line) for line in task_path.read_text().splitlines()]
+    for row in task_rows:
+        task = row["task"]
+        family = task["family"]
+        task.setdefault("family_payload", {})["world"] = {"regime": "qualifying"}
+        keys = list(task["acceptance"]["acceptable_keys"])
+        grading = {
+            "schema_version": GRADING_SCHEMA_VERSION,
+            "family": family,
+            "gold_keys": keys,
+            "hard_satisfied": {key: True for key in keys},
+            "preference_scores": {key: 1.0 for key in keys},
+            "event_commitment_keys": keys if task.get("event_rule") else None,
+            "uses_judge": family in {"preference_reasoning", "justification"},
+            "decoupled": True,
+        }
+        grading.update(
+            {
+                "retrieval_recall": {
+                    "retrieval": {
+                        "eligible_pool": keys,
+                        "relevance_clusters": [[key] for key in keys],
+                        "required_observed_clusters": min(1, len(keys)),
+                    }
+                },
+                "ranking": {
+                    "ranking": {
+                        "candidate_scores": {key: 1.0 for key in keys},
+                        "pre_event_top_keys": keys,
+                        "post_event_top_keys": keys,
+                        "post_event_candidate_scores": {key: 1.0 for key in keys},
+                    }
+                },
+                "recovery": {
+                    "recovery": {
+                        "relaxation_level": {key: 0 for key in keys},
+                    }
+                },
+            }.get(family, {})
+        )
+        task["grading"] = grading
+        row["task"] = TaskSpec.model_validate(task).model_dump(mode="json")
+    task_path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in task_rows
+        )
+    )
+    manifest["epoch"]["task_set_fingerprint"] = fingerprint(
+        [
+            {
+                "task_id": row["task_id"],
+                "task_fingerprint": fingerprint(row["task"]),
+            }
+            for row in task_rows
+        ]
+    )
+
+
 @pytest.fixture
 def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Extract the trusted compatibility archive without importing the generator."""
 
     lookup = lambda name: StubRuntimeFamily(name)  # noqa: E731
     monkeypatch.setattr("oro_env_runtime.families.get_family", lookup)
-    monkeypatch.setattr("oro_env_runtime.verify.get_family", lookup)
+    monkeypatch.setattr(runtime_verify, "get_family", lookup, raising=False)
     monkeypatch.setattr("validator.session_registry.get_family", lookup)
     metadata = json.loads(COMPAT_METADATA.read_text())
     artifact = COMPAT_ARCHIVE.read_bytes()
@@ -109,6 +178,8 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     manifest["contracts"]["runtime"] = contracts.RUNTIME_VERSION
     manifest["contracts"]["tools"] = contracts.TOOL_CONTRACT_VERSION
     manifest["contracts"]["verifier"] = contracts.VERIFIER_VERSION
+    if "grading" in TaskSpec.model_fields:
+        _migrate_to_sealed_grading(epoch, manifest)
     gate_path = epoch / "tf4_hybrid_release_gate.json"
     shutil.copy2(TF4_RELEASE_GATE_PATH, gate_path)
     gate = json.loads(gate_path.read_text())
@@ -119,7 +190,9 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     gate_active = tf4_release_gate_passed(gate_path, judge_contract=tf4_contract)
     tf4_reward["active"] = gate_active
     tf4_reward["status"] = "active" if gate_active else "shadow"
-    (epoch / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    (epoch / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
     write_checksums(epoch)
     shutil.make_archive(str(epoch), "gztar", root_dir=tmp_path, base_dir="epoch")
 

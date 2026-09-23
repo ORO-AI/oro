@@ -10,16 +10,15 @@ services:
     environment:
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-5632}
-      # gunicorn worker processes (default nproc/2, floor 2) x threads/worker.
-      # Keep workers <= free cores so the extra JVMs don't oversubscribe.
+      # gunicorn sync worker processes (default nproc/2, floor 2). Keep
+      # workers <= free cores so the extra JVMs don't oversubscribe.
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
-      - SEARCH_THREADS=${SEARCH_THREADS:-4}
       # Per-worker JVM heap. Must match the Dockerfile default (this compose var
       # overrides the image ENV). Index is off-heap/mmap, so 1g/worker is plenty;
       # keeps total heap modest across N workers on memory-constrained hosts.
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
-    # Loopback-only publish. Validator + proxy reach search-server over the
-    # `main` docker network (`http://search-server:5632`), so no host publish
+    # Loopback-only publish. The validator runtime reaches search-server over
+    # the `main` docker network (`http://search-server:5632`), so no host publish
     # is required for normal operation. Keeping a loopback publish lets an
     # operator `curl 127.0.0.1:5632/health` from an EC2 shell without
     # exposing the port on any external interface — docker binds to the wildcard
@@ -30,8 +29,8 @@ services:
       test: ["CMD-SHELL", "python -c \"import os; import urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('PORT', '5632') + '/health').read()\""]
       interval: 10s
       # 10s (was 5s): under a heavy concurrent search burst a health probe may
-      # briefly wait for a gthread slot; a tighter timeout risks false unhealthy
-      # flaps on the contended hosts this change targets.
+      # briefly wait for a sync worker slot; a tighter timeout risks false
+      # unhealthy flaps on the contended hosts this change targets.
       timeout: 10s
       retries: 3
       start_period: 30s
@@ -40,10 +39,10 @@ services:
     networks:
       - main
     # Match sandbox container's --cpu-shares=2048 (see subnet/sandbox.py).
-    # Search-server sits on the sandbox's hot path (every find_product /
-    # view_product call). Leaving it at Docker's 1024 default lets the
-    # sandbox starve it on saturated hosts, elongating sandbox phase and
-    # tripping per-problem timeouts.
+    # Search-server sits on the episode hot path (every search / filter /
+    # view action the runtime executes). Leaving it at Docker's 1024 default
+    # lets the sandbox starve it on saturated hosts, elongating sandbox phase
+    # and tripping per-problem timeouts.
     cpu_shares: 2048
     restart: unless-stopped
 
@@ -54,8 +53,6 @@ services:
       dockerfile: docker/proxy/Dockerfile
     container_name: shoppingbench-proxy
     environment:
-      - SEARCH_SERVER_URL=${SEARCH_SERVER_URL:-search-server}
-      - SEARCH_SERVER_PORT=${SEARCH_SERVER_PORT:-5632}
       - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
       # Backend URL for fetching the live model allowlist. Defaults to
       # production; staging/dev override via BACKEND_URL env var.
@@ -84,9 +81,9 @@ services:
     labels:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     # Match sandbox container's --cpu-shares=2048. Proxy fans every
-    # /inference and /search call from sandbox + reasoning judge; if
+    # /inference and /environment/call request from the sandbox; if
     # sandbox outweighs proxy under CPU pressure, both inference and
-    # search round-trips stall.
+    # tool round-trips stall.
     cpu_shares: 2048
     restart: unless-stopped
 
@@ -280,7 +277,6 @@ services:
       - HOST=0.0.0.0
       - PORT=5632
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
-      - SEARCH_THREADS=${SEARCH_THREADS:-4}
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5632/health').read()\""]
@@ -293,11 +289,13 @@ services:
     restart: unless-stopped
 
   test:
-    image: ghcr.io/oro-ai/oro/validator:${IMAGE_TAG:-stable}
+    image: ${LOCAL_TEST_IMAGE:-oro-local-test:local}
     pull_policy: build
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
+      args:
+        RUNTIME_PROFILE: local-test
     profiles:
       - test
     depends_on:
@@ -320,7 +318,7 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INFERENCE_PROVIDER=${INFERENCE_PROVIDER:-}
       - LOCAL_ENV_PACK_PATH=${LOCAL_ENV_PACK_PATH:-/workspace/data/local-test/env-pack.tar.gz}
-      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-9e5d11c6945edc19e06b730afd5681a035f75827933f958e6bfbcc846a28c73a}
+      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5}
       - LOCAL_MAX_WORKERS=${LOCAL_MAX_WORKERS:-7}
       - LOCAL_TIMEOUT=${LOCAL_TIMEOUT:-1800}
       - SEARCH_SERVER_URL=http://test-search-server:5632
@@ -339,8 +337,6 @@ services:
     profiles:
       - test
     environment:
-      - SEARCH_SERVER_URL=test-search-server
-      - SEARCH_SERVER_PORT=5632
       - CHUTES_HOST=${CHUTES_HOST:-llm.chutes.ai}
       - BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}

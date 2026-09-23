@@ -71,24 +71,56 @@ def _call_envelope(
     }
 
 
+def test_undeclared_tool_arguments_are_removed_before_execution(registry):
+    _start(registry)
+    state = registry._sessions["session-1"]
+    step = MagicMock(wraps=state.session.step)
+    state.session.step = step
+    envelope = _call_envelope(
+        registry,
+        action={
+            "name": "search",
+            "args": {
+                "query": "phone",
+                "k": "2",
+                "max_price": "100",
+                "category": "phones",
+            },
+        },
+    )
+    result = registry.call(envelope)
+
+    assert result["observation"]["error"] is None
+    step.assert_called_once_with(
+        {"name": "search", "args": {"query": "phone", "k": "2"}}
+    )
+    assert state.call_trace[0]["request"] == envelope
+    assert envelope["action"]["args"]["max_price"] == "100"
+    assert registry.call(envelope)["replayed"] is True
+
+
 @pytest.mark.parametrize("proxy_url", ["http://proxy:80", "http://127.0.0.1:80"])
 def test_default_simulator_uses_the_miner_funded_proxy(
     loaded_pack: LoadedPack,
     proxy_url: str,
+    tmp_path,
 ) -> None:
+    stats_file = str(tmp_path / "simulator-inference.jsonl")
     with SessionRegistry(
         loaded_pack,
         inference_access_token="miner-token",
+        inference_stats_file=stats_file,
         simulator_proxy_url=proxy_url,
     ) as registry:
         _start(registry)
-        session = registry._sessions["session-1"].session
-        simulator = registry._default_simulator(session)
+        state = registry._sessions["session-1"]
+        simulator = registry._default_simulator(state)
 
-        assert simulator.model == session.model_roles["user_simulator"]
-        assert simulator._completion is registry._simulator_completion
-        assert registry._simulator_completion._client.api_key == "miner-token"
-        assert registry._simulator_completion._client.proxy_url == proxy_url
+        assert simulator.model == state.session.model_roles["user_simulator"]
+        assert simulator._completion._client.api_key == "miner-token"
+        assert simulator._completion._client.proxy_url == proxy_url
+        assert simulator._completion._client.inference_stats._problem_id == "session-1"
+        assert simulator._completion._client.inference_stats._stats_file == stats_file
 
 
 def test_default_simulator_evidence_is_private_and_persisted(
@@ -99,17 +131,27 @@ def test_default_simulator_evidence_is_private_and_persisted(
         inference_access_token="miner-token",
     ) as registry:
         _start(registry)
-        registry._simulator_completion._client.post = MagicMock(
-            return_value={
-                "choices": [
-                    {
-                        "message": {
-                            "content": '{"action":"clarify","content":"which size?"}'
-                        },
-                        "finish_reason": "stop",
-                    }
-                ]
-            }
+        # SimulatorCompletion switched to ``post_verbose`` (ORO-2191);
+        # patch the new method with a ``PostResult(data=..., error=None)``
+        # equivalent of the old success shape.
+        from src.agent.proxy_client import PostResult
+
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose = MagicMock(
+            return_value=PostResult(
+                data={
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"action":"clarify","content":"which size?"}'
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+                error=None,
+            )
         )
         response = registry.call(
             _call_envelope(
@@ -127,9 +169,7 @@ def test_default_simulator_evidence_is_private_and_persisted(
         )
         traces = registry.finalized_results()[0]["call_trace"]
 
-    assert response["user_message"] == {
-        "content": "my budget is at most 200.00 USD."
-    }
+    assert response["user_message"] == {"content": "my budget is at most 200.00 USD."}
     assert "simulator" not in response
     evidence = traces[0]["simulator"]
     assert evidence["latency_ms"] >= 0
@@ -142,7 +182,9 @@ def test_default_simulator_evidence_is_private_and_persisted(
     ]
     assert exchange["configuration"] == {"max_tokens": 400, "temperature": 0.0}
     assert exchange["response"]["finish_reason"] == "stop"
-    assert exchange["response"]["text"] == '{"action":"clarify","content":"which size?"}'
+    assert (
+        exchange["response"]["text"] == '{"action":"clarify","content":"which size?"}'
+    )
     assert exchange["error"] is None
     assert "miner-token" not in json.dumps(traces)
     assert traces[1]["simulator"] is None
@@ -157,7 +199,15 @@ def test_default_simulator_failure_is_an_environment_error(
         inference_access_token="miner-token",
     ) as registry:
         _start(registry)
-        registry._simulator_completion._client.post = MagicMock(
+        # SimulatorCompletion now calls ``post_verbose``; a bug/misuse in the
+        # completion client that raises an arbitrary ``RuntimeError`` (as
+        # opposed to returning a ``PostResult`` with an error dict) must NOT
+        # leak the exception's private message into the ledger. Only the
+        # class name is safe to surface — trusted upstream bodies flow
+        # through ``InferenceProviderError`` instead (ORO-2191).
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose = MagicMock(
             side_effect=RuntimeError(private_detail)
         )
         with pytest.raises(
@@ -179,10 +229,54 @@ def test_default_simulator_failure_is_an_environment_error(
     assert result["error_detail"] == "user simulator failed: RuntimeError"
     trace = result["call_trace"][0]
     assert trace["error"]["type"] == "HarnessExecutionError"
-    assert trace["simulator"]["exchanges"][0]["error"] == {
-        "type": "RuntimeError"
-    }
+    assert trace["simulator"]["exchanges"][0]["error"] == {"type": "RuntimeError"}
     assert private_detail not in json.dumps(result)
+
+
+def test_miner_key_exhaustion_is_agent_error_and_stops_run(
+    loaded_pack: LoadedPack,
+) -> None:
+    from src.agent.proxy_client import PostResult
+
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        post = MagicMock(
+            return_value=PostResult(
+                data=None,
+                error={
+                    "kind": "upstream",
+                    "status": 403,
+                    "body": '{"error":{"message":"Key limit exceeded (total limit)"}}',
+                },
+            )
+        )
+        state.simulator._completion._client.post_verbose = post
+        with pytest.raises(HarnessExecutionError, match="miner inference key exhausted"):
+            registry.call(
+                _call_envelope(
+                    registry,
+                    action={"name": "message", "args": {"content": "Any preference?"}},
+                )
+            )
+        _start(registry, session_id="session-2")
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call",
+            json=_call_envelope(registry, session_id="session-2"),
+        )
+        assert response.status_code == 402
+        assert response.json()["detail"]["environment_error"] is False
+        result = registry.finalized_results()[0]
+        assert registry.key_exhausted.is_set()
+
+    assert post.call_count == 1
+    assert result["outcome"] == "agent_error"
+    assert result["environment_error"] is False
+    assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
+    assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
 
 
 def test_default_simulator_rejects_missing_miner_credentials(
@@ -190,10 +284,10 @@ def test_default_simulator_rejects_missing_miner_credentials(
 ) -> None:
     with SessionRegistry(loaded_pack) as registry:
         _start(registry)
-        session = registry._sessions["session-1"].session
+        state = registry._sessions["session-1"]
 
         with pytest.raises(RuntimeError, match="miner inference credentials"):
-            registry._default_simulator(session)
+            registry._default_simulator(state)
 
 
 def test_fresh_sessions_are_isolated_and_hide_private_truth(
@@ -234,8 +328,7 @@ def test_fresh_sessions_are_isolated_and_hide_private_truth(
     )
     assert "state_hash" not in changed
     assert (
-        registry._sessions["session-1"].session.env.state_hash_now()
-        != first_state_hash
+        registry._sessions["session-1"].session.env.state_hash_now() != first_state_hash
     )
     assert registry._sessions["session-2"].session.env.ledger.entries() == []
 
@@ -377,8 +470,7 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
             return {
                 "action": "react_to_event",
                 "content": (
-                    f"price changed to {signal['new_price']:.2f} "
-                    f"{signal['currency']}"
+                    f"price changed to {signal['new_price']:.2f} {signal['currency']}"
                 ),
                 "reason": "forced_event_notice",
             }
@@ -586,7 +678,6 @@ def test_grouped_calls_reject_more_than_the_declared_limit(
         assert registry._sessions["session-1"].session.solver_turn_count == 0
 
 
-
 def test_terminal_call_allows_replay_but_rejects_new_turn(
     registry: SessionRegistry,
 ) -> None:
@@ -661,7 +752,6 @@ def test_terminal_call_allows_replay_but_rejects_new_turn(
                 turn=3,
             )
         )
-
 
     # Sealing changes admission only, not the successful receipt or verifier.
     assert json.dumps(registry.finalized_results()[0], sort_keys=True) == json.dumps(
@@ -895,9 +985,7 @@ def test_timeout_trace_keeps_completed_search_retries(
                 registry.call(_call_envelope(registry))
             assert entered.is_set()
             trace = registry.finalized_results()[0]["call_trace"][0]
-            assert trace["search_retries"] == [
-                {"attempt": 1, "outcome": "retry"}
-            ]
+            assert trace["search_retries"] == [{"attempt": 1, "outcome": "retry"}]
         finally:
             release.set()
 
@@ -941,6 +1029,20 @@ def test_timeout_finalization_and_close_do_not_wait_for_tool_worker(
         release.set()
         assert finished.wait(5)
         registry.close()
+
+
+def test_finalized_result_records_stable_monotonic_wall_seconds(
+    registry: SessionRegistry,
+) -> None:
+    _start(registry)
+    state = registry._sessions["session-1"]
+    state.started_at = time.perf_counter() - 2.5
+
+    first = registry.finalized_results()[0]
+    second = registry.finalized_results()[0]
+
+    assert 2.4 < first["wall_seconds"] < 2.6
+    assert second["wall_seconds"] == first["wall_seconds"]
 
 
 def test_http_bridge_exposes_calls_but_not_private_operations(

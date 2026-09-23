@@ -59,6 +59,7 @@ def test_compose_supports_existing_miner_command_and_env_file(
             "INFERENCE_PROVIDER",
             "SANDBOX_MODEL",
             "IMAGE_TAG",
+            "LOCAL_TEST_IMAGE",
             "LOCAL_SEARCH_SERVER_IMAGE",
         }
     }
@@ -93,7 +94,9 @@ def test_compose_supports_existing_miner_command_and_env_file(
         "subnet.local_generated_validator",
     ]
     assert service["working_dir"] == "/workspace"
+    assert service["image"] == "oro-local-test:local"
     assert service["pull_policy"] == "build"
+    assert service["build"]["args"]["RUNTIME_PROFILE"] == "local-test"
     assert service["environment"]["LOCAL_OUTPUT_ROOT"] == "/app/logs/environment-runs"
     assert service["environment"]["OPENROUTER_API_KEY"] == "or-test"
     assert service["environment"]["CHUTES_API_KEY"] == "ch-test"
@@ -103,7 +106,6 @@ def test_compose_supports_existing_miner_command_and_env_file(
     )
     assert service["network_mode"] == "service:test-proxy"
     assert proxy["environment"]["SESSION_RUNTIME_HOST"] == "127.0.0.1"
-    assert proxy["environment"]["SEARCH_SERVER_URL"] == "test-search-server"
     assert proxy["environment"]["BACKEND_URL"] == "https://api.oroagents.com"
     assert proxy["environment"]["BACKEND_HOST"] == "api.oroagents.com"
     assert "ORO_LOCAL_INFERENCE_MODE" not in proxy["environment"]

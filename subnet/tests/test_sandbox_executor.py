@@ -1,12 +1,19 @@
 """Tests for process-based timeout enforcement in sandbox_executor."""
 
 import json
+import math
 import os
 import tempfile
 import time
 from pathlib import Path
 
-from src.agent.sandbox_executor import execute_single_problem, _read_inference_stats, _read_request_log
+from src.agent.sandbox_executor import (
+    _read_inference_stats,
+    _read_request_log,
+    build_result_envelope,
+    execute_single_problem,
+    read_inference_stats,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 FAST = str(FIXTURES / "fast_agent.py")
@@ -14,6 +21,7 @@ SLOW = str(FIXTURES / "slow_agent.py")
 CRASH = str(FIXTURES / "crashing_agent.py")
 FROZEN_DC = str(FIXTURES / "frozen_dataclass_agent.py")
 LARGE_RESULT = str(FIXTURES / "large_result_agent.py")
+INFERENCE_STATS = str(FIXTURES / "inference_stats_agent.py")
 
 
 def test_successful_execution():
@@ -72,6 +80,72 @@ def test_frozen_dataclass_with_pep563_annotations():
     assert result.result["answer"] == "hello-frozen"
 
 
+def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+    result = execute_single_problem(
+        {
+            "query": "test",
+            "problem_id": "episode-1",
+            "category": "generated_environment",
+        },
+        timeout=10.0,
+        agent_file=INFERENCE_STATS,
+    )
+
+    assert result.success
+    usage = read_inference_stats(str(tmp_path / "inference_stats.jsonl"))
+    assert usage["episode-1"] == {
+        "problem_id": "episode-1",
+        "inference_success": 1,
+        "inference_failed": 0,
+        "inference_total": 1,
+        "inference_cost_usd": 0.25,
+        "inference_cost_missing": 0,
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+            "requested_models": {
+                "Unknown model": {
+                "requests": 1,
+                "failed_requests": 0,
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+                "cost_usd": 0.25,
+                "cost_missing": 0,
+                }
+            },
+            "served_models": {
+                "Unknown model": {
+                    "requests": 1,
+                    "failed_requests": 0,
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "cost_usd": 0.25,
+                    "cost_missing": 0,
+                }
+            },
+        }
+    assert result.inference_usage == usage["episode-1"]
+    output = tmp_path / "runner-output.jsonl"
+    envelope = build_result_envelope(result)
+    assert envelope["_shadow_inference_usage"] == usage["episode-1"]
+    envelope["_shadow_inference_usage"] = {
+        **envelope["_shadow_inference_usage"],
+        "problem_id": "spoofed",
+    }
+    output.write_text(json.dumps(envelope) + "\n")
+    assert read_inference_stats(str(output)) == {"episode-1": usage["episode-1"]}
+
+
+def test_legacy_result_envelope_does_not_include_shadow_inference_usage():
+    result = execute_single_problem(
+        {"query": "test", "problem_id": "legacy"},
+        timeout=10.0,
+        agent_file=FAST,
+    )
+
+    assert "_shadow_inference_usage" not in build_result_envelope(result)
+
+
 class TestReadInferenceStats:
     def test_reads_matching_problem(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
@@ -100,6 +174,64 @@ class TestReadInferenceStats:
         failures, total = _read_inference_stats("/tmp/nonexistent.jsonl", "p1")
         assert failures == 0
         assert total == 0
+
+    def test_merges_latest_cumulative_stats_from_each_source(self):
+        agent_entries = [
+            {
+                "problem_id": "p1",
+                "inference_total": 1,
+                "inference_cost_usd": 0.1,
+            },
+            {
+                "problem_id": "p1",
+                "inference_total": 3,
+                "inference_cost_usd": 0.3,
+            },
+        ]
+        simulator_entry = {
+            "problem_id": "p1",
+            "inference_total": 2,
+            "inference_cost_usd": 0.2,
+        }
+        with (
+            tempfile.NamedTemporaryFile(
+                suffix=".jsonl", delete=False, mode="w"
+            ) as agent_file,
+            tempfile.NamedTemporaryFile(
+                suffix=".jsonl", delete=False, mode="w"
+            ) as simulator_file,
+        ):
+            for entry in agent_entries:
+                agent_file.write(json.dumps(entry) + "\n")
+            simulator_file.write(json.dumps(simulator_entry) + "\n")
+            paths = [agent_file.name, simulator_file.name]
+        try:
+            usage = read_inference_stats(paths)["p1"]
+            assert usage["inference_failed"] == 0
+            assert usage["inference_total"] == 5
+            assert usage["inference_cost_usd"] == 0.5
+        finally:
+            for path in paths:
+                os.unlink(path)
+
+    def test_malformed_line_does_not_hide_later_snapshot(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False, mode="w") as f:
+            f.write('{"problem_id":"p1"\n')
+            f.write(json.dumps({"problem_id": "p1", "inference_total": 2}) + "\n")
+            path = f.name
+        try:
+            assert read_inference_stats(path)["p1"]["inference_total"] == 2
+        finally:
+            os.unlink(path)
+
+    def test_ignores_snapshot_with_no_valid_counters(self, tmp_path):
+        for index, value in enumerate(("bad", math.nan, math.inf, -1)):
+            path = tmp_path / f"stats-{index}.jsonl"
+            path.write_text(
+                json.dumps({"problem_id": "p1", "inference_total": value})
+            )
+
+            assert read_inference_stats(str(path)) == {}
 
 
 class TestReadRequestLog:
