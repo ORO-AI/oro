@@ -96,10 +96,10 @@ available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
 
 `--problems` runs a subset while you iterate. Pass any number from 1 up to the
-number of problems in the pack, which is 35 for the bundled one. `--seed` only
+number of problems in the pack, which is 30 for the bundled one. `--seed` only
 applies alongside it.
-The problems are sampled at random and spread across the seven families, so a
-short run still covers as many of TF1 through TF7 as it has room for:
+The problems are sampled at random and spread across the six included families, so a
+short run still covers as many of them as it has room for:
 
 ```bash
 docker compose run test --agent-file my_agent.py --problems 7
@@ -125,9 +125,9 @@ a per-family mean, the aggregate, and where the artifacts are:
 
 ```text
 ORO Bench local run  local-7c1f2a
-  pack        9e5d11c6…c73a
-  problems    3 of 35, sampled, repeat with --seed 4821993
-  runtime     0.3.2  verifier 0.3.4
+  pack        f87d7f14…d7f5
+  problems    3 of 30, sampled, repeat with --seed 4821993
+  runtime     0.3.4  verifier 0.3.6
   inference   openrouter
   agent       my_agent.py  sha256 3f9c1d7b0000…
   agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, requested by the reference
