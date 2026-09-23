@@ -44,7 +44,7 @@ Integration tests verify that ShoppingBench services work correctly when running
 
 **Tests fail with connection errors:**
 - Verify services are healthy: `docker compose -f docker-compose.yml -f docker-compose.test.yml ps`
-- Check logs: `docker compose logs <service-name>`
+- Check logs: `docker compose -f docker-compose.yml -f docker-compose.test.yml logs <service-name>`
 - Ensure ports are not in use
 
 **Docker Compose errors (ContainerConfig):**
