@@ -833,7 +833,11 @@ class SessionRegistry:
             trace.record(
                 state,
                 response=response,
-                simulator_exchanges=self._simulator_exchanges(state.simulator),
+                simulator_exchanges=(
+                    self._simulator_exchanges(state.simulator)
+                    if trace.simulator_latency_ms is not None
+                    else None
+                ),
             )
             return response
 
