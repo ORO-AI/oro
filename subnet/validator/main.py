@@ -55,11 +55,12 @@ from .environment_preflight import (
     environment_preflight_run_id,
     run_environment_preflight,
 )
-from .episode_emitter import emit_finalized_results
+from .episode_emitter import emit_finalized_results, load_inference_transcripts
 from .generated_evaluation import (
     GENERATED_SCORE_SCHEMA,
     aggregate_results,
     select_run_task_roster,
+    summarize_agent_inference_usage,
     summarize_episode_resource_usage,
     validate_run_results,
     write_problem_file,
@@ -1162,6 +1163,7 @@ class Validator:
         expected_task_roster: dict[str, str] | None = None,
         *,
         require_complete: bool = False,
+        inference_transcripts: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         env_pack_sha256 = _claim_environment_binding(work)
         if env_pack_sha256 is None:
@@ -1175,6 +1177,11 @@ class Validator:
                 pack_sha256=env_pack_sha256,
                 require_complete=require_complete,
             )
+        kwargs = (
+            {"inference_transcripts": inference_transcripts}
+            if inference_transcripts is not None
+            else {}
+        )
         submitted = asyncio.run(
             emit_finalized_results(
                 backend_url=self.config.backend_url,
@@ -1182,6 +1189,7 @@ class Validator:
                 env_pack_sha256=env_pack_sha256,
                 results=results,
                 download_url_rewriter=_rewrite_localhost_url,
+                **kwargs,
             )
         )
         logging.info(
@@ -1309,17 +1317,35 @@ class Validator:
         )
         sandbox_output = None
         sandbox_metadata: SandboxMetadata = {}
-        reporter = GeneratedProgressReporter(
-            registry,
-            lambda batch: self._emit_environment_result_batch(
-                work, batch, selected_roster
-            ),
-        )
+        output_path = self._eval_dir(eval_run_id_str) / "output.jsonl"
+        sandbox_finished = False
+
+        def emit_with_transcripts(batch: list[dict[str, Any]]) -> None:
+            transcripts = (
+                load_inference_transcripts(
+                    output_path, secret_values=(inference_access_token,)
+                )
+                if output_path.exists()
+                else {}
+            )
+            if not sandbox_finished and any(
+                str(result.get("session_id")) not in transcripts for result in batch
+            ):
+                raise RuntimeError("inference transcript is not ready")
+            self._emit_environment_result_batch(
+                work,
+                batch,
+                selected_roster,
+                inference_transcripts=transcripts,
+            )
+
+        reporter = GeneratedProgressReporter(registry, emit_with_transcripts)
+        emission_failure: Exception | None = None
         try:
             reporter.start()
-            problem_file = self._eval_dir(eval_run_id_str) / "problems.jsonl"
-            write_problem_file(problem_file, sessions)
             try:
+                problem_file = self._eval_dir(eval_run_id_str) / "problems.jsonl"
+                write_problem_file(problem_file, sessions)
                 sandbox_output, sandbox_metadata = self.run_sandbox(
                     agent_path,
                     eval_run_id_str,
@@ -1331,26 +1357,22 @@ class Validator:
                 )
             finally:
                 reporter.stop()
-                results = registry.finalized_results()
-                env_pack_sha256 = _claim_environment_binding(work)
-                if env_pack_sha256 is None:
-                    raise ValueError(
-                        "environment binding disappeared before finalization"
-                    )
-                validate_run_results(
-                    results,
-                    selected_roster,
-                    evaluation_run_id=str(work.eval_run_id),
-                    agent_version_id=str(work.agent_version_id),
-                    pack_sha256=env_pack_sha256,
-                )
-                try:
-                    reporter.flush(results)
-                except Exception as exc:
-                    logging.warning(
-                        "Final generated progress batch failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+            sandbox_finished = True
+            results = registry.finalized_results()
+            env_pack_sha256 = _claim_environment_binding(work)
+            if env_pack_sha256 is None:
+                raise ValueError("environment binding disappeared before finalization")
+            validate_run_results(
+                results,
+                selected_roster,
+                evaluation_run_id=str(work.eval_run_id),
+                agent_version_id=str(work.agent_version_id),
+                pack_sha256=env_pack_sha256,
+            )
+            try:
+                reporter.flush(results)
+            except Exception as exc:
+                emission_failure = exc
         finally:
             reporter.stop()
             self.session_runtime.clear(registry)
@@ -1392,12 +1414,18 @@ class Validator:
                 sandbox_metadata=sandbox_metadata,
             )
             return None
+        if emission_failure is not None:
+            logging.warning(
+                "Generated episode transcript persistence failed for "
+                f"{eval_run_id_str}; scoring is unaffected: "
+                f"{type(emission_failure).__name__}: {emission_failure}"
+            )
         logging.info(
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
         try:
             eval_dir = self._eval_dir(eval_run_id_str)
-            output_stats = read_inference_stats(str(sandbox_output))
+            output_stats = read_inference_stats(str(output_path))
             sidecar_stats = read_inference_stats(
                 str(eval_dir / "inference_stats.jsonl")
             )
@@ -1417,6 +1445,15 @@ class Validator:
                 merge_inference_stats(agent_stats, simulator_stats),
                 inference_provider,
             )
+            agent_by_episode = summarize_episode_resource_usage(
+                results,
+                agent_stats,
+                inference_provider,
+            )
+            agent_inference = summarize_agent_inference_usage(
+                agent_stats,
+                inference_provider,
+            )
         except Exception:
             logging.warning(
                 "Unable to collect shadow episode inference usage",
@@ -1425,7 +1462,9 @@ class Validator:
         else:
             sandbox_metadata = dict(sandbox_metadata)
             sandbox_metadata["_shadow_resource_usage"] = {
-                "by_episode": by_episode
+                "by_episode": by_episode,
+                "agent_by_episode": agent_by_episode,
+                "agent_inference": agent_inference,
             }
         return _EvaluationCompletion(
             score=score,

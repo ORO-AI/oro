@@ -190,20 +190,22 @@ def summarize_episode_resource_usage(
     episodes = {}
     for result in results:
         stats = stats_by_session.get(str(result.get("session_id")))
+        has_stats = stats is not None
+        stats = stats or {}
         usage = {
-            "inference_requests": int((stats or {}).get("inference_total", 0)),
-            "inference_failed_requests": int(
-                (stats or {}).get("inference_failed", 0)
-            ),
-            "prompt_tokens": int((stats or {}).get("prompt_tokens", 0)),
-            "completion_tokens": int((stats or {}).get("completion_tokens", 0)),
+            "inference_requests": int(stats.get("inference_total", 0)),
+            "inference_failed_requests": int(stats.get("inference_failed", 0)),
+            "prompt_tokens": int(stats.get("prompt_tokens", 0)),
+            "completion_tokens": int(stats.get("completion_tokens", 0)),
+            "requested_models": dict(stats.get("requested_models") or {}),
+            "served_models": dict(stats.get("served_models") or {}),
         }
         operation_counts = _operation_counts(result)
         usage["operation_requests"] = sum(operation_counts.values())
         usage["operations"] = dict(sorted(operation_counts.items()))
         if provider != "openrouter":
             usage["inference_cost_status"] = "unsupported"
-        elif stats is None:
+        elif not has_stats:
             usage["inference_cost_status"] = "missing"
         else:
             missing = int(stats.get("inference_cost_missing", 0))
@@ -217,11 +219,48 @@ def summarize_episode_resource_usage(
     return episodes
 
 
+def summarize_agent_inference_usage(
+    stats_by_session: dict[str, dict], provider: str
+) -> dict[str, Any]:
+    """Aggregate miner-only counters separately from simulator usage."""
+
+    totals: dict[str, Any] = {
+        "inference_requests": 0,
+        "inference_failed_requests": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "requested_models": {},
+        "served_models": {},
+    }
+    cost_usd = 0.0
+    cost_missing = 0
+    for stats in stats_by_session.values():
+        totals["inference_requests"] += int(stats.get("inference_total", 0))
+        totals["inference_failed_requests"] += int(stats.get("inference_failed", 0))
+        totals["prompt_tokens"] += int(stats.get("prompt_tokens", 0))
+        totals["completion_tokens"] += int(stats.get("completion_tokens", 0))
+        cost_usd += float(stats.get("inference_cost_usd", 0))
+        cost_missing += int(stats.get("inference_cost_missing", 0))
+        for distribution in ("requested_models", "served_models"):
+            for model, counters in dict(stats.get(distribution) or {}).items():
+                model_total = totals[distribution].setdefault(model, {})
+                for key, value in counters.items():
+                    model_total[key] = model_total.get(key, 0) + value
+
+    if provider != "openrouter":
+        totals["inference_cost_status"] = "unsupported"
+    else:
+        totals["inference_cost_status"] = "complete" if cost_missing == 0 else "partial"
+        totals["inference_cost_usd"] = cost_usd
+    return totals
+
+
 __all__ = [
     "GENERATED_PROBLEM_SCHEMA",
     "GENERATED_SCORE_SCHEMA",
     "aggregate_results",
     "select_run_task_roster",
+    "summarize_agent_inference_usage",
     "summarize_episode_resource_usage",
     "validate_run_results",
     "write_problem_file",

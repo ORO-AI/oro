@@ -201,7 +201,11 @@ def test_inference_post_interfaces_record_response_usage(client, method_name, us
             "/inference/chat/completions", json_data={"messages": []}
         )
 
-    client.inference_stats.record_success.assert_called_once_with(usage)
+    client.inference_stats.record_success.assert_called_once_with(
+        usage,
+        requested_model=None,
+        result_model=None,
+    )
     client.inference_stats.record_failure.assert_not_called()
 
 

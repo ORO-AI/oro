@@ -14,7 +14,6 @@ import httpx
 import pytest
 from validator import episode_emitter
 from validator.env_backend import environment_client
-from validator.generated_progress_reporter import GeneratedProgressReporter
 from validator.episode_emitter import (
     EpisodeEmitError,
     build_episode_artifact,
@@ -22,10 +21,12 @@ from validator.episode_emitter import (
     emit_finalized_results,
     episode_artifact_sha256,
     load_episode_artifact,
+    load_inference_transcripts,
     replay_ledger,
     serialize_episode_artifact,
     submit_episode_batch,
 )
+from validator.generated_progress_reporter import GeneratedProgressReporter
 
 
 def _run_async(test: Callable[..., Any]) -> Callable[..., None]:
@@ -129,6 +130,86 @@ def test_episode_artifact_is_content_addressed_and_round_trips():
     assert load_episode_artifact(body, expected_sha256=digest) == artifact
     with pytest.raises(EpisodeEmitError, match="sha256 mismatch"):
         load_episode_artifact(body, expected_sha256="0" * 64)
+
+
+def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path):
+    scoped_token = "scoped-secret-token"
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 2,
+        "json_data": {
+            "model": "requested/model",
+            "messages": [{"role": "user", "content": "full prompt"}],
+            "Authorization": "Bearer secret",
+            "apiKey": "also-secret",
+            "nested": {
+                "openrouter_api_key": "also-secret",
+                "cookie": "session=secret",
+            },
+            "note": f"do not retain {scoped_token}",
+        },
+        "response": {
+            "model": "served/model",
+            "reasoning": "full reasoning",
+            "usage": {"prompt_tokens": 4, "completion_tokens": 7},
+            "url": "https://example.test/search?q=boots&signature=secret",
+        },
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {
+                "problem_id": "sess-1",
+                "status": "SUCCESS",
+                "dialogue": [
+                    {
+                        "role": "assistant",
+                        "content": "final answer",
+                        "extra_info": {"proxy_calls": [call]},
+                    }
+                ],
+                "_shadow_proxy_calls": [call],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    transcript = load_inference_transcripts(output, secret_values=(scoped_token,))[
+        "sess-1"
+    ]
+
+    assert transcript["calls"][0]["response"]["reasoning"] == "full reasoning"
+    assert (
+        transcript["calls"][0]["response"]["url"]
+        == "https://example.test/search?q=boots&signature=[REDACTED]"
+    )
+    assert "Authorization" not in transcript["calls"][0]["json_data"]
+    assert "apiKey" not in transcript["calls"][0]["json_data"]
+    assert transcript["calls"][0]["json_data"]["nested"] == {}
+    assert scoped_token not in transcript["calls"][0]["json_data"]["note"]
+    assert "proxy_calls" not in transcript["agent_output"]["dialogue"][0]["extra_info"]
+
+
+def test_transcript_loader_ignores_malformed_and_duplicate_output(tmp_path, caplog):
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        "not json\n"
+        + json.dumps({"status": "missing id"})
+        + "\n"
+        + json.dumps({"problem_id": "sess-1", "status": "FIRST"})
+        + "\n"
+        + json.dumps({"problem_id": "sess-1", "status": "FORGED"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    transcripts = load_inference_transcripts(output)
+
+    assert transcripts["sess-1"]["final_status"] == "FIRST"
+    assert "malformed sandbox output" in caplog.text
+    assert "duplicate sandbox output" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -370,11 +451,17 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     sleep = AsyncMock()
     monkeypatch.setattr(episode_emitter.asyncio, "sleep", sleep)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        transcript = {
+            "schema_version": "oro.internal_inference_transcript.v1",
+            "session_id": "sess-1",
+            "calls": [{"response": {"reasoning": "retained"}}],
+        }
         result = await emit_finalized_results(
             backend_url="https://api.example",
             validator_keypair=_keypair(),
             env_pack_sha256=_PACK_SHA,
             results=[_base_verdict()],
+            inference_transcripts={"sess-1": transcript},
             http_client=client,
             backend_transport=client._transport,
         )
@@ -389,8 +476,13 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
         expected_sha256=presign_request["artifact_sha256"],
     )
     assert artifact["episode"]["call_trace"][0]["request"]["call_id"] == "call-1"
+    assert artifact["inference_transcript"] == transcript
     assert submitted is not None
     assert submitted["results"][0]["ledger_uri"].startswith("s3://episodes/")
+
+
+def test_completed_episode_allows_missing_transcript():
+    assert "inference_transcript" not in build_episode_artifact(_base_verdict())
 
 
 @pytest.mark.parametrize("bad_receipt", ["missing", "duplicate", "wrong_run", "unexpected"])
