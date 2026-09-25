@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from oro_env_runtime.families import get_family
@@ -132,6 +132,56 @@ class _SessionState:
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+@dataclass
+class _CallTrace:
+    request: dict[str, Any]
+    state_hash_before: str
+    started_at: float = field(default_factory=time.perf_counter)
+    tool_latency_ms: float | None = None
+    simulator_latency_ms: float | None = None
+    search_retries: list[dict[str, Any]] = field(default_factory=list)
+
+    def record(
+        self,
+        state: _SessionState,
+        *,
+        state_hash_after: str | None = None,
+        response: dict[str, Any] | None = None,
+        error_type: str | None = None,
+        error_detail: str | None = None,
+        simulator_exchanges: list[dict[str, Any]] | None = None,
+    ) -> None:
+        timing = {
+            "tool": self.tool_latency_ms,
+            "simulator": self.simulator_latency_ms,
+            "total": _elapsed_ms(self.started_at),
+        }
+        state.call_trace.append(
+            {
+                "request": self.request,
+                "response": copy.deepcopy(response),
+                "state_hash_before": self.state_hash_before,
+                "state_hash_after": state_hash_after or _state_hash(state.session),
+                "latency_ms": timing["total"],
+                "timing_ms": timing,
+                "search_retries": copy.deepcopy(self.search_retries),
+                "simulator": (
+                    {
+                        "latency_ms": self.simulator_latency_ms,
+                        "exchanges": simulator_exchanges or [],
+                    }
+                    if self.simulator_latency_ms is not None
+                    else None
+                ),
+                "error": (
+                    {"type": error_type, "detail": error_detail}
+                    if error_type is not None
+                    else None
+                ),
+            }
+        )
 
 
 class SessionRegistry:
@@ -375,6 +425,289 @@ class SessionRegistry:
             raise ValueError(f"{key} must be a non-empty string")
         return value
 
+    def _call_group(
+        self, envelope: dict[str, Any], call_id: str
+    ) -> tuple[list[dict[str, Any]], bool]:
+        action = envelope.get("action")
+        calls = envelope.get("calls")
+        if action is not None:
+            if calls is not None:
+                raise ValueError("set action or calls, not both")
+            if not isinstance(action, dict):
+                raise ValueError("action must be an object")
+            return [{"call_id": call_id, "action": copy.deepcopy(action)}], False
+        if not isinstance(calls, list) or not calls:
+            raise ValueError("calls must be a non-empty list")
+        if len(calls) > self.max_calls_per_turn:
+            raise ValueError(
+                f"calls must contain at most {self.max_calls_per_turn} items"
+            )
+
+        call_group = []
+        call_ids: set[str] = set()
+        for item in calls:
+            call_group.append(self._grouped_call(item, call_ids))
+        return call_group, True
+
+    @staticmethod
+    def _grouped_call(item: Any, call_ids: set[str]) -> dict[str, Any]:
+        if not isinstance(item, dict):
+            raise ValueError("each call must be an object")
+        call_id = item.get("call_id")
+        action = item.get("action")
+        if not isinstance(call_id, str) or not call_id:
+            raise ValueError("each call_id must be a non-empty string")
+        if call_id in call_ids:
+            raise ValueError("call ids within one solver turn must be unique")
+        if not isinstance(action, dict):
+            raise ValueError("each call action must be an object")
+        call_ids.add(call_id)
+        return {"call_id": call_id, "action": copy.deepcopy(action)}
+
+    def _replay_response(
+        self,
+        envelope: dict[str, Any],
+        state: _SessionState,
+        idempotency_key: str,
+        call_id: str,
+        action_hash: str,
+    ) -> dict[str, Any] | None:
+        if self._finalized:
+            raise InvalidSessionError("session registry is finalized")
+        self._validate_binding(envelope, state)
+        cached = state.responses.get(idempotency_key)
+        if cached is None:
+            return None
+        if cached.call_id != call_id or cached.action_hash != action_hash:
+            raise InvalidSessionError(
+                "idempotency key reused with a different call or action"
+            )
+        replayed = copy.deepcopy(cached.response)
+        replayed["replayed"] = True
+        return replayed
+
+    @staticmethod
+    def _validate_new_call(
+        state: _SessionState, call_ids: list[str], turn: int
+    ) -> None:
+        if state.terminal_reason is not None:
+            raise InvalidSessionError("session already reached a terminal observation")
+        for call_id in call_ids:
+            previous_key = state.call_ids.get(call_id)
+            if previous_key is not None:
+                raise InvalidSessionError(
+                    f"call_id already belongs to idempotency key {previous_key!r}"
+                )
+        expected_turn = state.session.solver_turn_count + 1
+        if turn != expected_turn:
+            raise InvalidSessionError(
+                "turn does not match session sequence: "
+                f"expected {expected_turn}, got {turn}"
+            )
+
+    @staticmethod
+    def _event_ready(state: _SessionState, turn: int) -> bool:
+        return (
+            state.session.env.applied_event is not None
+            and not state.event_surfaced
+            and not state.session.state_blind
+            and state.event_fired_turn is not None
+            and turn > state.event_fired_turn
+        )
+
+    def _simulator_error(
+        self, state: _SessionState, exc: Exception
+    ) -> tuple[type[HarnessExecutionError], str]:
+        if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
+            self.key_exhausted.set()
+            state.quarantined_outcome = "agent_error"
+            summary = "miner inference key exhausted"
+        elif isinstance(exc, InferenceProviderError):
+            summary = f"upstream status={exc.status} body={exc.body!r}"
+        else:
+            summary = type(exc).__name__
+        error_type = (
+            AgentInferenceBudgetError
+            if state.quarantined_outcome == "agent_error"
+            else HarnessExecutionError
+        )
+        return error_type, f"user simulator failed: {summary}"
+
+    def _raise_timeout(
+        self,
+        session_id: str,
+        state: _SessionState,
+        trace: _CallTrace,
+        *,
+        reason: str,
+        snapshot: dict[str, Any],
+        cause: concurrent.futures.TimeoutError,
+    ) -> NoReturn:
+        state.quarantined_reason = reason
+        trace.record(
+            state,
+            state_hash_after=snapshot["state_hash"],
+            error_type="HarnessTimeoutError",
+            error_detail=state.quarantined_reason,
+        )
+        state.final_result = self._result(
+            session_id,
+            state,
+            outcome="environment_error",
+            verdict=None,
+            error_detail=state.quarantined_reason,
+            snapshot=snapshot,
+        )
+        raise HarnessTimeoutError(
+            f"{state.quarantined_reason}; session quarantined"
+        ) from cause
+
+    def _execute_actions(
+        self,
+        session_id: str,
+        state: _SessionState,
+        actions: list[dict[str, Any]],
+        *,
+        is_group: bool,
+        trace: _CallTrace,
+    ) -> list[dict[str, Any]]:
+        started = time.perf_counter()
+        snapshot = self._session_snapshot(state)
+        step = state.session.step_parallel if is_group else state.session.step
+        step_arg = actions if is_group else actions[0]
+
+        def execute() -> Any:
+            capture = getattr(state.session.search, "capture_retry_trace", None)
+            if not callable(capture):
+                return step(step_arg)
+            with capture() as retries:
+                trace.search_retries = retries
+                return step(step_arg)
+
+        future = self._executor.submit(execute)
+        try:
+            result = future.result(timeout=self.tool_timeout_s)
+        except concurrent.futures.TimeoutError as exc:
+            trace.tool_latency_ms = _elapsed_ms(started)
+            future.cancel()
+            self._raise_timeout(
+                session_id,
+                state,
+                trace,
+                reason=f"tool call exceeded {self.tool_timeout_s:.3f}s",
+                snapshot=snapshot,
+                cause=exc,
+            )
+        except Exception as exc:
+            trace.tool_latency_ms = _elapsed_ms(started)
+            state.quarantined_reason = f"tool call failed: {type(exc).__name__}"
+            trace.record(
+                state,
+                error_type="HarnessExecutionError",
+                error_detail=state.quarantined_reason,
+            )
+            raise HarnessExecutionError(
+                f"{state.quarantined_reason}; session quarantined"
+            ) from exc
+        trace.tool_latency_ms = _elapsed_ms(started)
+        return result if is_group else [result]
+
+    def _simulate_user_turn(
+        self,
+        session_id: str,
+        state: _SessionState,
+        turn: int,
+        call_group: list[dict[str, Any]],
+        trace: _CallTrace,
+    ) -> dict[str, str] | None:
+        if state.session.env.done():
+            return None
+        message_sent = any(
+            item["action"].get("name") == "message" for item in call_group
+        )
+        # Preserve one unaided policy turn after a public event. The agent
+        # must react to the observation before the shopper simulator can
+        # reinforce it; a terminal action in that turn gets no rescue.
+        event_ready = self._event_ready(state, turn)
+        # As in loop.run, due requirements share the event-notice boundary.
+        due = due_interventions(
+            state.session,
+            state.delivered_interventions,
+            event_surfaced_step=state.event_surfaced_turn,
+            step=turn,
+        )
+        if not (message_sent or event_ready or due):
+            return None
+
+        signal = None
+        if event_ready:
+            event = state.session.env.applied_event
+            signal = {"kind": event.kind}
+            if event.kind == "price_change":
+                signal.update(
+                    {
+                        "old_price": event.old_price,
+                        "new_price": event.new_price,
+                        "currency": event.currency,
+                    }
+                )
+
+        started = time.perf_counter()
+        snapshot = self._session_snapshot(state)
+        future = self._executor.submit(
+            self._shopper_turn_decisions,
+            state,
+            signal,
+            turn,
+            message_sent,
+        )
+        try:
+            decisions = future.result(timeout=self.simulator_timeout_s)
+        except concurrent.futures.TimeoutError as exc:
+            trace.simulator_latency_ms = _elapsed_ms(started)
+            future.cancel()
+            self._raise_timeout(
+                session_id,
+                state,
+                trace,
+                reason=f"simulator call exceeded {self.simulator_timeout_s:.3f}s",
+                snapshot=snapshot,
+                cause=exc,
+            )
+        except Exception as exc:
+            trace.simulator_latency_ms = _elapsed_ms(started)
+            # Only trusted provider failures may surface status and body;
+            # arbitrary simulator messages can contain private task material.
+            error_type, state.quarantined_reason = self._simulator_error(state, exc)
+            trace.record(
+                state,
+                error_type=error_type.__name__,
+                error_detail=state.quarantined_reason,
+                simulator_exchanges=self._simulator_exchanges(state.simulator),
+            )
+            raise error_type(
+                f"{state.quarantined_reason}; session quarantined"
+            ) from exc
+
+        trace.simulator_latency_ms = _elapsed_ms(started)
+        contents = []
+        for decision, decision_signal in decisions:
+            content = str(decision.get("content") or "").strip()
+            contents.append(content)
+            _record_user_message(
+                state.session,
+                step=turn,
+                decision={**decision, "content": content},
+                signal=decision_signal,
+            )
+            state.transcript.append({"role": "user", "content": content})
+            if decision_signal and decision_signal.get("kind") == "intervention":
+                state.delivered_interventions.add(decision_signal["index"])
+        state.event_surfaced = state.event_surfaced or event_ready
+        if event_ready and state.event_surfaced_turn is None:
+            state.event_surfaced_turn = turn
+        return {"content": "\n".join(content for content in contents if content)}
+
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
         """Execute or replay one strictly ordered solver-turn envelope."""
 
@@ -387,40 +720,7 @@ class SessionRegistry:
         if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
             raise ValueError("turn must be a positive integer")
 
-        action = envelope.get("action")
-        calls = envelope.get("calls")
-        if action is not None and calls is not None:
-            raise ValueError("set action or calls, not both")
-        if action is not None:
-            if not isinstance(action, dict):
-                raise ValueError("action must be an object")
-            call_group = [{"call_id": call_id, "action": copy.deepcopy(action)}]
-            is_group = False
-        else:
-            if not isinstance(calls, list) or not calls:
-                raise ValueError("calls must be a non-empty list")
-            if len(calls) > self.max_calls_per_turn:
-                raise ValueError(
-                    f"calls must contain at most {self.max_calls_per_turn} items"
-                )
-            call_group = []
-            inner_call_ids: set[str] = set()
-            for item in calls:
-                if not isinstance(item, dict):
-                    raise ValueError("each call must be an object")
-                inner_call_id = item.get("call_id")
-                inner_action = item.get("action")
-                if not isinstance(inner_call_id, str) or not inner_call_id:
-                    raise ValueError("each call_id must be a non-empty string")
-                if inner_call_id in inner_call_ids:
-                    raise ValueError("call ids within one solver turn must be unique")
-                if not isinstance(inner_action, dict):
-                    raise ValueError("each call action must be an object")
-                inner_call_ids.add(inner_call_id)
-                call_group.append(
-                    {"call_id": inner_call_id, "action": copy.deepcopy(inner_action)}
-                )
-            is_group = True
+        call_group, is_group = self._call_group(envelope, call_id)
 
         call_ids_to_bind = [call_id]
         call_ids_to_bind.extend(
@@ -436,35 +736,12 @@ class SessionRegistry:
         ).hexdigest()
 
         with state.lock:
-            if self._finalized:
-                raise InvalidSessionError("session registry is finalized")
-            self._validate_binding(envelope, state)
-            cached = state.responses.get(idempotency_key)
-            if cached is not None:
-                if cached.call_id != call_id or cached.action_hash != action_hash:
-                    raise InvalidSessionError(
-                        "idempotency key reused with a different call or action"
-                    )
-                replayed = copy.deepcopy(cached.response)
-                replayed["replayed"] = True
+            replayed = self._replay_response(
+                envelope, state, idempotency_key, call_id, action_hash
+            )
+            if replayed is not None:
                 return replayed
-            if state.terminal_reason is not None:
-                raise InvalidSessionError(
-                    "session already reached a terminal observation"
-                )
-            for grouped_call_id in call_ids_to_bind:
-                previous_key = state.call_ids.get(grouped_call_id)
-                if previous_key is not None:
-                    raise InvalidSessionError(
-                        f"call_id already belongs to idempotency key {previous_key!r}"
-                    )
-
-            expected_turn = state.session.solver_turn_count + 1
-            if turn != expected_turn:
-                raise InvalidSessionError(
-                    "turn does not match session sequence: "
-                    f"expected {expected_turn}, got {turn}"
-                )
+            self._validate_new_call(state, call_ids_to_bind, turn)
 
             # Ignore undeclared top-level arguments for compatibility with
             # agents that relied on the runtime's previously wider surface.
@@ -473,113 +750,18 @@ class SessionRegistry:
                 for item in call_group
             ]
 
-            started = time.perf_counter()
-            tool_latency_ms: float | None = None
-            simulator_latency_ms: float | None = None
-            trace_request = copy.deepcopy(envelope)
-            state_hash_before = _state_hash(state.session)
-
-            def timing_ms() -> dict[str, float | None]:
-                return {
-                    "tool": tool_latency_ms,
-                    "simulator": simulator_latency_ms,
-                    "total": _elapsed_ms(started),
-                }
-
-            def simulator_evidence() -> dict[str, Any] | None:
-                if simulator_latency_ms is None:
-                    return None
-                return {
-                    "latency_ms": simulator_latency_ms,
-                    "exchanges": self._simulator_exchanges(state.simulator),
-                }
-
-            def record_error(
-                error_type: str,
-                detail: str,
-                *,
-                snapshot: dict[str, Any] | None = None,
-            ) -> None:
-                timing = timing_ms()
-                state.call_trace.append(
-                    {
-                        "request": trace_request,
-                        "response": None,
-                        "state_hash_before": state_hash_before,
-                        "state_hash_after": (
-                            snapshot["state_hash"]
-                            if snapshot is not None
-                            else _state_hash(state.session)
-                        ),
-                        "latency_ms": timing["total"],
-                        "timing_ms": timing,
-                        "search_retries": copy.deepcopy(search_retry_trace),
-                        "simulator": (
-                            {
-                                "latency_ms": simulator_latency_ms,
-                                "exchanges": [],
-                            }
-                            if snapshot is not None and simulator_latency_ms is not None
-                            else simulator_evidence()
-                        ),
-                        "error": {"type": error_type, "detail": detail},
-                    }
-                )
-
-            tool_started = time.perf_counter()
+            trace = _CallTrace(
+                request=copy.deepcopy(envelope),
+                state_hash_before=_state_hash(state.session),
+            )
             event_before_group = state.session.env.applied_event
-            tool_snapshot = self._session_snapshot(state)
-            search_retry_trace: list[dict[str, Any]] = []
-
-            def execute_tool_call() -> Any:
-                nonlocal search_retry_trace
-
-                def execute() -> Any:
-                    if is_group:
-                        return state.session.step_parallel(actions)
-                    return state.session.step(actions[0])
-
-                capture = getattr(state.session.search, "capture_retry_trace", None)
-                if not callable(capture):
-                    return execute()
-                with capture() as trace:
-                    search_retry_trace = trace
-                    return execute()
-
-            future = self._executor.submit(execute_tool_call)
-            try:
-                raw_observations = future.result(timeout=self.tool_timeout_s)
-                observations = raw_observations if is_group else [raw_observations]
-            except concurrent.futures.TimeoutError as exc:
-                tool_latency_ms = _elapsed_ms(tool_started)
-                future.cancel()
-                state.quarantined_reason = (
-                    f"tool call exceeded {self.tool_timeout_s:.3f}s"
-                )
-                record_error(
-                    "HarnessTimeoutError",
-                    state.quarantined_reason,
-                    snapshot=tool_snapshot,
-                )
-                state.final_result = self._result(
-                    session_id,
-                    state,
-                    outcome="environment_error",
-                    verdict=None,
-                    error_detail=state.quarantined_reason,
-                    snapshot=tool_snapshot,
-                )
-                raise HarnessTimeoutError(
-                    f"{state.quarantined_reason}; session quarantined"
-                ) from exc
-            except Exception as exc:
-                tool_latency_ms = _elapsed_ms(tool_started)
-                state.quarantined_reason = f"tool call failed: {type(exc).__name__}"
-                record_error("HarnessExecutionError", state.quarantined_reason)
-                raise HarnessExecutionError(
-                    f"{state.quarantined_reason}; session quarantined"
-                ) from exc
-            tool_latency_ms = _elapsed_ms(tool_started)
+            observations = self._execute_actions(
+                session_id,
+                state,
+                actions,
+                is_group=is_group,
+                trace=trace,
+            )
 
             public_observations = [
                 _public_step_result(observation) for observation in observations
@@ -614,129 +796,13 @@ class SessionRegistry:
                 }
             )
 
-            user_message = None
-            message_sent = any(
-                item["action"].get("name") == "message" for item in call_group
+            user_message = self._simulate_user_turn(
+                session_id,
+                state,
+                turn,
+                call_group,
+                trace,
             )
-            # Preserve one unaided policy turn after a public event. The agent
-            # must react to the observation before the shopper simulator can
-            # reinforce it; a terminal action in that turn gets no rescue.
-            event_ready = (
-                state.session.env.applied_event is not None
-                and not state.event_surfaced
-                and not state.session.state_blind
-                and state.event_fired_turn is not None
-                and turn > state.event_fired_turn
-            )
-            # The runtime owns trigger ordering and sealed utterances. A registry
-            # call is a whole solver turn, including a parallel action group.
-            # As in loop.run, due requirements share the event-notice boundary.
-            # Terminal actions never receive a retroactive constraint or rescue.
-            due = (
-                due_interventions(
-                    state.session,
-                    state.delivered_interventions,
-                    event_surfaced_step=state.event_surfaced_turn,
-                    step=turn,
-                )
-                if not state.session.env.done()
-                else []
-            )
-            if (message_sent or event_ready or due) and not state.session.env.done():
-                signal = None
-                if event_ready:
-                    event = state.session.env.applied_event
-                    signal = {"kind": event.kind}
-                    if event.kind == "price_change":
-                        signal.update(
-                            {
-                                "old_price": event.old_price,
-                                "new_price": event.new_price,
-                                "currency": event.currency,
-                            }
-                        )
-                simulator_started = time.perf_counter()
-                simulator_snapshot = self._session_snapshot(state)
-                future = self._executor.submit(
-                    self._shopper_turn_decisions,
-                    state,
-                    signal,
-                    turn,
-                    message_sent,
-                )
-                try:
-                    decisions = future.result(timeout=self.simulator_timeout_s)
-                except concurrent.futures.TimeoutError as exc:
-                    simulator_latency_ms = _elapsed_ms(simulator_started)
-                    future.cancel()
-                    state.quarantined_reason = (
-                        f"simulator call exceeded {self.simulator_timeout_s:.3f}s"
-                    )
-                    record_error(
-                        "HarnessTimeoutError",
-                        state.quarantined_reason,
-                        snapshot=simulator_snapshot,
-                    )
-                    state.final_result = self._result(
-                        session_id,
-                        state,
-                        outcome="environment_error",
-                        verdict=None,
-                        error_detail=state.quarantined_reason,
-                        snapshot=simulator_snapshot,
-                    )
-                    raise HarnessTimeoutError(
-                        f"{state.quarantined_reason}; session quarantined"
-                    ) from exc
-                except Exception as exc:
-                    simulator_latency_ms = _elapsed_ms(simulator_started)
-                    # Only surface trusted, provider-sourced status+body via
-                    # ``InferenceProviderError`` — bespoke simulators (test
-                    # doubles, future custom implementations) can raise
-                    # arbitrary exceptions whose message may echo private
-                    # task material (see ORO-1866 disclosure canary). Any
-                    # other exception collapses to its class name only.
-                    if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
-                        self.key_exhausted.set()
-                        state.quarantined_outcome = "agent_error"
-                        exc_summary = "miner inference key exhausted"
-                    elif isinstance(exc, InferenceProviderError):
-                        exc_summary = f"upstream status={exc.status} body={exc.body!r}"
-                    else:
-                        exc_summary = type(exc).__name__
-                    state.quarantined_reason = f"user simulator failed: {exc_summary}"
-                    error_type = (
-                        AgentInferenceBudgetError
-                        if state.quarantined_outcome == "agent_error"
-                        else HarnessExecutionError
-                    )
-                    record_error(error_type.__name__, state.quarantined_reason)
-                    raise error_type(
-                        f"{state.quarantined_reason}; session quarantined"
-                    ) from exc
-                simulator_latency_ms = _elapsed_ms(simulator_started)
-                contents = []
-                for decision, decision_signal in decisions:
-                    content = str(decision.get("content") or "").strip()
-                    contents.append(content)
-                    _record_user_message(
-                        state.session,
-                        step=turn,
-                        decision={**decision, "content": content},
-                        signal=decision_signal,
-                    )
-                    state.transcript.append({"role": "user", "content": content})
-                    if (
-                        decision_signal
-                        and decision_signal.get("kind") == "intervention"
-                    ):
-                        state.delivered_interventions.add(decision_signal["index"])
-                user_message = {
-                    "content": "\n".join(content for content in contents if content)
-                }
-                state.event_surfaced = state.event_surfaced or event_ready
-                if event_ready and state.event_surfaced_turn is None:
-                    state.event_surfaced_turn = turn
 
             response = {
                 "session_id": session_id,
@@ -764,20 +830,14 @@ class SessionRegistry:
                 state.terminal_reason = "environment_done"
             elif state.session.solver_turn_count >= state.session.max_steps:
                 state.terminal_reason = "step_limit"
-            state_hash_after = _state_hash(state.session)
-            timing = timing_ms()
-            state.call_trace.append(
-                {
-                    "request": trace_request,
-                    "response": copy.deepcopy(response),
-                    "state_hash_before": state_hash_before,
-                    "state_hash_after": state_hash_after,
-                    "latency_ms": timing["total"],
-                    "timing_ms": timing,
-                    "search_retries": copy.deepcopy(search_retry_trace),
-                    "simulator": simulator_evidence(),
-                    "error": None,
-                }
+            trace.record(
+                state,
+                response=response,
+                simulator_exchanges=(
+                    self._simulator_exchanges(state.simulator)
+                    if trace.simulator_latency_ms is not None
+                    else None
+                ),
             )
             return response
 
