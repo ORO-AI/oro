@@ -1,1 +1,1 @@
-"""Tool registration, execution, and dialogue step creation for ShoppingBench agents."""
+"""Importable stub retained for the sandbox image smoke test."""
