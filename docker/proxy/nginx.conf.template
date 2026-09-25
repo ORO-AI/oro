@@ -126,13 +126,16 @@ http {
         location = /_backend_models {
             internal;
 
-            # Literal URL (no nginx vars) — nginx resolves the hostname once at
-            # startup via libc, which consults /etc/hosts. Lets environments
-            # that need to pin Backend to a specific IP override DNS without
-            # forking the proxy image. Location-match URI replacement still
-            # forwards `?provider=…` from the subrequest automatically.
+            # Per-request DNS, like /_openrouter_proxy/. A literal URL is
+            # resolved once at startup; when that CloudFront edge IP went
+            # stale, every allowlist fetch failed until the proxy restarted
+            # and each inference call returned 503. A variable proxy_pass
+            # sends its URI as-is, so the subrequest's `?provider=…` is
+            # appended explicitly.
+            resolver ${PROXY_RESOLVER} ipv6=off;
+            set $backend_models_upstream ${BACKEND_URL}/v1/public/inference/models;
             proxy_method GET;
-            proxy_pass ${BACKEND_URL}/v1/public/inference/models;
+            proxy_pass $backend_models_upstream$is_args$args;
             proxy_ssl_server_name on;
             proxy_http_version 1.1;
             # Strip parent-request headers + body and overwrite the framing
