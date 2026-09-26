@@ -483,7 +483,9 @@ class Validator:
 
             eval_dir = self._eval_dir(eval_run_id)
             agent_path = eval_dir / "agent.py"
-            agent_path.write_text(response.text)
+            # Raw bytes: response.text guesses the charset (S3 sends none) and
+            # can mis-decode UTF-8 source, corrupting non-ASCII literals.
+            agent_path.write_bytes(response.content)
             logging.info(f"Successfully downloaded agent to {agent_path}")
             return agent_path
         except requests.exceptions.RequestException as e:
