@@ -295,6 +295,7 @@ class TestSandboxIsolation:
             check=True,
         ).stdout
         line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
+        assert '"POST /inference/chat/completions HTTP/1.1"' in line
         assert "fields=messages,stream,odd_field" in line
         assert "run=test-run" in line
         assert all(
