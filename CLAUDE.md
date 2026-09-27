@@ -15,10 +15,14 @@ Public validator and miner code for the ORO Bittensor subnet. Start with `README
   its Prometheus metrics twice (duplicate-timeseries error). In tests, import a
   module under the same path the code under test uses, so class identities match
   (e.g. `subnet.validator.env_pack_loader` for `subnet/local_generated_validator.py`).
-- **The validator talks to the backend only through `oro_sdk`.** Route calls
-  through `BackendClient._call_api` (`subnet/validator/backend_client.py`), which
-  wraps an SDK `sync_detailed` function with error handling. For an endpoint the
-  SDK doesn't cover, add the operation to the SDK first. Don't hand-roll HTTP.
+- **The validator talks to the backend only through `oro_sdk`.** Synchronous calls
+  go through `BackendClient._call_api` (`subnet/validator/backend_client.py`), which
+  wraps an SDK `sync_detailed` function. Async environment calls (pack fetch,
+  episode emit) go through `call_environment_api`
+  (`subnet/validator/env_backend.py`) with the SDK's `asyncio_detailed` function,
+  which keeps their bounded retries and doesn't block the event loop. For an
+  endpoint the SDK doesn't cover, add the operation to the SDK first. Don't
+  hand-roll HTTP.
 - **Validator image dependencies live in `docker/validator/`**
   (`pyproject.toml` + `uv.lock`), installed with
   `uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}`.
