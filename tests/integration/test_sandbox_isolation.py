@@ -219,7 +219,7 @@ class TestSandboxIsolation:
             "expires_at": (time.time() + 600) * 1000,
         }
         subprocess.run(
-            writer + ["sh", "-c", "set -C; cat > /grants/active"],
+            writer + ["sh", "-c", "rm -f /grants/active && cat > /grants/active"],
             input=json.dumps(grant),
             text=True,
             capture_output=True,
