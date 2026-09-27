@@ -3,8 +3,8 @@
 Usage (via Docker Compose):
     docker compose run test --agent-file my_agent.py
 
-Usage (direct):
-    python -m subnet.test_runner --agent-file my_agent.py
+Use the Compose local test entry point above; this legacy direct runner does
+not publish an inference grant for the proxy.
 """
 
 import argparse

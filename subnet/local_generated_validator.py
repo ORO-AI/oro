@@ -446,6 +446,10 @@ def run_local_generated_validator(
     config: LocalGeneratedConfig,
 ) -> LocalGeneratedResult:
     """Execute one local EnvPack through the generated validator components."""
+    grant_dir = Path(
+        os.environ.get("ORO_INFERENCE_GRANTS_DIR", "/run/oro-inference-grants")
+    )
+    (grant_dir / "active").unlink(missing_ok=True)
 
     if config.max_workers <= 0:
         raise ValueError("max_workers must be positive")
@@ -453,9 +457,6 @@ def run_local_generated_validator(
         raise ValueError("timeout must be positive")
 
     run_id = f"local-{uuid4().hex}"
-    grant_dir = Path(
-        os.environ.get("ORO_INFERENCE_GRANTS_DIR", "/run/oro-inference-grants")
-    )
     grant_path = grant_dir / "active"
     temporary_grant = grant_dir / f".{run_id}.tmp"
     artifact_dir = config.output_root / run_id
@@ -880,6 +881,10 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
 
 
 def main(arguments: list[str] | None = None) -> int:
+    Path(
+        os.environ.get("ORO_INFERENCE_GRANTS_DIR", "/run/oro-inference-grants"),
+        "active",
+    ).unlink(missing_ok=True)
     try:
         config = parse_config(arguments)
     except (OSError, ValueError) as error:
