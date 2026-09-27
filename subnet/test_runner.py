@@ -7,7 +7,6 @@ Use the Compose local test entry point above; this legacy direct runner does
 not publish an inference grant for the proxy.
 """
 
-import argparse
 import json
 import os
 import subprocess
@@ -312,65 +311,12 @@ def run_test(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="test_runner",
-        description="Test an agent locally against benchmark problems",
+    print(
+        "This legacy test command cannot use the inference proxy. "
+        "Run `docker compose run test --agent-file my_agent.py` instead.",
+        file=sys.stderr,
     )
-    parser.add_argument(
-        "--agent-file",
-        required=True,
-        help="Path to the agent Python file to test",
-    )
-    parser.add_argument(
-        "--problem-file",
-        default=DEFAULT_PROBLEM_FILE,
-        help=f"Path to problem file, JSON or JSONL (default: {DEFAULT_PROBLEM_FILE})",
-    )
-    parser.add_argument(
-        "--max-workers",
-        type=int,
-        default=3,
-        help="Maximum parallel workers for sandbox execution (default: 3)",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=1800,
-        help="Timeout in seconds for sandbox execution (default: 1800)",
-    )
-    parser.add_argument(
-        "--skip-reasoning",
-        action="store_true",
-        help="Skip reasoning quality scoring to save inference API calls",
-    )
-
-    args = parser.parse_args()
-
-    # Fail fast on a missing inference key — without one the agent's
-    # inference calls fail and the run aborts with empty output.
-    api_key, provider, _ = _resolve_inference_credentials()
-    if not api_key:
-        print(
-            "Error: no inference API key set.\n"
-            "  Set one of CHUTES_API_KEY or OPENROUTER_API_KEY in your shell\n"
-            "  or copy .env.example to .env and fill it in.\n"
-            "  Get a Chutes key at https://chutes.ai/ or an OpenRouter key at\n"
-            "  https://openrouter.ai/.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    score = run_test(args.agent_file, args.problem_file, args.max_workers, args.timeout, args.skip_reasoning)
-
-    if score < 0:
-        print("\nTest FAILED")
-        sys.exit(1)
-
-    print()
-    print(f"{'═' * 40}")
-    print(f"  SCORE: {score:.4f}")
-    print(f"{'═' * 40}")
-    sys.exit(0)
+    sys.exit(2)
 
 
 if __name__ == "__main__":
