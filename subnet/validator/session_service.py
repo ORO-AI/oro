@@ -37,12 +37,17 @@ class SessionRuntime:
         with self._lock:
             self._inference_grant = None
 
-    def authorize_inference(self, authorization: str | None) -> str | None:
+    def authorize_inference(self, authorization: str | None) -> tuple[str | None, bool]:
         with self._lock:
             grant = self._inference_grant
-            if grant is None or time.time() >= grant[2] or authorization is None:
-                return None
-            return grant[0] if compare_digest(authorization, "Bearer " + grant[1]) else None
+            if grant is None:
+                return None, False
+            authorized = (
+                time.time() < grant[2]
+                and authorization is not None
+                and compare_digest(authorization, "Bearer " + grant[1])
+            )
+            return grant[0], authorized
 
     def install(self, registry: SessionRegistry) -> None:
         """Atomically activate a registry and close the previous generation."""
@@ -90,12 +95,15 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
     def authorize_inference(
         authorization: str | None = Header(default=None),
     ) -> Response:
-        run_id = runtime.authorize_inference(authorization)
-        if run_id is None:
+        run_id, authorized = runtime.authorize_inference(authorization)
+        headers = {"X-ORO-Run-ID": run_id} if run_id else None
+        if not authorized:
             raise HTTPException(
-                status_code=401, detail="Inference key does not match active run"
+                status_code=401,
+                detail="Inference key does not match active run",
+                headers=headers,
             )
-        return Response(status_code=204, headers={"X-ORO-Run-ID": run_id})
+        return Response(status_code=204, headers=headers)
 
     @app.post("/v1/session/call")
     def call(envelope: dict[str, Any]) -> dict[str, Any]:

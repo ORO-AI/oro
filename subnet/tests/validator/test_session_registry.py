@@ -1070,10 +1070,9 @@ def test_inference_key_is_bound_to_active_run() -> None:
 
     assert client.get(url, headers=valid).status_code == 401
     runtime.set_inference_grant("run-1", "sk-or-expected", time.time() + 60)
-    assert (
-        client.get(url, headers={"Authorization": "Bearer sk-or-other"}).status_code
-        == 401
-    )
+    rejected = client.get(url, headers={"Authorization": "Bearer sk-or-other"})
+    assert rejected.status_code == 401
+    assert rejected.headers["X-ORO-Run-ID"] == "run-1"
     response = client.get(url, headers=valid)
     assert response.status_code == 204
     assert response.headers["X-ORO-Run-ID"] == "run-1"

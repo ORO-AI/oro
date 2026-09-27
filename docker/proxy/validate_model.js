@@ -363,6 +363,7 @@ function _validatedRequest(r) {
 
 function validate(r) {
   r.subrequest("/_inference_grant", { method: "GET" }, function (reply) {
+    r._oroRunId = reply.headersOut["X-ORO-Run-ID"];
     if (reply.status !== 204) {
       var unauthorized = reply.status === 401;
       _tag(r, unauthorized ? "internal-unauthorized" : "internal-grant-unavailable");
@@ -371,7 +372,6 @@ function validate(r) {
       }));
       return;
     }
-    r._oroRunId = reply.headersOut["X-ORO-Run-ID"];
     if (!r._oroRunId) {
       _tag(r, "internal-grant-unavailable");
       r.return(503, JSON.stringify({ error: "Inference grant unavailable" }));
