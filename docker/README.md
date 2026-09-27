@@ -255,7 +255,8 @@ Internet
 Inference access logs include `fields=` (the first 32 incoming top-level field
 names, captured before proxy rewriting; `+more` marks overflow). This field contains no
 request values or Authorization header. Aggregate these access lines to see
-which parameters reach the proxy, including calls outside `ProxyClient`.
+which parameters reach the proxy, including calls outside `ProxyClient`. Treat
+`+more` records as incomplete and count them separately.
 
 ```bash
 # Build proxy image
