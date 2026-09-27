@@ -1,14 +1,14 @@
-"""Shared Docker sandbox utilities for test_runner and validator.
+"""Shared Docker sandbox utilities for local runs and the validator.
 
 Centralises sandbox image/network configuration, host-path mapping, problem
-loading, and Docker command construction so the two call-sites stay in sync.
+loading, and Docker command construction so the call sites stay in sync.
 """
 
 import json
 import os
 from pathlib import Path
 
-# Docker configuration — shared between test_runner and validator
+# Docker configuration shared by local runs and the validator
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
@@ -25,7 +25,7 @@ def host_path(path: str, workspace_dir: str | None = None) -> str:
         path: The container-local path to translate.
         workspace_dir: If provided (validator case), strip this prefix from
             *path* before joining with ``HOST_PROJECT_DIR``.  When ``None``
-            (test_runner case), the function strips well-known prefixes
+            (local-run case), the function strips well-known prefixes
             (``/app/``, ``/workspace/``).
 
     Returns:
@@ -41,7 +41,7 @@ def host_path(path: str, workspace_dir: str | None = None) -> str:
             return str(Path(HOST_PROJECT_DIR) / relative)
         return path
 
-    # test_runner: strip well-known container prefixes
+    # Strip well-known container prefixes for local runs.
     if path.startswith("/app/"):
         return str(Path(HOST_PROJECT_DIR) / path[len("/app/") :])
     if path.startswith("/workspace/"):
