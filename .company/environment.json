@@ -1,0 +1,9 @@
+{
+  "$schema": "https://api.thecompany.company/schemas/v1/environment.json",
+  "scripts": {
+    "install": {
+      "command": "set -o pipefail; curl -LsSf https://astral.sh/uv/install.sh | sh && \"$HOME/.local/bin/uv\" python install 3.11 && \"$HOME/.local/bin/uv\" sync --project docker/validator --group validator --locked --python 3.11 && \"$HOME/.local/bin/uv\" pip install --python docker/validator/.venv/bin/python pytest-cov",
+      "timeout": 1800
+    }
+  }
+}
