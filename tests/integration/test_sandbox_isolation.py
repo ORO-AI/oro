@@ -181,7 +181,7 @@ class TestSandboxIsolation:
         assert status == "401", (
             f"Expected the run-key guard to answer, got {status}: {body[:200]}"
         )
-        assert "inference run" in json.loads(body)["error"]
+        assert "active run" in json.loads(body)["error"]
 
     @pytest.fixture
     def active_inference_grant(self):
