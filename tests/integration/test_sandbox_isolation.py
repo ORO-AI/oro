@@ -183,7 +183,8 @@ class TestSandboxIsolation:
         )
         assert "inference run" in json.loads(body)["error"]
 
-    def test_inference_uses_active_run_key(self):
+    @pytest.fixture
+    def active_inference_grant(self):
         proxy = json.loads(
             subprocess.run(
                 ["docker", "inspect", PROXY_CONTAINER],
@@ -224,56 +225,45 @@ class TestSandboxIsolation:
             capture_output=True,
             check=True,
         )
-        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions"
         try:
-            wrong = requests.post(
-                url, headers={"Authorization": "Bearer sk-or-other"}, json={}, timeout=5
-            )
-            assert wrong.status_code == 401
-            valid = requests.post(
-                url,
-                headers={"Authorization": "Bearer sk-or-expected"},
-                json={},
-                timeout=5,
-            )
-            assert valid.status_code == 400
-            assert "model" in valid.json()["error"]
-            grant["expires_at"] = 0
-            subprocess.run(
-                writer + ["sh", "-c", "cat > /grants/active"],
-                input=json.dumps(grant),
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            expired = requests.post(
-                url,
-                headers={"Authorization": "Bearer sk-or-expected"},
-                json={},
-                timeout=5,
-            )
-            assert expired.status_code == 401
+            yield writer, grant
         finally:
             subprocess.run(
                 writer + ["unlink", "/grants/active"], check=True, capture_output=True
             )
 
-    def test_inference_field_telemetry(self):
-        proxy = json.loads(
-            subprocess.run(
-                ["docker", "inspect", PROXY_CONTAINER],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        )[0]
-        assert "ORO_INFERENCE_TEST_PROXY=1" in proxy["Config"]["Env"]
+    def test_inference_uses_active_run_key(self, active_inference_grant):
+        writer, grant = active_inference_grant
+        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions"
+        wrong = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-other"}, json={}, timeout=5
+        )
+        assert wrong.status_code == 401
+        valid = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert valid.status_code == 400
+        assert "model" in valid.json()["error"]
+        grant["expires_at"] = 0
+        subprocess.run(
+            writer + ["sh", "-c", "cat > /grants/active"],
+            input=json.dumps(grant),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        expired = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert expired.status_code == 401
+
+    def test_inference_field_telemetry(self, active_inference_grant):
         url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions?private_query_marker=1"
         response = requests.post(
             url,
             headers={
                 "User-Agent": "oro-field-probe",
-                "Authorization": "Bearer private_key_marker",
+                "Authorization": "Bearer sk-or-expected",
             },
             json={
                 "messages": [{"role": "user", "content": "private_prompt_marker"}],
@@ -288,7 +278,10 @@ class TestSandboxIsolation:
         assert (
             requests.post(
                 url,
-                headers={"User-Agent": "oro-overflow-probe"},
+                headers={
+                    "User-Agent": "oro-overflow-probe",
+                    "Authorization": "Bearer sk-or-expected",
+                },
                 json=overflow,
                 timeout=5,
             ).status_code
@@ -302,12 +295,13 @@ class TestSandboxIsolation:
         ).stdout
         line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
         assert "fields=messages,stream,odd_field" in line
+        assert "run=test-run" in line
         assert all(
             marker not in line
             for marker in (
                 "private_query_marker",
-                "private_key_marker",
                 "private_prompt_marker",
+                "sk-or-expected",
             )
         )
         overflow_line = next(
