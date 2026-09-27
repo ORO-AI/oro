@@ -1062,6 +1062,29 @@ def test_http_bridge_exposes_calls_but_not_private_operations(
     assert client.post("/v1/session/verdict", json={}).status_code == 404
 
 
+def test_inference_key_is_bound_to_active_run() -> None:
+    runtime = SessionRuntime()
+    client = TestClient(create_session_app(runtime))
+    url = "/v1/inference/authorize"
+    valid = {"Authorization": "Bearer sk-or-expected"}
+
+    assert client.get(url, headers=valid).status_code == 401
+    runtime.set_inference_grant("run-1", "sk-or-expected", time.time() + 60)
+    assert (
+        client.get(url, headers={"Authorization": "Bearer sk-or-other"}).status_code
+        == 401
+    )
+    response = client.get(url, headers=valid)
+    assert response.status_code == 204
+    assert response.headers["X-ORO-Run-ID"] == "run-1"
+    assert "sk-or-expected" not in str(response.headers)
+
+    runtime.set_inference_grant("run-1", "sk-or-expected", 0)
+    assert client.get(url, headers=valid).status_code == 401
+    runtime.clear_inference_grant()
+    assert client.get(url, headers=valid).status_code == 401
+
+
 def test_runtime_replacement_closes_the_previous_pack_generation() -> None:
     runtime = SessionRuntime()
     first = MagicMock(spec=SessionRegistry)

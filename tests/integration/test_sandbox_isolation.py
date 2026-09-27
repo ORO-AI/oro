@@ -194,47 +194,29 @@ class TestSandboxIsolation:
             ).stdout
         )[0]
         assert "ORO_INFERENCE_TEST_PROXY=1" in proxy["Config"]["Env"]
-        mount = next(
-            (
-                m
-                for m in proxy["Mounts"]
-                if m["Destination"] == "/run/oro-inference-grants"
-            ),
-            None,
+        assert not any(
+            m["Destination"] == "/run/oro-inference-grants" for m in proxy["Mounts"]
         )
-        assert mount is not None
-        assert mount["Name"].endswith("_test-inference-grants")
-        volume = mount.get("Name", mount["Source"])
-        writer = [
-            "docker",
-            "run",
-            "--rm",
-            "-i",
-            "-v",
-            f"{volume}:/grants",
-            "nginx:alpine",
-        ]
+
+        def set_grant(grant):
+            response = requests.put(
+                "http://127.0.0.1:19101/_test/inference-grant", json=grant, timeout=5
+            )
+            response.raise_for_status()
+
         grant = {
             "run_id": "test-run",
             "token": "sk-or-expected",
-            "expires_at": (time.time() + 600) * 1000,
+            "expires_at": time.time() + 600,
         }
-        subprocess.run(
-            writer + ["sh", "-c", "rm -f /grants/active && cat > /grants/active"],
-            input=json.dumps(grant),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+        set_grant(grant)
         try:
-            yield writer, grant
+            yield set_grant, grant
         finally:
-            subprocess.run(
-                writer + ["unlink", "/grants/active"], check=True, capture_output=True
-            )
+            set_grant({})
 
     def test_inference_uses_active_run_key(self, active_inference_grant):
-        writer, grant = active_inference_grant
+        set_grant, grant = active_inference_grant
         url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions"
         wrong = requests.post(
             url, headers={"Authorization": "Bearer sk-or-other"}, json={}, timeout=5
@@ -246,13 +228,7 @@ class TestSandboxIsolation:
         assert valid.status_code == 400
         assert "model" in valid.json()["error"]
         grant["expires_at"] = 0
-        subprocess.run(
-            writer + ["sh", "-c", "cat > /grants/active"],
-            input=json.dumps(grant),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+        set_grant(grant)
         expired = requests.post(
             url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
         )

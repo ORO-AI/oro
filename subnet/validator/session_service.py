@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import threading
 import time
+from hmac import compare_digest
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Response
 
 from .session_errors import (
     AgentInferenceBudgetError,
@@ -25,7 +26,23 @@ class SessionRuntime:
 
     def __init__(self) -> None:
         self._registry: SessionRegistry | None = None
+        self._inference_grant: tuple[str, str, float] | None = None
         self._lock = threading.Lock()
+
+    def set_inference_grant(self, run_id: str, token: str, expires_at: float) -> None:
+        with self._lock:
+            self._inference_grant = (run_id, token, expires_at)
+
+    def clear_inference_grant(self) -> None:
+        with self._lock:
+            self._inference_grant = None
+
+    def authorize_inference(self, authorization: str | None) -> str | None:
+        with self._lock:
+            grant = self._inference_grant
+            if grant is None or time.time() >= grant[2] or authorization is None:
+                return None
+            return grant[0] if compare_digest(authorization, "Bearer " + grant[1]) else None
 
     def install(self, registry: SessionRegistry) -> None:
         """Atomically activate a registry and close the previous generation."""
@@ -68,6 +85,17 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, object]:
         return {"status": "ok", "ready": runtime.ready}
+
+    @app.get("/v1/inference/authorize")
+    def authorize_inference(
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        run_id = runtime.authorize_inference(authorization)
+        if run_id is None:
+            raise HTTPException(
+                status_code=401, detail="Inference key does not match active run"
+            )
+        return Response(status_code=204, headers={"X-ORO-Run-ID": run_id})
 
     @app.post("/v1/session/call")
     def call(envelope: dict[str, Any]) -> dict[str, Any]:

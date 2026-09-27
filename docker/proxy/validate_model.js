@@ -189,26 +189,7 @@ function getAllowlist(r, provider, callback) {
   );
 }
 
-function validate(r) {
-  // The sandbox can supply any bearer; only the validator's active grant may
-  // reach upstream. Keep the existing request and model handling below.
-  var grant;
-  try {
-    grant = JSON.parse(fs.readFileSync("/run/oro-inference-grants/active", "utf8"));
-  } catch (e) {
-    _tag(r, "internal-unauthorized");
-    r.return(401, JSON.stringify({ error: "No active inference run" }));
-    return;
-  }
-  r._oroRunId = grant && grant.run_id;
-  if (!grant || typeof grant.token !== "string" ||
-      typeof grant.expires_at !== "number" || Date.now() >= grant.expires_at ||
-      r.headersIn["Authorization"] !== "Bearer " + grant.token) {
-    _tag(r, "internal-unauthorized");
-    r.return(401, JSON.stringify({ error: "Inference key does not match active run" }));
-    return;
-  }
-
+function _validatedRequest(r) {
   var provider = detectProvider(r);
   var upstreamLocation = provider === "openrouter" ? "/_openrouter_proxy/" : "/_chutes_proxy/";
 
@@ -377,6 +358,26 @@ function validate(r) {
         r.return(reply.status, reply.responseText);
       }
     );
+  });
+}
+
+function validate(r) {
+  r.subrequest("/_inference_grant", { method: "GET" }, function (reply) {
+    if (reply.status !== 204) {
+      var unauthorized = reply.status === 401;
+      _tag(r, unauthorized ? "internal-unauthorized" : "internal-grant-unavailable");
+      r.return(unauthorized ? 401 : 503, JSON.stringify({
+        error: unauthorized ? "Inference key does not match active run" : "Inference grant unavailable"
+      }));
+      return;
+    }
+    r._oroRunId = reply.headersOut["X-ORO-Run-ID"];
+    if (!r._oroRunId) {
+      _tag(r, "internal-grant-unavailable");
+      r.return(503, JSON.stringify({ error: "Inference grant unavailable" }));
+      return;
+    }
+    _validatedRequest(r);
   });
 }
 

@@ -446,19 +446,12 @@ def run_local_generated_validator(
     config: LocalGeneratedConfig,
 ) -> LocalGeneratedResult:
     """Execute one local EnvPack through the generated validator components."""
-    grant_dir = Path(
-        os.environ.get("ORO_INFERENCE_GRANTS_DIR", "/run/oro-inference-grants")
-    )
-    (grant_dir / "active").unlink(missing_ok=True)
-
     if config.max_workers <= 0:
         raise ValueError("max_workers must be positive")
     if config.timeout <= 0:
         raise ValueError("timeout must be positive")
 
     run_id = f"local-{uuid4().hex}"
-    grant_path = grant_dir / "active"
-    temporary_grant = grant_dir / f".{run_id}.tmp"
     artifact_dir = config.output_root / run_id
     artifact_dir.mkdir(parents=True, exist_ok=False)
     artifact_dir.chmod(0o755)
@@ -481,24 +474,13 @@ def run_local_generated_validator(
     caught_error: Exception | None = None
     run_error: LocalGeneratedValidatorError | None = None
     phase = "initialization"
-    runtime: SessionRuntime | None = None
+    runtime = SessionRuntime()
     server: SessionServer | None = None
     # The digest the runtime recorded as agent_version_id. Read once, before the
     # sandbox starts, so the summary cannot disagree with the episode receipts if
     # the file is edited or removed mid-run.
     agent_identity: str | None = None
     try:
-        grant_dir.mkdir(parents=True, exist_ok=True)
-        temporary_grant.write_text(
-            json.dumps(
-                {
-                    "run_id": run_id,
-                    "token": config.inference_access_token,
-                    "expires_at": (time.time() + config.timeout + 300) * 1000,
-                }
-            )
-        )
-        temporary_grant.replace(grant_path)
         _write_summary(
             summary_path,
             run_id=run_id,
@@ -511,7 +493,9 @@ def run_local_generated_validator(
         )
 
         phase = "server_setup"
-        runtime = SessionRuntime()
+        runtime.set_inference_grant(
+            run_id, config.inference_access_token, time.time() + config.timeout + 300
+        )
         server = SessionServer(
             runtime,
             host=config.session_host,
@@ -719,8 +703,7 @@ def run_local_generated_validator(
             summary_path=summary_path,
         )
     finally:
-        temporary_grant.unlink(missing_ok=True)
-        grant_path.unlink(missing_ok=True)
+        runtime.clear_inference_grant()
         cleanup_error = _cleanup(
             container_name=container_name,
             remove_container=remove_container,
@@ -881,10 +864,6 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
 
 
 def main(arguments: list[str] | None = None) -> int:
-    Path(
-        os.environ.get("ORO_INFERENCE_GRANTS_DIR", "/run/oro-inference-grants"),
-        "active",
-    ).unlink(missing_ok=True)
     try:
         config = parse_config(arguments)
     except (OSError, ValueError) as error:
