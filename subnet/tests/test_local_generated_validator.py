@@ -25,6 +25,26 @@ from subnet.validator.session_service import SessionRuntime
 pytest_plugins = ("tests.compat_fixture",)
 
 
+@pytest.fixture(autouse=True)
+def local_inference_grants(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ORO_INFERENCE_GRANTS_DIR", str(tmp_path / "inference-grants"))
+
+
+def test_main_removes_stale_grant_before_config_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grant = tmp_path / "inference-grants" / "active"
+    grant.parent.mkdir()
+    grant.write_text("stale")
+
+    def bad_config(_arguments: list[str]) -> None:
+        raise ValueError("invalid config")
+
+    monkeypatch.setattr(local_generated_validator, "parse_config", bad_config)
+    assert local_generated_validator.main([]) == 2
+    assert not grant.exists()
+
+
 def _pack(families: list[str]) -> SimpleNamespace:
     return SimpleNamespace(
         task_specs=[SimpleNamespace(family=family) for family in families],
@@ -352,6 +372,7 @@ def test_summary_reports_the_digest_the_runtime_recorded(
 
     monkeypatch.setattr(local_generated_validator, "_sha256", hash_then_mutate)
     completed = run_local_generated_validator(config)
+    assert not (tmp_path / "inference-grants" / "active").exists()
 
     summary = json.loads(completed.summary_path.read_text())
     assert summary["agent_sha256"] == before
@@ -844,9 +865,10 @@ def test_summary_ignores_sandbox_inference_failure_claims(
     assert completed.aggregate_score == pytest.approx(5 / 7)
 
 
-@pytest.mark.parametrize("outcome,classification", [
-    ("verifier_error", "verifier"), ("environment_error", "environment")
-])
+@pytest.mark.parametrize(
+    "outcome,classification",
+    [("verifier_error", "verifier"), ("environment_error", "environment")],
+)
 def test_isolated_harness_failure_scores_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

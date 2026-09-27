@@ -6,6 +6,7 @@ Tests that sandbox containers are properly isolated and can only communicate thr
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -155,8 +156,8 @@ class TestSandboxIsolation:
             f"Expected 410 for a legacy search route, got: {result.stdout[:200]}"
         )
 
-    def test_inference_route_is_live(self, sandbox_container):
-        """/inference/* is owned by the njs validator: a body without a model is rejected there, not by the default deny."""
+    def test_inference_requires_active_grant(self, sandbox_container):
+        """Direct inference HTTP calls cannot pass without an active run key."""
         result = exec_in_container(
             sandbox_container,
             [
@@ -177,12 +178,13 @@ class TestSandboxIsolation:
 
         assert result.returncode == 0, result.stderr
         body, status = result.stdout.rsplit("\n", 1)
-        assert status == "400", (
-            f"Expected the model validator to answer, got {status}: {body[:200]}"
+        assert status == "401", (
+            f"Expected the run-key guard to answer, got {status}: {body[:200]}"
         )
-        assert "model" in json.loads(body)["error"]
+        assert "inference run" in json.loads(body)["error"]
 
-    def test_inference_field_telemetry(self):
+    @pytest.fixture
+    def active_inference_grant(self):
         proxy = json.loads(
             subprocess.run(
                 ["docker", "inspect", PROXY_CONTAINER],
@@ -192,12 +194,77 @@ class TestSandboxIsolation:
             ).stdout
         )[0]
         assert "ORO_INFERENCE_TEST_PROXY=1" in proxy["Config"]["Env"]
+        mount = next(
+            (
+                m
+                for m in proxy["Mounts"]
+                if m["Destination"] == "/run/oro-inference-grants"
+            ),
+            None,
+        )
+        assert mount is not None
+        assert mount["Name"].endswith("_test-inference-grants")
+        volume = mount.get("Name", mount["Source"])
+        writer = [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "-v",
+            f"{volume}:/grants",
+            "nginx:alpine",
+        ]
+        grant = {
+            "run_id": "test-run",
+            "token": "sk-or-expected",
+            "expires_at": (time.time() + 600) * 1000,
+        }
+        subprocess.run(
+            writer + ["sh", "-c", "rm -f /grants/active && cat > /grants/active"],
+            input=json.dumps(grant),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        try:
+            yield writer, grant
+        finally:
+            subprocess.run(
+                writer + ["unlink", "/grants/active"], check=True, capture_output=True
+            )
+
+    def test_inference_uses_active_run_key(self, active_inference_grant):
+        writer, grant = active_inference_grant
+        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions"
+        wrong = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-other"}, json={}, timeout=5
+        )
+        assert wrong.status_code == 401
+        valid = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert valid.status_code == 400
+        assert "model" in valid.json()["error"]
+        grant["expires_at"] = 0
+        subprocess.run(
+            writer + ["sh", "-c", "cat > /grants/active"],
+            input=json.dumps(grant),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        expired = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert expired.status_code == 401
+
+    def test_inference_field_telemetry(self, active_inference_grant):
         url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions?private_query_marker=1"
         response = requests.post(
             url,
             headers={
                 "User-Agent": "oro-field-probe",
-                "Authorization": "Bearer private_key_marker",
+                "Authorization": "Bearer sk-or-expected",
             },
             json={
                 "messages": [{"role": "user", "content": "private_prompt_marker"}],
@@ -212,7 +279,10 @@ class TestSandboxIsolation:
         assert (
             requests.post(
                 url,
-                headers={"User-Agent": "oro-overflow-probe"},
+                headers={
+                    "User-Agent": "oro-overflow-probe",
+                    "Authorization": "Bearer sk-or-expected",
+                },
                 json=overflow,
                 timeout=5,
             ).status_code
@@ -226,12 +296,13 @@ class TestSandboxIsolation:
         ).stdout
         line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
         assert "fields=messages,stream,odd_field" in line
+        assert "run=test-run" in line
         assert all(
             marker not in line
             for marker in (
                 "private_query_marker",
-                "private_key_marker",
                 "private_prompt_marker",
+                "sk-or-expected",
             )
         )
         overflow_line = next(

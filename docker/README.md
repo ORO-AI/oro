@@ -257,6 +257,9 @@ names, captured before proxy rewriting; `+more` marks overflow). This field cont
 request values or Authorization header. Aggregate these access lines to see
 which parameters reach the proxy, including calls outside `ProxyClient`. Treat
 `+more` records as incomplete and count them separately.
+Inference calls require the validator-issued key for the active run; missing,
+different, or expired keys receive HTTP 401 before reaching the provider.
+Rejected-key requests log `fields=-` because the proxy checks the key before parsing the body.
 
 ```bash
 # Build proxy image

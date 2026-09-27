@@ -33,7 +33,7 @@ COPY subnet/ /app/subnet/
 # Docker-in-Docker sandbox volume mounts).
 RUN mkdir -p /app/logs && ln -sf /app/logs /app/subnet/logs
 
-# Copy evaluation/scoring code (used by test_runner and ProgressReporter)
+# Copy evaluation/scoring code used by the validator.
 COPY src/agent/ /app/src/agent/
 COPY src/__init__.py /app/src/
 
