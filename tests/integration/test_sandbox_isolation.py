@@ -9,10 +9,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import requests
 
 from subnet.sandbox import build_sandbox_command
 from tests.integration.conftest import (
     PROXY_CONTAINER,
+    PROXY_PORT,
     SEARCH_SERVER_CONTAINER,
     SESSION_RUNTIME_CONTAINER,
     exec_in_container,
@@ -179,6 +181,63 @@ class TestSandboxIsolation:
             f"Expected the model validator to answer, got {status}: {body[:200]}"
         )
         assert "model" in json.loads(body)["error"]
+
+    def test_inference_field_telemetry(self):
+        proxy = json.loads(
+            subprocess.run(
+                ["docker", "inspect", PROXY_CONTAINER],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )[0]
+        assert "ORO_INFERENCE_TEST_PROXY=1" in proxy["Config"]["Env"]
+        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions?private_query_marker=1"
+        response = requests.post(
+            url,
+            headers={
+                "User-Agent": "oro-field-probe",
+                "Authorization": "Bearer private_key_marker",
+            },
+            json={
+                "messages": [{"role": "user", "content": "private_prompt_marker"}],
+                "stream": True,
+                "odd field": 1,
+            },
+            timeout=5,
+        )
+        assert response.status_code == 400
+        overflow = {f"f{i}": i for i in range(33)}
+        overflow.update({"model": "test/model", "stream": True})
+        assert (
+            requests.post(
+                url,
+                headers={"User-Agent": "oro-overflow-probe"},
+                json=overflow,
+                timeout=5,
+            ).status_code
+            == 400
+        )
+        logs = subprocess.run(
+            ["docker", "logs", PROXY_CONTAINER],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
+        assert "fields=messages,stream,odd_field" in line
+        assert all(
+            marker not in line
+            for marker in (
+                "private_query_marker",
+                "private_key_marker",
+                "private_prompt_marker",
+            )
+        )
+        overflow_line = next(
+            line for line in logs.splitlines() if '"oro-overflow-probe"' in line
+        )
+        assert ",+more" in overflow_line
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""

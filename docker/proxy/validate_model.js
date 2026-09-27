@@ -220,19 +220,24 @@ function validate(r) {
     return;
   }
 
+  // Capture caller fields before validation, stripping, or proxy additions.
+  // Bound both log size and work on a request with many top-level keys.
+  var names = [];
+  for (var name in parsed || {}) {
+    if (names.length === 32) {
+      names.push("+more");
+      break;
+    }
+    names.push(name.slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "_"));
+  }
+  r._oroFields = names.join(",");
+
   if (!parsed.model) {
     _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
     r.return(400, JSON.stringify({ error: "Missing 'model' field in request body" }));
     return;
   }
-
-  // Capture caller fields before the proxy strips routes or adds usage/fallback.
-  // Names only, bounded and log-safe; never record values or credentials.
-  var names = Object.keys(parsed).sort();
-  r._oroFields = names.slice(0, 32).map(function (name) {
-    return name.slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "_");
-  }).join(",") + ":" + names.length;
 
   if (parsed.stream === true) {
     _tag(r, "internal-bad-request");

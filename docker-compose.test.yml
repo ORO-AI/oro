@@ -26,6 +26,7 @@ services:
 
   proxy:
     environment:
+      - ORO_INFERENCE_TEST_PROXY=1
       - SESSION_RUNTIME_HOST=session-runtime
       - SESSION_RUNTIME_PORT=9101
     depends_on:

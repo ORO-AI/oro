@@ -252,8 +252,8 @@ Internet
 
 ### Building and Running
 
-Inference access logs include `fields=` (bounded incoming top-level field names
-and total count, captured before proxy rewriting). This field contains no
+Inference access logs include `fields=` (the first 32 incoming top-level field
+names, captured before proxy rewriting; `+more` marks overflow). This field contains no
 request values or Authorization header. Aggregate these access lines to see
 which parameters reach the proxy, including calls outside `ProxyClient`.
 
