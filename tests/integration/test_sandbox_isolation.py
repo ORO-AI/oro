@@ -203,6 +203,7 @@ class TestSandboxIsolation:
             None,
         )
         assert mount is not None
+        assert mount["Name"].endswith("_test-inference-grants")
         volume = mount.get("Name", mount["Source"])
         writer = [
             "docker",
