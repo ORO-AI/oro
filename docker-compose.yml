@@ -72,6 +72,8 @@ services:
     networks:
       - main
       - sandbox
+    volumes:
+      - inference-grants:/run/oro-inference-grants:ro
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
       interval: 10s
@@ -133,6 +135,7 @@ services:
       proxy:
         condition: service_healthy
     volumes:
+      - inference-grants:/run/oro-inference-grants
       - /var/run/docker.sock:/var/run/docker.sock
       - ${HOME}/.bittensor/wallets:/root/.bittensor/wallets:ro
       - ./logs:/app/logs
@@ -305,6 +308,7 @@ services:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - test-inference-grants:/run/oro-inference-grants
       - .:/workspace:ro
       - ./logs:/app/logs
     environment:
@@ -354,9 +358,13 @@ services:
       test-sandbox:
         aliases:
           - proxy
+    volumes:
+      - test-inference-grants:/run/oro-inference-grants:ro
     restart: "no"
 
 volumes:
+  inference-grants:
+  test-inference-grants:
   validator-data:
   prometheus-data:
 
