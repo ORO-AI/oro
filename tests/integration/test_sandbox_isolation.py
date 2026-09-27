@@ -246,12 +246,22 @@ class TestSandboxIsolation:
                 "messages": [{"role": "user", "content": "private_prompt_marker"}],
                 "stream": True,
                 "odd field": 1,
+                "tools": [
+                    {"type": "function"},
+                    {"type": "openrouter:advisor"},
+                    {"type": "unknown"},
+                ],
+                "chat_template_kwargs": {
+                    "bad key": "private_template_marker",
+                    **{f"k{i}": i for i in range(16)},
+                },
             },
             timeout=5,
         )
         assert response.status_code == 400
         overflow = {f"f{i}": i for i in range(33)}
         overflow.update({"model": "test/model", "stream": True})
+        overflow["tools"] = [{"type": "function"}] * 33
         assert (
             requests.post(
                 url,
@@ -273,12 +283,16 @@ class TestSandboxIsolation:
         line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
         assert '"POST /inference/chat/completions HTTP/1.1"' in line
         assert "fields=messages,stream,odd_field" in line
+        assert "tool_fn=1 tool_server=1 tool_other=1 tool_more=0" in line
+        assert "template_keys=bad_key,k0," in line
+        assert ",+more run=test-run" in line
         assert "run=test-run" in line
         assert all(
             marker not in line
             for marker in (
                 "private_query_marker",
                 "private_prompt_marker",
+                "private_template_marker",
                 "sk-or-expected",
             )
         )
@@ -286,6 +300,7 @@ class TestSandboxIsolation:
             line for line in logs.splitlines() if '"oro-overflow-probe"' in line
         )
         assert ",+more" in overflow_line
+        assert "tool_fn=32 tool_server=0 tool_other=0 tool_more=1" in overflow_line
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""

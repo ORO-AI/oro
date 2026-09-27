@@ -245,7 +245,7 @@ function _validatedRequest(r) {
   var serverTools = 0;
   var otherTools = 0;
   if (Array.isArray(parsed.tools)) {
-    parsed.tools.forEach(function (tool) {
+    parsed.tools.slice(0, 32).forEach(function (tool) {
       if (tool && tool.type === "function") functionTools++;
       else if (tool && typeof tool.type === "string" && tool.type.indexOf("openrouter:") === 0) serverTools++;
       else otherTools++;
@@ -262,7 +262,8 @@ function _validatedRequest(r) {
     }
   }
   r._oroDetails = "tool_fn=" + functionTools + " tool_server=" + serverTools +
-    " tool_other=" + otherTools + " template_keys=" + (templateKeys.join(",") || "-");
+    " tool_other=" + otherTools + " tool_more=" + (Array.isArray(parsed.tools) && parsed.tools.length > 32 ? 1 : 0) +
+    " template_keys=" + (templateKeys.join(",") || "-");
 
   if (!parsed.model) {
     _tag(r, "internal-bad-request");
