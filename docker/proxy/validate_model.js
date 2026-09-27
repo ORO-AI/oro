@@ -54,6 +54,10 @@ function fields(r) {
   return r._oroFields || "-";
 }
 
+function details(r) {
+  return r._oroDetails || "-";
+}
+
 function runId(r) {
   return r._oroRunId || "-";
 }
@@ -236,6 +240,30 @@ function _validatedRequest(r) {
   }
   r._oroFields = names.join(",");
 
+  // Record only tool types and template option names, never tool schemas or values.
+  var functionTools = 0;
+  var serverTools = 0;
+  var otherTools = 0;
+  if (Array.isArray(parsed.tools)) {
+    parsed.tools.forEach(function (tool) {
+      if (tool && tool.type === "function") functionTools++;
+      else if (tool && typeof tool.type === "string" && tool.type.indexOf("openrouter:") === 0) serverTools++;
+      else otherTools++;
+    });
+  } else if (parsed.tools !== undefined) otherTools++;
+  var templateKeys = [];
+  if (parsed.chat_template_kwargs && typeof parsed.chat_template_kwargs === "object") {
+    for (var key in parsed.chat_template_kwargs) {
+      if (templateKeys.length === 16) {
+        templateKeys.push("+more");
+        break;
+      }
+      templateKeys.push(key.slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "_"));
+    }
+  }
+  r._oroDetails = "tool_fn=" + functionTools + " tool_server=" + serverTools +
+    " tool_other=" + otherTools + " template_keys=" + (templateKeys.join(",") || "-");
+
   if (!parsed.model) {
     _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
@@ -381,4 +409,4 @@ function validate(r) {
   });
 }
 
-export default { validate: validate, outcome: outcome, fields: fields, runId: runId };
+export default { validate: validate, outcome: outcome, fields: fields, details: details, runId: runId };

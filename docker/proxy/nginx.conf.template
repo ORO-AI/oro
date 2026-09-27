@@ -14,6 +14,7 @@ http {
     # `internal-allowlist-unavailable` (proxy broken, page). See ORO-1159.
     js_set $proxy_outcome validate_model.outcome;
     js_set $proxy_fields validate_model.fields;
+    js_set $proxy_details validate_model.details;
     js_set $proxy_run_id validate_model.runId;
 
     # Cross-worker shared cache for the inference allowlist. njs module-level
@@ -54,7 +55,7 @@ http {
                                   '"$request_method $uri $server_protocol" $status $body_bytes_sent '
                                   '"$http_referer" "$http_user_agent" '
                                   'ups=$upstream_status urt=$upstream_response_time '
-                                  'outcome=$proxy_outcome fields=$proxy_fields run=$proxy_run_id';
+                                  'outcome=$proxy_outcome fields=$proxy_fields $proxy_details run=$proxy_run_id';
 
     # Local-only stub_status endpoint for nginx-prometheus-exporter. On a
     # separate listener so it never conflicts with the public proxy paths
