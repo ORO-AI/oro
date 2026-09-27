@@ -233,7 +233,7 @@ The proxy service acts as a gateway for sandboxed agent containers, providing co
 - **Sandbox Network**: Internal Docker network (no internet access) for agent containers
 - **Path-based Routing**:
   - `/environment/call` → session runtime (ORO Bench tool actions)
-  - `/inference/*` → Chutes API (external, auth forwarded from sandbox client)
+  - `/inference/*` → configured inference provider (external, auth forwarded from sandbox client)
   - `/search/*` → 410 Gone (ShoppingBench routes, removed)
 
 ### Network Topology
@@ -251,6 +251,11 @@ Internet
 ```
 
 ### Building and Running
+
+Inference access logs include `fields=` (bounded incoming top-level field names
+and total count, captured before proxy rewriting). This field contains no
+request values or Authorization header. Aggregate these access lines to see
+which parameters reach the proxy, including calls outside `ProxyClient`.
 
 ```bash
 # Build proxy image

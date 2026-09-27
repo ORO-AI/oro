@@ -50,6 +50,10 @@ function outcome(r) {
   return r._oroOutcome || "unknown";
 }
 
+function fields(r) {
+  return r._oroFields || "-";
+}
+
 // Build the upstream-* label from a subrequest reply status. Keeps the label
 // space small enough for CloudWatch term-match patterns: filters key off the
 // `upstream-2xx-` / `upstream-4xx-` / `upstream-5xx-` prefix.
@@ -223,6 +227,13 @@ function validate(r) {
     return;
   }
 
+  // Capture caller fields before the proxy strips routes or adds usage/fallback.
+  // Names only, bounded and log-safe; never record values or credentials.
+  var names = Object.keys(parsed).sort();
+  r._oroFields = names.slice(0, 32).map(function (name) {
+    return name.slice(0, 64).replace(/[^A-Za-z0-9_.-]/g, "_");
+  }).join(",") + ":" + names.length;
+
   if (parsed.stream === true) {
     _tag(r, "internal-bad-request");
     r.headersOut["Content-Type"] = "application/json";
@@ -341,4 +352,4 @@ function validate(r) {
   });
 }
 
-export default { validate: validate, outcome: outcome };
+export default { validate: validate, outcome: outcome, fields: fields };
