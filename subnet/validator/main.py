@@ -348,7 +348,7 @@ class Validator:
         parser.add_argument(
             "--heartbeat-interval",
             type=int,
-            default=int(os.environ.get("ORO_HEARTBEAT_INTERVAL", "30")),
+            default=int(os.environ.get("ORO_HEARTBEAT_INTERVAL", "8")),
             help="Seconds between heartbeats during execution (env: ORO_HEARTBEAT_INTERVAL)",
         )
         parser.add_argument(
