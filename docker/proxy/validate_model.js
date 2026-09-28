@@ -296,7 +296,11 @@ function _validatedRequest(r) {
       return;
     }
 
-    if (provider === "openrouter" && allowed.indexOf(parsed.model) === -1 &&
+    var requestedModel = parsed.model;
+    if (provider === "chutes" && parsed.model === "mistralai/mistral-small-2603") {
+      // The sealed shopper simulator requests this OpenRouter ID on Chutes-funded runs.
+      parsed.model = "unsloth/Mistral-Nemo-Instruct-2407-TEE";
+    } else if (provider === "openrouter" && allowed.indexOf(parsed.model) === -1 &&
         aliases && Object.prototype.hasOwnProperty.call(aliases, parsed.model)) {
       parsed.model = aliases[parsed.model];
     }
@@ -315,7 +319,7 @@ function _validatedRequest(r) {
       return;
     }
 
-    var forwardBody = stripped.length > 0 || usageInjected || fallbackInjected
+    var forwardBody = stripped.length > 0 || usageInjected || fallbackInjected || parsed.model !== requestedModel
       ? JSON.stringify(parsed) : body;
     var uri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(

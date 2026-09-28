@@ -68,9 +68,13 @@ test("OpenRouter rejects missing or unallowlisted aliases", () => {
   assert.equal(request("unknown/model", "openrouter", catalogs).r.status, 403);
 });
 
-test("Chutes does not translate OpenRouter IDs", () => {
+test("Chutes retains the shopper simulator's Mistral mapping", () => {
   shared.clear();
-  const catalogs = { chutes: { models: [chutesId] } };
+  const nemo = "unsloth/Mistral-Nemo-Instruct-2407-TEE";
+  const catalogs = { chutes: { models: [chutesId, nemo] } };
   assert.equal(request(openrouterId, "chutes", catalogs).r.status, 403);
   assert.equal(request(chutesId, "chutes", catalogs).r.status, 200);
+  const { r, calls } = request("mistralai/mistral-small-2603", "chutes", catalogs);
+  assert.equal(r.status, 200);
+  assert.equal(JSON.parse(calls.at(-1).options.body).model, nemo);
 });
