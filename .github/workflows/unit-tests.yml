@@ -60,6 +60,9 @@ jobs:
           --ignore=subnet/tests/test_local_generated_compose.py \
           --ignore=subnet/tests/test_local_generated_validator.py \
           -v --cov=src --cov-report=term-missing --cov-report=html
+
+    - name: Test inference proxy aliases
+      run: node --test tests/test_proxy_model_aliases.mjs
     
     - name: Upload coverage reports
       uses: actions/upload-artifact@v4

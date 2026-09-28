@@ -20,13 +20,8 @@
 //   - Bearer token starts with "sk-or-" → OpenRouter (allowlist enforced)
 //   - Any other token shape (e.g. cak_*) → Chutes (allowlist enforced)
 //
-// Cross-provider model-name rewriting: agents can use any model identifier
-// listed in model_pairs.json regardless of which provider funds the run. If
-// the request `model` matches the inactive provider's side of a pair we
-// rewrite the body's `model` field to the active provider's side before
-// allowlist validation, so the same agent code works on either provider.
-// Models with no pair entry pass through unchanged and hit the existing
-// allowlist check as before.
+// On OpenRouter runs, Backend may supply aliases from Chutes IDs to
+// OpenRouter IDs. The translated ID must still pass the active allowlist.
 //
 // Per-request outcome tagging: `$upstream_status` on the parent /inference/
 // access log line is always `-` because the location uses `js_content` rather
@@ -36,8 +31,6 @@
 // on the request object before every `r.return(...)` and expose it via
 // `js_set $proxy_outcome validate_model.outcome` so it lands in the access
 // log. See ORO-1159.
-
-import fs from "fs";
 
 // Tag this request with what happened so the access log can record it.
 // Called before every r.return(...) in validate(). Read back via outcome(r)
@@ -82,39 +75,6 @@ function detectProvider(r) {
   return "chutes";
 }
 
-// Lookup tables for both directions, populated once at module init. Each
-// nginx worker loads the file independently; reload (`nginx -s reload`)
-// picks up edits.
-var MODEL_PAIRS_PATH = "/etc/nginx/model_pairs.json";
-var _pairsByChutes = {};
-var _pairsByOpenrouter = {};
-try {
-  var _pairsDoc = JSON.parse(fs.readFileSync(MODEL_PAIRS_PATH, "utf8"));
-  for (var i = 0; i < _pairsDoc.pairs.length; i++) {
-    var p = _pairsDoc.pairs[i];
-    _pairsByChutes[p.chutes] = p.openrouter;
-    _pairsByOpenrouter[p.openrouter] = p.chutes;
-  }
-} catch (e) {
-  // Don't crash the worker — same-provider names still work via the
-  // existing allowlist check. Surface the error so it's noticeable.
-  ngx.log(ngx.ERR, "model_pairs load failed: " + e.message);
-}
-
-// Returns the request model rewritten for `activeProvider`, or null if no
-// rewrite is needed (already on the active side, or unknown — let allowlist
-// validation handle it).
-function rewriteModelFor(activeProvider, requested) {
-  if (activeProvider === "chutes") {
-    if (_pairsByChutes[requested] !== undefined) return null;
-    if (_pairsByOpenrouter[requested] !== undefined) return _pairsByOpenrouter[requested];
-  } else if (activeProvider === "openrouter") {
-    if (_pairsByOpenrouter[requested] !== undefined) return null;
-    if (_pairsByChutes[requested] !== undefined) return _pairsByChutes[requested];
-  }
-  return null;
-}
-
 var CACHE_TTL_MS = 15 * 60 * 1000;
 // Window beyond CACHE_TTL_MS where we still serve the cached list if a
 // refresh fails. After this we give up and fail closed.
@@ -138,17 +98,17 @@ function _readState(provider) {
   }
 }
 
-function _writeState(provider, allowlist, expiresAt) {
+function _writeState(provider, allowlist, aliases, expiresAt) {
   ngx.shared[ZONE].set(
     _stateKey(provider),
-    JSON.stringify({ allowlist: allowlist, expiresAt: expiresAt })
+    JSON.stringify({ allowlist: allowlist, aliases: aliases, expiresAt: expiresAt })
   );
 }
 
 function getAllowlist(r, provider, callback) {
   var state = _readState(provider);
   if (state && state.allowlist && Date.now() < state.expiresAt) {
-    callback(state.allowlist);
+    callback(state.allowlist, state.aliases);
     return;
   }
 
@@ -160,8 +120,8 @@ function getAllowlist(r, provider, callback) {
         try {
           var data = JSON.parse(reply.responseText);
           if (data && Array.isArray(data.models) && data.models.length > 0) {
-            _writeState(provider, data.models, Date.now() + CACHE_TTL_MS);
-            callback(data.models);
+            _writeState(provider, data.models, data.aliases, Date.now() + CACHE_TTL_MS);
+            callback(data.models, data.aliases);
             return;
           }
           r.error(
@@ -184,7 +144,7 @@ function getAllowlist(r, provider, callback) {
               "s grace remaining)"
           );
         }
-        callback(state.allowlist);
+        callback(state.allowlist, state.aliases);
         return;
       }
 
@@ -328,21 +288,17 @@ function _validatedRequest(r) {
     fallbackInjected = true;
   }
 
-  var rewritten = rewriteModelFor(provider, parsed.model);
-  if (rewritten !== null) {
-    parsed.model = rewritten;
-  }
-  var forwardBody =
-    rewritten !== null || stripped.length > 0 || usageInjected || fallbackInjected
-      ? JSON.stringify(parsed)
-      : body;
-
-  getAllowlist(r, provider, function (allowed) {
+  getAllowlist(r, provider, function (allowed, aliases) {
     if (!allowed) {
       _tag(r, "internal-allowlist-unavailable");
       r.headersOut["Content-Type"] = "application/json";
       r.return(503, JSON.stringify({ error: "Inference allowlist unavailable" }));
       return;
+    }
+
+    if (provider === "openrouter" && allowed.indexOf(parsed.model) === -1 &&
+        aliases && Object.prototype.hasOwnProperty.call(aliases, parsed.model)) {
+      parsed.model = aliases[parsed.model];
     }
 
     if (allowed.indexOf(parsed.model) === -1) {
@@ -359,6 +315,8 @@ function _validatedRequest(r) {
       return;
     }
 
+    var forwardBody = stripped.length > 0 || usageInjected || fallbackInjected
+      ? JSON.stringify(parsed) : body;
     var uri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(
       uri,
