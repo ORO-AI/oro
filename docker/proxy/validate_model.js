@@ -15,6 +15,8 @@
 // After the cache expires we attempt a refresh; if Backend returns a non-200
 // (rate-limited, unreachable, malformed), we keep serving the previous
 // allowlist for STALE_GRACE_MS instead of failing closed.
+// A no-store OpenRouter response has the curated models but only fallback
+// aliases; use the last good aliases for that request without caching it.
 //
 // Provider dispatch:
 //   - Bearer token starts with "sk-or-" → OpenRouter (allowlist enforced)
@@ -120,6 +122,11 @@ function getAllowlist(r, provider, callback) {
         try {
           var data = JSON.parse(reply.responseText);
           if (data && Array.isArray(data.models) && data.models.length > 0) {
+            var cacheControl = reply.headersOut["Cache-Control"] || reply.headersOut["cache-control"] || "";
+            if (provider === "openrouter" && cacheControl.indexOf("no-store") !== -1) {
+              callback(data.models, state && state.aliases ? state.aliases : data.aliases);
+              return;
+            }
             _writeState(provider, data.models, data.aliases, Date.now() + CACHE_TTL_MS);
             callback(data.models, data.aliases);
             return;
