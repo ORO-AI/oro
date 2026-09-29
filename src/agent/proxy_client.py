@@ -609,6 +609,8 @@ class ProxyClient:
 
         - ``kind="network"`` — every attempt raised (DNS/connect/timeout).
         - ``kind="upstream"`` — got an HTTP response, status != 200.
+        - ``kind="invalid_body"`` — status 200 but the body was never JSON
+          (e.g. only keep-alive whitespace) on every attempt.
         """
         if response is None:
             return {
@@ -621,7 +623,7 @@ class ProxyClient:
         except Exception:  # noqa: BLE001 — best effort; body must not throw
             body_text = "<unreadable body>"
         return {
-            "kind": "upstream",
+            "kind": "invalid_body" if response.status_code == 200 else "upstream",
             "status": response.status_code,
             "body": body_text[:800],
         }
