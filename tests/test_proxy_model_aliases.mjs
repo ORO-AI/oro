@@ -73,12 +73,13 @@ test("a no-store fallback serves native IDs without replacing cached aliases", (
   const stale = { allowlist: [openrouterId], aliases: { [chutesId]: openrouterId }, expiresAt: Date.now() - 1 };
   shared.set("state:openrouter", JSON.stringify(stale));
   const catalogs = { openrouter: { models: [openrouterId], aliases: {} } };
-  const headers = { "Cache-Control": "no-store" };
+  const headers = { "Cache-Control": "No-Store" };
 
   assert.equal(request(chutesId, "openrouter", catalogs, headers).r.status, 200);
   assert.deepEqual(JSON.parse(shared.get("state:openrouter")), stale);
 
   shared.clear();
+  headers["Cache-Control"] = "no-store";
   assert.equal(request(openrouterId, "openrouter", catalogs, headers).r.status, 200);
   assert.equal(shared.size, 0);
 });

@@ -123,7 +123,7 @@ function getAllowlist(r, provider, callback) {
           var data = JSON.parse(reply.responseText);
           if (data && Array.isArray(data.models) && data.models.length > 0) {
             var cacheControl = reply.headersOut["Cache-Control"] || reply.headersOut["cache-control"] || "";
-            if (provider === "openrouter" && cacheControl.indexOf("no-store") !== -1) {
+            if (provider === "openrouter" && cacheControl.toLowerCase().indexOf("no-store") !== -1) {
               callback(data.models, state && state.aliases ? state.aliases : data.aliases);
               return;
             }
