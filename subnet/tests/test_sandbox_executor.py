@@ -263,3 +263,20 @@ class TestReadRequestLog:
             assert len(entries) == 2
         finally:
             os.unlink(path)
+
+
+def test_sums_counters_from_multiple_clients_for_one_problem(tmp_path):
+    """An agent that builds a new ProxyClient per call must not report one call per problem."""
+    from src.agent.proxy_client import InferenceStats
+
+    path = str(tmp_path / "inference_stats.jsonl")
+    for _ in range(3):  # three clients, each making two calls for the same problem
+        stats = InferenceStats(stats_file=path, problem_id="p1")
+        stats.record_success({"cost": 0.01, "prompt_tokens": 10, "completion_tokens": 2})
+        stats.record_success({"cost": 0.01, "prompt_tokens": 10, "completion_tokens": 2})
+
+    usage = read_inference_stats(path)["p1"]
+
+    assert usage["inference_total"] == 6
+    assert usage["prompt_tokens"] == 60
+    assert round(usage["inference_cost_usd"], 6) == 0.06

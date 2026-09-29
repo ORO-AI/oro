@@ -249,12 +249,13 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
                         if not isinstance(nested, dict):
                             continue
                         entry = {**nested, "problem_id": entry.get("problem_id")}
-                    key = (str(entry.get("problem_id")), source)
+                    # Each client writes cumulative totals; keep the latest per client.
+                    key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
                     latest_by_source[key] = entry
         except (FileNotFoundError, OSError):
             pass
     totals: dict[str, dict] = {}
-    for (problem_id, _source), entry in latest_by_source.items():
+    for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)
         if not numeric:
             continue

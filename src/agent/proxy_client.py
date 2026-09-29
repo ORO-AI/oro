@@ -6,6 +6,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode
@@ -133,6 +134,10 @@ class InferenceStats:
         self._served_models: dict[str, dict[str, int | float]] = {}
         self._stats_file = stats_file
         self._problem_id = problem_id
+        # Each ProxyClient owns one counter and writes its own running totals, so the
+        # reader must sum per instance. An agent that builds a client per call would
+        # otherwise report one call per problem.
+        self._instance_id = uuid.uuid4().hex
 
     @staticmethod
     def _model(value: object) -> str | None:
@@ -248,6 +253,7 @@ class InferenceStats:
                 problem_id = problem.get("problem_id") or problem.get("id", "unknown")
             entry = {
                 "problem_id": str(problem_id),
+                "instance_id": self._instance_id,
                 "inference_success": self._success,
                 "inference_failed": self._failed,
                 "inference_total": self._success + self._failed,
