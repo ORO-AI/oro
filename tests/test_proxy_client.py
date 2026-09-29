@@ -325,7 +325,7 @@ def test_non_json_200_on_every_attempt_fails_without_raising(client):
 
     assert verbose.data is None
     assert verbose.error == {
-        "kind": "invalid_body",
+        "kind": "malformed",
         "status": 200,
         "body": "\n         \n\n         \n",
     }
