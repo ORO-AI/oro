@@ -138,6 +138,7 @@ class InferenceStats:
         # reader must sum per instance. An agent that builds a client per call would
         # otherwise report one call per problem.
         self._instance_id = uuid.uuid4().hex
+        self._execution_id = os.environ.get("INFERENCE_STATS_EXECUTION_ID")
 
     @staticmethod
     def _model(value: object) -> str | None:
@@ -254,6 +255,7 @@ class InferenceStats:
             entry = {
                 "problem_id": str(problem_id),
                 "instance_id": self._instance_id,
+                "execution_id": self._execution_id,
                 "inference_success": self._success,
                 "inference_failed": self._failed,
                 "inference_total": self._success + self._failed,

@@ -82,6 +82,7 @@ class TestInferenceStats:
             assert lines[1]["inference_total"] == 2
             # One client keeps one instance id across its lines.
             assert len({line.pop("instance_id") for line in lines}) == 1
+            assert {line.pop("execution_id") for line in lines} == {None}
             assert lines[2] == {
                 "problem_id": "p-1",
                 "inference_success": 2,

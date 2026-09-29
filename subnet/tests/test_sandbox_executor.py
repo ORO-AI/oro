@@ -280,3 +280,18 @@ def test_sums_counters_from_multiple_clients_for_one_problem(tmp_path):
     assert usage["inference_total"] == 6
     assert usage["prompt_tokens"] == 60
     assert round(usage["inference_cost_usd"], 6) == 0.06
+
+
+def test_execution_id_keeps_repeated_runs_of_one_problem_separate(tmp_path, monkeypatch):
+    """/run and /run_matrix can run one problem repeatedly against the same stats file."""
+    from src.agent.proxy_client import InferenceStats
+
+    path = str(tmp_path / "inference_stats.jsonl")
+    for execution_id, calls in (("run-a", 2), ("run-b", 5)):
+        monkeypatch.setenv("INFERENCE_STATS_EXECUTION_ID", execution_id)
+        stats = InferenceStats(stats_file=path, problem_id="p1")
+        for _ in range(calls):
+            stats.record_success()
+
+    assert read_inference_stats(path, "run-a")["p1"]["inference_total"] == 2
+    assert read_inference_stats(path, "run-b")["p1"]["inference_total"] == 5
