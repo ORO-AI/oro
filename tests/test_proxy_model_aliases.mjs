@@ -15,7 +15,7 @@ const proxy = (await import(`data:text/javascript,${encodeURIComponent(script)}`
 const chutesId = "Qwen/Qwen3.8-27B-TEE";
 const openrouterId = "qwen/qwen3.8-27b";
 
-function request(model, provider, catalogs) {
+function request(model, provider, catalogs, modelHeaders = {}) {
   const calls = [];
   const r = {
     method: "POST",
@@ -29,7 +29,7 @@ function request(model, provider, catalogs) {
     subrequest(uri, options, callback) {
       calls.push({ uri, options });
       if (uri === "/_inference_grant") callback({ status: 204, headersOut: { "X-ORO-Run-ID": "test" } });
-      else if (uri === "/_backend_models") callback({ status: 200, responseText: JSON.stringify(catalogs[options.args.split("=")[1]]) });
+      else if (uri === "/_backend_models") callback({ status: 200, responseText: JSON.stringify(catalogs[options.args.split("=")[1]]), headersOut: modelHeaders });
       else callback({ status: 200, responseText: "{}", headersOut: {} });
     },
   };
@@ -66,6 +66,21 @@ test("OpenRouter rejects missing or unallowlisted aliases", () => {
   const catalogs = { openrouter: { models: [openrouterId], aliases: { [chutesId]: "other/model" } } };
   assert.equal(request(chutesId, "openrouter", catalogs).r.status, 403);
   assert.equal(request("unknown/model", "openrouter", catalogs).r.status, 403);
+});
+
+test("a no-store fallback serves native IDs without replacing cached aliases", () => {
+  shared.clear();
+  const stale = { allowlist: [openrouterId], aliases: { [chutesId]: openrouterId }, expiresAt: Date.now() - 1 };
+  shared.set("state:openrouter", JSON.stringify(stale));
+  const catalogs = { openrouter: { models: [openrouterId], aliases: {} } };
+  const headers = { "Cache-Control": "no-store" };
+
+  assert.equal(request(chutesId, "openrouter", catalogs, headers).r.status, 200);
+  assert.deepEqual(JSON.parse(shared.get("state:openrouter")), stale);
+
+  shared.clear();
+  assert.equal(request(openrouterId, "openrouter", catalogs, headers).r.status, 200);
+  assert.equal(shared.size, 0);
 });
 
 test("Chutes retains the shopper simulator's Mistral mapping", () => {
