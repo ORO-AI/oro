@@ -690,7 +690,13 @@ async def fetch_and_validate_pack(
             error = f"HTTPStatusError status={exc.response.status_code}"
         elif isinstance(exc, BackendError):
             error = f"BackendError status={exc.status_code}"
-        elif isinstance(exc, PackCompatibilityError):
+        elif isinstance(exc, PackValidationError):
+            # PackCompatibilityError is a PackValidationError subclass (version
+            # mismatches); this branch must come before this file's other
+            # PackValidationError raises fall through to the bare class-name
+            # "else" below and lose their detail message. Keep the literal
+            # "PackValidationError" label (not type(exc).__name__) here --
+            # existing log consumers/tests match on this exact prefix.
             error = f"PackValidationError: {exc}"
         else:
             error = type(exc).__name__
@@ -849,8 +855,14 @@ async def fetch_and_validate_race_pack(
             error = f"HTTPStatusError status={exc.response.status_code}"
         elif isinstance(exc, BackendError):
             error = f"BackendError status={exc.status_code}"
-        elif isinstance(exc, PackCompatibilityError):
-            # Now reachable: _require_race_metadata validates PACK_VERSION_IDENTITIES.
+        elif isinstance(exc, PackValidationError):
+            # PackCompatibilityError is a PackValidationError subclass;
+            # _require_race_metadata also validates PACK_VERSION_IDENTITIES,
+            # and this branch now also covers this function's other
+            # PackValidationError raises, which previously fell through to
+            # the bare class-name "else" below and lost their detail message.
+            # Keep the literal "PackValidationError" label (not
+            # type(exc).__name__) -- matches fetch_and_validate_pack above.
             error = f"PackValidationError: {exc}"
         else:
             error = type(exc).__name__

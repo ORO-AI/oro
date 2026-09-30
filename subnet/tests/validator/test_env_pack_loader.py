@@ -514,6 +514,38 @@ async def test_rejects_content_hash_mismatch_and_removes_scratch(
 
 
 @_run_async
+async def test_rejects_content_hash_mismatch_and_logs_detail(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A plain PackValidationError (not the PackCompatibilityError subclass
+    # tested by test_version_mismatch_skips_without_downloading above) must
+    # still log its detail message, not just the bare class name. This is
+    # the common case: every _require_metadata/_safe_extract/_download check
+    # other than a version mismatch raises PackValidationError directly.
+    artifact = _archive_bytes()
+    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    metadata = _metadata(pack_sha256, artifact, download_url_sha256="f" * 64)
+    with caplog.at_level("WARNING", logger=env_pack_loader.__name__):
+        async with _client(metadata, artifact) as client:
+            loaded = await fetch_and_validate_pack(
+                pack_sha256,
+                "https://backend.test",
+                object(),
+                scratch_root=tmp_path,
+                http_client=client,
+                backend_transport=client._transport,
+            )
+
+    assert loaded is None
+    assert "delivered archive sha256 mismatch" in caplog.text
+    assert "PackValidationError: delivered archive sha256 mismatch" in caplog.text
+    # The pre-fix bug logged just the bare class name followed directly by
+    # the "; metrics=" suffix, with no detail message in between.
+    assert "PackValidationError; metrics=" not in caplog.text
+
+
+@_run_async
 async def test_rejects_bad_tarball(tmp_path: Path) -> None:
     artifact = b"not a gzip tarball"
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
