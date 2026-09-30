@@ -6,6 +6,7 @@ import math
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode
@@ -133,6 +134,11 @@ class InferenceStats:
         self._served_models: dict[str, dict[str, int | float]] = {}
         self._stats_file = stats_file
         self._problem_id = problem_id
+        # Each ProxyClient owns one counter and writes its own running totals, so the
+        # reader must sum per instance. An agent that builds a client per call would
+        # otherwise report one call per problem.
+        self._instance_id = uuid.uuid4().hex
+        self._execution_id = os.environ.get("INFERENCE_STATS_EXECUTION_ID")
 
     @staticmethod
     def _model(value: object) -> str | None:
@@ -248,6 +254,8 @@ class InferenceStats:
                 problem_id = problem.get("problem_id") or problem.get("id", "unknown")
             entry = {
                 "problem_id": str(problem_id),
+                "instance_id": self._instance_id,
+                "execution_id": self._execution_id,
                 "inference_success": self._success,
                 "inference_failed": self._failed,
                 "inference_total": self._success + self._failed,
@@ -359,9 +367,13 @@ class ProxyClient:
         request_func: Callable[[], requests.Response],
         method: str,
         path: str,
-    ) -> Optional[requests.Response]:
+    ) -> tuple[Optional[requests.Response], Optional[Any]]:
         """
         Make an HTTP request with retry logic.
+
+        A 200 whose body is not JSON is retried like a 5xx: OpenRouter sends
+        the status and keep-alive whitespace before the completion, and can
+        end the body with nothing else.
 
         Rate-limited (429) responses use a separate retry counter with longer
         backoff (5s base) so transient capacity issues don't exhaust the normal
@@ -378,7 +390,7 @@ class ProxyClient:
             path: Request path (e.g., "/inference/chat"), recorded per attempt
 
         Returns:
-            Response object if successful, None otherwise
+            The last response (or None) and its parsed JSON body when successful
         """
         operation_name = f"{method} {path}"
         # Track the last response we saw across retries. Returned to the
@@ -394,15 +406,24 @@ class ProxyClient:
                 response = request_func()
                 status_code = response.status_code
                 if response.status_code == 200:
-                    self.request_log.record_attempt(
-                        method,
-                        path,
-                        i,
-                        (time.monotonic() - attempt_t0) * 1000,
-                        status_code=status_code,
-                    )
-                    return response
-                if response.status_code == 429:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        error_class = "InvalidJSONBody"
+                        logger.warning(
+                            f"{operation_name} returned a non-JSON body, "
+                            f"retry {i + 1}/{self.max_retries}"
+                        )
+                    else:
+                        self.request_log.record_attempt(
+                            method,
+                            path,
+                            i,
+                            (time.monotonic() - attempt_t0) * 1000,
+                            status_code=status_code,
+                        )
+                        return response, data
+                elif response.status_code == 429:
                     logger.warning(
                         f"{operation_name} rate limited (429), "
                         f"retry {i + 1}/{self.max_retries}"
@@ -437,7 +458,7 @@ class ProxyClient:
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
-        return response
+        return response, None
 
     def get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make a GET request to the proxy."""
@@ -447,9 +468,8 @@ class ProxyClient:
             return requests.get(url, timeout=self.timeout)
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "GET", path)
+        response, result = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
-        result = response.json() if response and response.status_code == 200 else None
 
         error = self._full_error(response) if result is None else None
         self.request_log.record(
@@ -478,12 +498,8 @@ class ProxyClient:
             return response
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "POST", path)
+        response, result = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
-
-        result = None
-        if response and response.status_code == 200:
-            result = response.json()
 
         self._record_inference_result(path, result, json_data)
 
@@ -525,12 +541,9 @@ class ProxyClient:
             return response
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "POST", path)
+        response, data = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
 
-        data: Optional[Dict] = None
-        if response is not None and response.status_code == 200:
-            data = response.json()
         self._record_inference_result(path, data, json_data)
 
         error: Optional[Dict[str, Any]] = None
@@ -596,6 +609,8 @@ class ProxyClient:
 
         - ``kind="network"`` — every attempt raised (DNS/connect/timeout).
         - ``kind="upstream"`` — got an HTTP response, status != 200.
+        - ``kind="malformed"`` — status 200 but the body was never JSON
+          (e.g. only keep-alive whitespace) on every attempt.
         """
         if response is None:
             return {
@@ -608,7 +623,7 @@ class ProxyClient:
         except Exception:  # noqa: BLE001 — best effort; body must not throw
             body_text = "<unreadable body>"
         return {
-            "kind": "upstream",
+            "kind": "malformed" if response.status_code == 200 else "upstream",
             "status": response.status_code,
             "body": body_text[:800],
         }

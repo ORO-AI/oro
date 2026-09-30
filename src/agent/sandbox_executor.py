@@ -10,6 +10,7 @@ import os
 import queue
 import sys
 import time
+import uuid
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
@@ -226,8 +227,14 @@ def _merge_model_inference_counters(total: dict, entry: dict) -> None:
                 model_total[key] = model_total.get(key, 0) + value
 
 
-def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
-    """Merge latest cumulative counters from one or more isolated files."""
+def read_inference_stats(
+    path: str | list[str], execution_id: str | None = None
+) -> dict[str, dict]:
+    """Merge latest cumulative counters from one or more isolated files.
+
+    With ``execution_id``, only lines written by that execution count, so repeated
+    runs of one problem that share a stats file stay separate.
+    """
 
     latest_by_source = {}
     paths = [path] if isinstance(path, str) else path
@@ -249,12 +256,15 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
                         if not isinstance(nested, dict):
                             continue
                         entry = {**nested, "problem_id": entry.get("problem_id")}
-                    key = (str(entry.get("problem_id")), source)
+                    if execution_id is not None and entry.get("execution_id") != execution_id:
+                        continue
+                    # Each client writes cumulative totals; keep the latest per client.
+                    key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
                     latest_by_source[key] = entry
         except (FileNotFoundError, OSError):
             pass
     totals: dict[str, dict] = {}
-    for (problem_id, _source), entry in latest_by_source.items():
+    for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)
         if not numeric:
             continue
@@ -321,6 +331,7 @@ def _run_in_process(
     result_queue,
     stats_file: Optional[str] = None,
     request_log_file: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> None:
     """Target function executed in a child process.
 
@@ -330,6 +341,8 @@ def _run_in_process(
     """
     if stats_file:
         os.environ["INFERENCE_STATS_FILE"] = stats_file
+    if execution_id:
+        os.environ["INFERENCE_STATS_EXECUTION_ID"] = execution_id
     if request_log_file:
         os.environ["REQUEST_LOG_FILE"] = request_log_file
     os.environ["PROBLEM_DATA"] = json.dumps(problem)
@@ -370,11 +383,12 @@ def execute_single_problem(
     output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
     output_dir = os.path.dirname(output_file) if output_file else "/tmp"
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
+    execution_id = uuid.uuid4().hex  # scopes this run's lines in the shared stats file
     request_log_file = os.path.join(output_dir, f"request_log_{problem_id}.jsonl")
     result_queue: multiprocessing.Queue = _MP_CTX.Queue()
     process = _MP_CTX.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue, stats_file, request_log_file),
+        args=(problem, agent_file, result_queue, stats_file, request_log_file, execution_id),
     )
     process.start()
     deadline = time.monotonic() + timeout
@@ -404,7 +418,7 @@ def execute_single_problem(
             process.kill()
             process.join()
 
-    inference_usage = read_inference_stats(stats_file).get(str(problem_id))
+    inference_usage = read_inference_stats(stats_file, execution_id).get(str(problem_id))
     include_private_usage = problem.get("category") == "generated_environment"
     inf_failures = int((inference_usage or {}).get("inference_failed", 0))
     inf_total = int((inference_usage or {}).get("inference_total", 0))

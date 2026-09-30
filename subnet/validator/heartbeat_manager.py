@@ -22,7 +22,7 @@ class HeartbeatManager:
         self,
         backend_client: BackendClient,
         eval_run_id: UUID,
-        interval_seconds: int = 30,
+        interval_seconds: int,
         service_versions: dict[str, str] | None = None,
         resource_metrics_provider: Optional[Callable[[], ResourceMetrics]] = None,
     ):

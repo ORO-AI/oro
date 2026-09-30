@@ -287,3 +287,45 @@ def test_post_still_returns_optional_dict_for_existing_callers(client):
     ):
         result = client.post("/inference/chat", json_data={"messages": []})
     assert result is None
+
+
+def _keepalive_only_response():
+    """OpenRouter's 200 whose body ended after its keep-alive whitespace."""
+    r = requests.Response()
+    r.status_code = 200
+    r._content = b"\n         \n\n         \n"
+    return r
+
+
+def test_post_retries_200_with_non_json_body(client, log_path):
+    responses = [_keepalive_only_response(), _ok_response({"choices": []})]
+    with patch("src.agent.proxy_client.requests.post", side_effect=responses):
+        result = client.post("/inference/chat/completions", json_data={})
+
+    assert result == {"choices": []}
+    attempts = [e for e in _read_jsonl(log_path) if e["kind"] == "attempt"]
+    assert [(a["status_code"], a.get("error_class")) for a in attempts] == [
+        (200, "InvalidJSONBody"),
+        (200, None),
+    ]
+
+
+def test_non_json_200_on_every_attempt_fails_without_raising(client):
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        side_effect=lambda *a, **k: _keepalive_only_response(),
+    ):
+        assert client.post("/inference/chat/completions", json_data={}) is None
+        verbose = client.post_verbose("/inference/chat/completions", json_data={})
+    with patch(
+        "src.agent.proxy_client.requests.get",
+        side_effect=lambda *a, **k: _keepalive_only_response(),
+    ):
+        assert client.get("/search/find_product") is None
+
+    assert verbose.data is None
+    assert verbose.error == {
+        "kind": "malformed",
+        "status": 200,
+        "body": "\n         \n\n         \n",
+    }
