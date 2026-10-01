@@ -105,6 +105,11 @@ class TestExecuteSingleProblemStatus:
             agent_file=str(agent_file),
         )
         assert long_id_result.success and len(long_id_result.proxy_calls or []) == 1
+        slash_id_result = sandbox_executor.execute_single_problem(
+            {**problem, "problem_id": "folder/task", "log_call": True},
+            agent_file=str(agent_file),
+        )
+        assert slash_id_result.success and len(slash_id_result.proxy_calls or []) == 1
 
         monkeypatch.delenv("SANDBOX_OUTPUT_FILE", raising=False)
         with patch.object(
