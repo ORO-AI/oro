@@ -161,7 +161,7 @@ def test_console_report_names_each_failure_category() -> None:
         "categories": ["needs_not_found", "process_issue"],
     }
     summary["tasks"] = [task, _task("TF8-composed-2", "composed", 1.0)]
-    failed, passed = (l for l in _render(summary).splitlines() if "TF8-composed-" in l)
+    failed, passed = (line for line in _render(summary).splitlines() if "TF8-composed-" in line)
     assert failed.endswith("0.00  needs_not_found (needs_not_found, process_issue)")
     assert passed.endswith("1.00")
 
