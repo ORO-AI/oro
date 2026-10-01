@@ -98,7 +98,7 @@ class TestExecuteSingleProblemStatus:
             result.success and len(result.proxy_calls or []) == 1
             for result in concurrent
         )
-        assert len(list(tmp_path.glob("request_log_*.jsonl"))) == 3
+        assert len(list(tmp_path.glob("request_log_repeated_*.jsonl"))) == 3
 
         monkeypatch.delenv("SANDBOX_OUTPUT_FILE", raising=False)
         with patch.object(
