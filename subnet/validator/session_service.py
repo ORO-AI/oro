@@ -8,7 +8,8 @@ from hmac import compare_digest
 from typing import TYPE_CHECKING, Any
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from .session_errors import (
     AgentFaultError,
@@ -117,12 +118,16 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
         headers = {**(headers or {}), "X-ORO-Caller": "validator" if validator else "agent"}
         return Response(status_code=204, headers=headers)
 
+    @app.middleware("http")
+    async def bounded_body(request: Request, call_next: Any) -> Response:
+        # Before the body is read: a call must state its size, and stay under the cap.
+        size = request.headers.get("content-length", "")
+        if request.method == "POST" and not (size.isdigit() and int(size) <= MAX_CALL_BYTES):
+            return JSONResponse({"detail": {"error": "call body too large"}}, status_code=413)
+        return await call_next(request)
+
     @app.post("/v1/session/call")
-    def call(
-        envelope: dict[str, Any], content_length: int = Header(default=0)
-    ) -> dict[str, Any]:
-        if content_length > MAX_CALL_BYTES:
-            raise HTTPException(status_code=413, detail={"error": "call body too large"})
+    def call(envelope: dict[str, Any]) -> dict[str, Any]:
         try:
             return runtime.call(envelope)
         except HarnessTimeoutError as exc:

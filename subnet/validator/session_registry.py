@@ -9,6 +9,7 @@ import hashlib
 import json
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
@@ -115,10 +116,12 @@ def _deliver(
 
 def _environment_fault(exc: Exception) -> bool:
     """Whether a tool call failed on the environment, not on the agent's input: the search
-    server gave no response or timed out (an ``OSError``), or answered 429 or 5xx."""
+    server gave no response or timed out (an ``OSError``), answered 408, 429 or 5xx, or sent
+    a response its client rejected."""
     if isinstance(exc, HTTPError):
-        return exc.code == 429 or exc.code >= 500
-    return isinstance(exc, OSError)
+        return exc.code in (408, 429) or exc.code >= 500
+    frames = traceback.extract_tb(exc.__traceback__)
+    return isinstance(exc, OSError) or frames[-1].filename.endswith("search_client.py")
 
 
 def _strip_undeclared_arguments(

@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION
 from oro_env_runtime.schema import Event, LedgerEntry
+from oro_env_runtime.search_client import SearchServerClient
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
 from validator.session_registry import (
@@ -362,15 +363,21 @@ def test_a_provider_refusal_of_the_agents_content_is_agent_error(
         (TypeError("unhashable type: 'list'"), "agent_error"),
         (HTTPError("http://search", 503, "Unavailable", None, None), "environment_error"),
         (HTTPError("http://search", 429, "Too Many", None, None), "environment_error"),
+        (HTTPError("http://search", 408, "Timeout", None, None), "environment_error"),
         (URLError("connection refused"), "environment_error"),
         (TimeoutError("timed out"), "environment_error"),
+        (None, "environment_error"),
     ],
 )
 def test_a_tool_call_failure_is_the_agents_unless_the_environment_failed(
-    registry: SessionRegistry, error: Exception, outcome: str
+    registry: SessionRegistry, error: Exception | None, outcome: str
 ) -> None:
+    def rejected_response(_action: dict) -> None:  # a 200 body the search client rejects
+        SearchServerClient._records({"not": "a list"})
+
     _start(registry)
-    registry._sessions["session-1"].session.step = MagicMock(side_effect=error)
+    session = registry._sessions["session-1"].session
+    session.step = MagicMock(side_effect=error or rejected_response)
     runtime = SessionRuntime()
     runtime.install(registry)
     response = TestClient(create_session_app(runtime)).post(
@@ -383,17 +390,20 @@ def test_a_tool_call_failure_is_the_agents_unless_the_environment_failed(
     assert result["outcome"] == outcome and result["environment_error"] is infra
 
 
-def test_an_oversized_call_is_refused_before_it_reaches_a_session(
+def test_an_oversized_or_unsized_call_is_refused_before_it_reaches_a_session(
     registry: SessionRegistry,
 ) -> None:
     runtime = SessionRuntime()
     runtime.install(registry)
     _start(registry)
+    client = TestClient(create_session_app(runtime))
     action = {"name": "message", "args": {"content": "x" * MAX_CALL_BYTES}}
-    response = TestClient(create_session_app(runtime)).post(
-        "/v1/session/call", json=_call_envelope(registry, action=action)
-    )
+    response = client.post("/v1/session/call", json=_call_envelope(registry, action=action))
     assert response.status_code == 413
+    chunked = client.post(
+        "/v1/session/call", content=iter([json.dumps(_call_envelope(registry)).encode()])
+    )
+    assert chunked.status_code == 413
     assert registry._sessions["session-1"].session.step_count == 0
 
 
