@@ -388,7 +388,7 @@ def execute_single_problem(
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
     execution_id = uuid.uuid4().hex
     log_label = re.sub(r"[^A-Za-z0-9_-]", "_", problem_id[:80])
-    log_key = hashlib.sha256(problem_id.encode()).hexdigest()[:8]
+    log_key = hashlib.sha256(problem_id.encode(errors="surrogatepass")).hexdigest()[:8]
     request_log_file = os.path.join(
         output_dir, f"request_log_{log_label}_{log_key}_{execution_id}.jsonl"
     )
