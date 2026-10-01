@@ -1,6 +1,8 @@
 """Envelope format tests for ORO-907 sandbox->validator IPC."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from src.agent import sandbox_executor
@@ -53,6 +55,62 @@ class TestExecutionResultStatus:
 
 
 class TestExecuteSingleProblemStatus:
+    def test_proxy_calls_do_not_carry_over_between_runs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+        agent_file = tmp_path / "agent.py"
+        agent_file.write_text(
+            "from src.agent.proxy_client import RequestLog\n"
+            "import os\n"
+            "def agent_main(problem):\n"
+            "    if problem.get('log_call'):\n"
+            "        RequestLog(os.environ['REQUEST_LOG_FILE']).record('GET', '/search')\n"
+            "    return [{'role': 'assistant', 'content': 'done'}]\n"
+        )
+        problem = {"query": "q", "problem_id": "repeated"}
+
+        first = sandbox_executor.execute_single_problem(
+            {**problem, "log_call": True}, agent_file=str(agent_file)
+        )
+        second = sandbox_executor.execute_single_problem(
+            {**problem, "log_call": False}, agent_file=str(agent_file)
+        )
+
+        assert first.success and second.success
+        assert len(first.proxy_calls or []) == 1
+        assert second.proxy_calls is None
+        first_step = sandbox_executor.build_result_envelope(first)["dialogue"][0]
+        second_step = sandbox_executor.build_result_envelope(second)["dialogue"][0]
+        assert len(first_step["extra_info"]["proxy_calls"]) == 1
+        assert "proxy_calls" not in second_step.get("extra_info", {})
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            concurrent = list(
+                pool.map(
+                    lambda _: sandbox_executor.execute_single_problem(
+                        {**problem, "log_call": True}, agent_file=str(agent_file)
+                    ),
+                    range(2),
+                )
+            )
+        assert all(
+            result.success and len(result.proxy_calls or []) == 1
+            for result in concurrent
+        )
+        assert len(list(tmp_path.glob("request_log_*.jsonl"))) == 3
+
+        monkeypatch.delenv("SANDBOX_OUTPUT_FILE", raising=False)
+        with patch.object(
+            sandbox_executor,
+            "_read_request_log",
+            wraps=sandbox_executor._read_request_log,
+        ) as read_log:
+            result = sandbox_executor.execute_single_problem(
+                {**problem, "log_call": True}, agent_file=str(agent_file)
+            )
+
+        assert result.success and len(result.proxy_calls or []) == 1
+        assert not Path(read_log.call_args.args[0]).exists()
+
     def test_timed_out_when_process_alive_after_join(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
 
@@ -91,7 +149,7 @@ class TestExecuteSingleProblemStatus:
         self, tmp_path, monkeypatch
     ):
         """Bundled local suites may omit problem_id/id; they still need
-        per-problem sidecar files so proxy logs do not bleed between problems."""
+        stable problem identity even when the suite omits an explicit id."""
         monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
 
         mock_proc = MagicMock()

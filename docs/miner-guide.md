@@ -178,10 +178,10 @@ Each run directory contains:
 
 The sandbox mounts evaluator artifacts read-only and writes only to `sandbox/`.
 Scores and task diagnostics come from runtime receipts. Self-reported timings,
-inference failures, and request logs remain in `sandbox/` for inspection and do
-not determine the summary. The output reader rejects symlinks, hard-linked or
-non-regular files, non-object rows, and files larger than 128 MiB. Interrupted
-runs retain finalized runtime receipts, including partial task outcomes.
+inference failures, and per-execution request logs remain in `sandbox/` for
+inspection and do not determine the summary. The output reader rejects symlinks,
+hard-linked or non-regular files, non-object rows, and files larger than 128 MiB.
+Interrupted runs retain finalized runtime receipts, including partial task outcomes.
 
 The printed `/app/logs/` path maps to `./logs/` on your host. Inspect the summary:
 

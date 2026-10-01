@@ -16,6 +16,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 
@@ -383,8 +384,8 @@ def execute_single_problem(
     output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
     output_dir = os.path.dirname(output_file) if output_file else "/tmp"
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
-    execution_id = uuid.uuid4().hex  # scopes this run's lines in the shared stats file
-    request_log_file = os.path.join(output_dir, f"request_log_{problem_id}.jsonl")
+    execution_id = uuid.uuid4().hex
+    request_log_file = os.path.join(output_dir, f"request_log_{execution_id}.jsonl")
     result_queue: multiprocessing.Queue = _MP_CTX.Queue()
     process = _MP_CTX.Process(
         target=_run_in_process,
@@ -423,6 +424,8 @@ def execute_single_problem(
     inf_failures = int((inference_usage or {}).get("inference_failed", 0))
     inf_total = int((inference_usage or {}).get("inference_total", 0))
     proxy_calls = _read_request_log(request_log_file)
+    if not output_file:
+        Path(request_log_file).unlink(missing_ok=True)
 
     if timed_out:
         result_queue.close()
@@ -621,8 +624,6 @@ def execute_problems_parallel(
 
     fout = None
     if output_file:
-        from pathlib import Path
-
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
         fout = open(output_file, "a", encoding="utf-8")
 
