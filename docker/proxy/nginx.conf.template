@@ -135,6 +135,7 @@ http {
             proxy_pass_request_headers off;
             proxy_pass_request_body off;
             proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator $http_x_oro_validator;
             proxy_set_header Content-Length "0";
             proxy_connect_timeout 5s;
             proxy_read_timeout 5s;
@@ -193,6 +194,7 @@ http {
 
             # Forward miner's auth token (set by ProxyClient from INFERENCE_ACCESS_TOKEN)
             proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
             proxy_set_header Host ${CHUTES_HOST};
             proxy_set_header X-Identifier "orosn15";
             proxy_set_header X-Real-IP $remote_addr;
@@ -218,7 +220,7 @@ http {
             resolver ${PROXY_RESOLVER} ipv6=off;
             set $openrouter_upstream https://${OPENROUTER_HOST};
 
-            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
+            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API.
             rewrite ^/_openrouter_proxy/(.*) /api/v1/$1 break;
             proxy_pass $openrouter_upstream;
             proxy_ssl_server_name on;
@@ -226,6 +228,7 @@ http {
             # Forward miner's auth token (set by ProxyClient from
             # INFERENCE_ACCESS_TOKEN, populated per claim_work).
             proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
             proxy_set_header Host ${OPENROUTER_HOST};
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -233,6 +236,26 @@ http {
             # Prevent gzip double-encoding: tell upstream not to compress
             proxy_set_header Accept-Encoding identity;
 
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
+        # The validator's typed decisions (the user simulator's disclosure
+        # reader), outside /api/v1. Its own location with a fixed upstream
+        # path, so no agent route maps onto it; validate_model.js sends only
+        # the validator's calls here.
+        location = /_openrouter_decisions {
+            internal;
+            resolver ${PROXY_RESOLVER} ipv6=off;
+            set $openrouter_upstream https://${OPENROUTER_HOST};
+            rewrite ^ /api/alpha/decisions? break;
+            proxy_pass $openrouter_upstream;
+            proxy_ssl_server_name on;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
+            proxy_set_header Host ${OPENROUTER_HOST};
+            proxy_set_header Accept-Encoding identity;
             proxy_connect_timeout 300s;
             proxy_send_timeout 300s;
             proxy_read_timeout 300s;

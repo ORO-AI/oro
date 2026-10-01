@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import secrets
 import time
 from typing import Any
 
 from src.agent.proxy_client import ProxyClient
+
+# Marks the validator's own proxy calls (the disclosure reader's decisions), which the
+# agent sandbox may not make. Minted per process and never given to the sandbox: the
+# agent holds the same provider key, so the key alone cannot tell the two apart.
+VALIDATOR_CALLER_HEADER = "X-ORO-Validator"
+VALIDATOR_CALLER_SECRET = secrets.token_urlsafe(32)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +79,11 @@ class SimulatorCompletion:
     ) -> None:
         if not access_token:
             raise ValueError("miner inference access token is required")
+        # Only OpenRouter serves the decisions endpoint (Jev). On another provider
+        # the disclosure reader sees no ``decide`` and reads with the chat model;
+        # a decisions error there would otherwise count as an answer (no reveal).
+        if not access_token.startswith("sk-or-"):
+            self.decide = None
         self._client = client or ProxyClient(
             proxy_url=proxy_url,
             api_key=access_token,
@@ -80,6 +92,7 @@ class SimulatorCompletion:
             inference_stats_file=inference_stats_file,
             inference_stats_problem_id=episode_id,
         )
+        self._client.headers = {VALIDATOR_CALLER_HEADER: VALIDATOR_CALLER_SECRET}
 
     async def __call__(
         self,
@@ -185,6 +198,29 @@ class SimulatorCompletion:
                 backoff_s,
             )
             await asyncio.sleep(backoff_s)
+
+    async def decide(
+        self, model: str, state: dict[str, Any], questions: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Typed answers from a decisions model, on the same run key.
+
+        One attempt: the disclosure reader falls back to the chat model when
+        this raises, so a retry here would only spend the simulator's budget.
+        """
+        result = self._client.post_verbose(
+            "/inference/alpha/decisions",
+            json_data={"model": model, "state": state, "questions": questions},
+        )
+        if isinstance(result.data, dict):
+            return result.data
+        error = result.error or {}
+        # No response is the one failure the reader treats as an outage (the fallback
+        # reads); a status outside 429/502-504 or a malformed answer reads as unsure.
+        if error.get("kind") == "network":
+            raise ConnectionError(error.get("body") or "no response")
+        raise InferenceProviderError(
+            error.get("status"), (error.get("body") or "").strip()
+        )
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

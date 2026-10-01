@@ -8,6 +8,8 @@ import pytest
 from src.agent.proxy_client import PostResult
 from validator import simulator_completion
 from validator.simulator_completion import (
+    VALIDATOR_CALLER_HEADER,
+    VALIDATOR_CALLER_SECRET,
     InferenceProviderError,
     SimulatorCompletion,
 )
@@ -70,6 +72,52 @@ def test_forwards_user_simulator_request_through_inference_proxy() -> None:
         "tool_calls": [],
         "finish_reason": "stop",
     }
+
+
+def test_decide_posts_to_decisions_endpoint_once() -> None:
+    client = MagicMock()
+    answers = {"model": "typesafe/jev-1.13", "answers": {"all": {"noul": 0.1}}}
+    client.post_verbose.return_value = _ok(answers)
+    completion = SimulatorCompletion("sk-or-miner-token", client=client)
+    questions = {"all": {"type": "noul", "instructions": "Asks for everything?"}}
+
+    result = asyncio.run(
+        completion.decide("typesafe/jev-1.13", {"message": "hi"}, questions)
+    )
+
+    client.post_verbose.assert_called_once_with(
+        "/inference/alpha/decisions",
+        json_data={
+            "model": "typesafe/jev-1.13",
+            "state": {"message": "hi"},
+            "questions": questions,
+        },
+    )
+    assert result == answers
+    # The proxy lets only the validator's own calls read decisions.
+    assert client.headers == {VALIDATOR_CALLER_HEADER: VALIDATOR_CALLER_SECRET}
+
+    client.post_verbose.reset_mock()
+    client.post_verbose.return_value = _err(403, "model not allowed")
+    with pytest.raises(InferenceProviderError) as exc:
+        asyncio.run(completion.decide("typesafe/jev-1.13", {}, questions))
+    assert (exc.value.status, exc.value.body) == (403, "model not allowed")
+    client.post_verbose.assert_called_once()
+
+    # No response is a transport failure (an outage); a malformed answer carries no status.
+    client.post_verbose.return_value = _err(None, "no response", kind="network")
+    with pytest.raises(ConnectionError):
+        asyncio.run(completion.decide("typesafe/jev-1.13", {}, questions))
+    client.post_verbose.return_value = PostResult(data=["not", "an", "object"], error=None)
+    with pytest.raises(InferenceProviderError) as exc:
+        asyncio.run(completion.decide("typesafe/jev-1.13", {}, questions))
+    assert exc.value.status is None
+
+
+def test_a_run_on_another_provider_offers_no_decisions() -> None:
+    """Chutes serves no Jev: the disclosure reader must see no ``decide`` at all."""
+    completion = SimulatorCompletion("cpk_chutes-token", client=MagicMock())
+    assert not getattr(completion, "decide", None)
 
 
 def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:

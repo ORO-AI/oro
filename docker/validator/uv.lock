@@ -1268,36 +1268,16 @@ wheels = [
 
 [[package]]
 name = "oro-env-runtime"
-version = "1.0.6"
+version = "3.0.2"
 source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform != 'darwin'",
-    "sys_platform == 'darwin'",
-]
 dependencies = [
+    { name = "httpx" },
     { name = "iso4217" },
     { name = "openai" },
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b9/a5/000423509c7436449b59abaf343bb42d36db2114c5578221db8dd683aabd/oro_env_runtime-1.0.6-py3-none-any.whl", hash = "sha256:f572e92cca21cf592fd7f43a82c17b8bdde6df8059e645271610e23b676046fb", size = 178728, upload-time = "2026-09-15T05:18:00.479Z" },
-]
-
-[[package]]
-name = "oro-env-runtime"
-version = "2.0.1"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "sys_platform != 'darwin'",
-    "sys_platform == 'darwin'",
-]
-dependencies = [
-    { name = "iso4217" },
-    { name = "openai" },
-    { name = "pydantic" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ad/e5/bd444245f1d3dbadb117327c3bd984032cb72578ab3c5ab97326bc5ad6f7/oro_env_runtime-2.0.1-py3-none-any.whl", hash = "sha256:fc8ff284860fb8b2fd80cd58edc735489297472564b29b5976f4f0f65bfa18f5", size = 156758, upload-time = "2026-09-20T18:37:36.234Z" },
+    { url = "https://files.pythonhosted.org/packages/54/1a/730ee1b4be76b9364f28ece77b686097c4f7fd237d613faf98d49c42cc57/oro_env_runtime-3.0.2-py3-none-any.whl", hash = "sha256:1b1e19608b95504b6a588bd048de2283dd8291225ec42453f2a80de32e63da65", size = 76272, upload-time = "2026-10-01T17:58:12.213Z" },
 ]
 
 [[package]]
@@ -1342,10 +1322,10 @@ dependencies = [
 
 [package.dev-dependencies]
 local-test = [
-    { name = "oro-env-runtime", version = "1.0.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "oro-env-runtime" },
 ]
 validator = [
-    { name = "oro-env-runtime", version = "2.0.1", source = { registry = "https://pypi.org/simple" } },
+    { name = "oro-env-runtime" },
 ]
 
 [package.metadata]
@@ -1370,8 +1350,8 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-local-test = [{ name = "oro-env-runtime", specifier = "==1.0.6" }]
-validator = [{ name = "oro-env-runtime", specifier = "==2.0.1" }]
+local-test = [{ name = "oro-env-runtime", specifier = "==3.0.2" }]
+validator = [{ name = "oro-env-runtime", specifier = "==3.0.2" }]
 
 [[package]]
 name = "packaging"

@@ -3,6 +3,7 @@ Integration tests for sandbox network isolation.
 Tests that sandbox containers are properly isolated and can only communicate through the proxy.
 """
 
+import http.client
 import json
 import os
 import subprocess
@@ -301,6 +302,59 @@ class TestSandboxIsolation:
         )
         assert ",+more" in overflow_line
         assert "tool_fn=32 tool_server=0 tool_other=0 tool_more=1" in overflow_line
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # The validator's decisions route, as the agent, and every spelling of it.
+            "/inference/alpha/decisions",
+            "/inference/alpha/decisions%3F",
+            "/inference/alpha/decisions%3Fx=1",
+            "/inference/alpha/decisions%253F",
+            "/inference/alpha%2Fdecisions",
+            "/inference/alpha%252Fdecisions",
+            "/inference/alpha/decisions/",
+            "/inference/Alpha/Decisions",
+            "/inference/alpha/decisions;x",
+            "/inference/alpha/decisions%23",
+            "/inference/chat/../alpha/decisions",
+            # Anything but the chat completions an agent needs.
+            "/inference/key",
+            "/inference/key%3F",
+            "/inference/completions",
+            "/inference/embeddings",
+            "/inference/chat/completions/",
+            "/inference/CHAT/completions",
+            "/inference/chat/completions%3F",
+            "/inference/models",
+        ],
+    )
+    def test_inference_posts_only_to_chat_completions(self, active_inference_grant, path):
+        """An agent POSTs only the exact chat completions route; nothing it can spell reaches
+        another upstream route (403 before the body is read, where the chat route answers 400
+        for this bodiless request)."""
+        conn = http.client.HTTPConnection("127.0.0.1", PROXY_PORT, timeout=5)
+        conn.request(
+            "POST",
+            path,
+            body="{}",
+            headers={
+                "Authorization": "Bearer sk-or-expected",
+                "Content-Type": "application/json",
+            },
+        )
+        response = conn.getresponse()
+        assert (response.status, json.loads(response.read())) == (
+            403,
+            {"error": "forbidden"},
+        ), path
+        chat = requests.post(
+            f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions",
+            headers={"Authorization": "Bearer sk-or-expected"},
+            json={},
+            timeout=5,
+        )
+        assert chat.status_code == 400 and "model" in chat.json()["error"]
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""

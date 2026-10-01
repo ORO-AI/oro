@@ -15,15 +15,15 @@
 
 ---
 
-ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that search products, compare prices, and make purchase decisions. Validators run those agents in sandboxed Docker environments against [ShoppingBench](https://arxiv.org/abs/2508.04266) — a benchmark with 2.5 million real products. The best agents earn emissions.
+ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they search a frozen product catalog, ask the shopper about needs the request leaves out, keep up with price, stock and shopper changes, and place one order. Validators run those agents in sandboxed Docker environments against ORO Bench, a set of generated shopping tasks sealed in versioned EnvPacks. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
 
 ## How It Works
 
 <img src="img/how-it-works.svg" alt="ORO subnet architecture — Miner submits agent, Backend orchestrates, Validator evaluates in Docker sandbox, Bittensor distributes emissions" />
 
-1. **Miners** write Python agents that solve shopping problems — finding products, comparing options, applying vouchers
-2. **Validators** run each agent in an isolated Docker sandbox against the ShoppingBench problem suite
-3. **Scoring** evaluates ground truth accuracy, format compliance, and field matching
+1. **Miners** write Python agents that drive a shopping session through the task's tools: search, read listings, message the shopper, and order
+2. **Validators** run each agent in an isolated Docker sandbox against the active ORO Bench qualifying or race tasks
+3. **Scoring** grades each order against the task's sealed requirements and obligations: a miss scores 0, and a passing order earns up to 1.0, less for extra questions or a less-than-best pick ([scoring](https://docs.oroagents.com/docs/miners/scoring))
 4. **The best agent** earns top position on the [leaderboard](https://oroagents.com) and receives TAO emissions proportional to validator stake
 5. **Challengers** must exceed a decaying score threshold to claim the top spot — preventing trivial improvements from churning the leader
 
@@ -37,10 +37,11 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 
 ### Test generated environments locally
 
-Local testing validates the bundled 30-task qualifying EnvPack, then runs all
-five tasks from each of the six included families through the
-generated runtime and family verifiers. The exact release pack is included at
-`data/local-test/env-pack.tar.gz` using Git LFS.
+Local testing validates the bundled practice EnvPack, then runs its first five
+problems through the generated runtime and verifier. The pack is a sanitized
+qualifying delivery with no race rows, included at
+`data/local-test/env-pack.tar.gz` using Git LFS. Network qualifying runs the
+active suite's full roster.
 
 Keep your inference credentials in `.env`, with `INFERENCE_PROVIDER` selecting
 between keys when both are present. `SANDBOX_MODEL` optionally overrides the
@@ -51,7 +52,8 @@ live Backend allowlist. Run from the repository root:
 docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-The command prints per-family rewards, the models in play, the aggregate, and
+The command prints each problem's reward and, for a failed or partial one, why
+(its failure categories), the models in play, the aggregate, and
 an artifact directory under `logs/environment-runs/` that includes a
 self-contained `trajectories.html` for stepping through every episode. Generated agents use the environment's dynamic
 tools and `policy_view`; `src/agent/environment_agent.py` is the reference.

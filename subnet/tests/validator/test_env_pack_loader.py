@@ -376,15 +376,7 @@ async def test_loads_generator_compatibility_fixture_and_executes(
     archive_path = compiled_epoch.parent / f"{compiled_epoch.name}.tar.gz"
     artifact = archive_path.read_bytes()
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
-    family_counts = {
-        "intent_decomposition": 2,
-        "retrieval_recall": 2,
-        "constraint_satisfaction": 2,
-        "preference_reasoning": 2,
-        "ranking": 2,
-        "recovery": 2,
-        "justification": 2,
-    }
+    family_counts = {"composed": 14}
     metadata = _metadata(
         pack_sha256,
         artifact,
@@ -445,8 +437,7 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
         .splitlines()
         if line.strip()
     ]
-    selected_by_family = {row["task"]["family"]: row["task_id"] for row in source_rows}
-    selected_ids = list(selected_by_family.values())[:3]
+    selected_ids = [row["task_id"] for row in source_rows[:3]]
     delivery = build_delivery_subset_archive(
         source,
         selected_ids,

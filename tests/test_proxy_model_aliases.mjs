@@ -15,11 +15,11 @@ const proxy = (await import(`data:text/javascript,${encodeURIComponent(script)}`
 const chutesId = "Qwen/Qwen3.8-27B-TEE";
 const openrouterId = "qwen/qwen3.8-27b";
 
-function request(model, provider, catalogs, modelHeaders = {}) {
+function request(model, provider, catalogs, modelHeaders = {}, uri = "/inference/chat/completions", caller = undefined) {
   const calls = [];
   const r = {
     method: "POST",
-    uri: "/inference/chat/completions",
+    uri,
     requestText: JSON.stringify({ model }),
     headersIn: { Authorization: provider === "openrouter" ? "Bearer sk-or-test" : "Bearer cak_test" },
     headersOut: {},
@@ -28,7 +28,7 @@ function request(model, provider, catalogs, modelHeaders = {}) {
     return(status, body) { this.status = status; this.body = body; },
     subrequest(uri, options, callback) {
       calls.push({ uri, options });
-      if (uri === "/_inference_grant") callback({ status: 204, headersOut: { "X-ORO-Run-ID": "test" } });
+      if (uri === "/_inference_grant") callback({ status: 204, headersOut: { "X-ORO-Run-ID": "test", ...(caller ? { "X-ORO-Caller": caller } : {}) } });
       else if (uri === "/_backend_models") callback({ status: 200, responseText: JSON.stringify(catalogs[options.args.split("=")[1]]), headersOut: modelHeaders });
       else callback({ status: 200, responseText: "{}", headersOut: {} });
     },
@@ -93,4 +93,17 @@ test("Chutes retains the shopper simulator's Mistral mapping", () => {
   const { r, calls } = request("mistralai/mistral-small-2603", "chutes", catalogs);
   assert.equal(r.status, 200);
   assert.equal(JSON.parse(calls.at(-1).options.body).model, nemo);
+});
+
+test("decisions serve only the pinned disclosure reader, never on agent routes", () => {
+  shared.clear();
+  const jev = "typesafe/jev-1.13";
+  const catalogs = { openrouter: { models: [openrouterId], aliases: {} } };
+  const decisions = "/inference/alpha/decisions";
+  const { r, calls } = request(jev, "openrouter", catalogs, {}, decisions, "validator");
+  assert.equal(r.status, 200);
+  assert.equal(calls.at(-1).uri, "/_openrouter_decisions");
+  assert.equal(request(openrouterId, "openrouter", catalogs, {}, decisions, "validator").r.status, 403);
+  assert.equal(request(jev, "openrouter", catalogs, {}, decisions).r.status, 403);
+  assert.equal(request(jev, "openrouter", catalogs).r.status, 403);
 });

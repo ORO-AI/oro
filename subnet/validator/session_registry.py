@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from oro_env_runtime.families import get_family
-from oro_env_runtime.loop import _record_user_message, due_interventions
+from oro_env_runtime import loop
+from oro_env_runtime.loop import record_user_message
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
 from oro_env_runtime.user_sim import UserSim
 
@@ -90,6 +90,27 @@ def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
     return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
 
 
+def _deliver(
+    session: TaskSession,
+    transcript: list[dict[str, Any]],
+    decisions: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    *,
+    step: int,
+) -> None:
+    """The runtime loop's boundary tail: record each shopper decision, reveal the
+    facet it disclosed, then say the lines fired timeline transitions queued."""
+
+    for decision, signal in decisions:
+        content = str(decision.get("content") or "").strip()
+        record_user_message(
+            session, step=step, decision={**decision, "content": content}, signal=signal
+        )
+        if decision.get("disclosed"):
+            session.env.disclose_facet(decision["disclosed"])
+        transcript.append({"role": "user", "content": content})
+    loop.say_utterances(session, transcript, step=step)
+
+
 def _strip_undeclared_arguments(
     action: dict[str, Any], tool_parameters: dict[str, frozenset[str]]
 ) -> dict[str, Any]:
@@ -123,8 +144,6 @@ class _SessionState:
     call_trace: list[dict[str, Any]] = field(default_factory=list)
     event_fired_turn: int | None = None
     event_surfaced: bool = False
-    event_surfaced_turn: int | None = None
-    delivered_interventions: set[int] = field(default_factory=set)
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
@@ -241,33 +260,27 @@ class SessionRegistry:
             episode_id=state.session_id,
         )
         session = state.session
-        family = get_family(session.task.family)
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
             surface_events=not session.state_blind,
-            sim_context=family.user_sim_context(session.task),
-            allow_pushback=family.user_sim_allow_pushback(session.task),
             completion=completion,
+            fired=lambda: session.env.fired_transitions,
         )
 
-    def _simulator_response(
-        self,
-        state: _SessionState,
-        signal: dict[str, Any] | None,
-        intervention_index: int | None = None,
-    ) -> dict[str, Any]:
+    def _simulator(self, state: _SessionState) -> Any:
         if state.simulator is None:
             state.simulator = (
                 self._simulator_factory(state.session)
                 if self._simulator_factory is not None
                 else self._default_simulator(state)
             )
-        if intervention_index is not None:
-            return state.simulator.ensure_intervention(
-                state.session.task.interventions[intervention_index],
-                intervention_index,
-            )
+        return state.simulator
+
+    def _simulator_response(
+        self, state: _SessionState, signal: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        self._simulator(state)
         decision = asyncio.run(state.simulator.respond(state.transcript, signal))
         if not isinstance(decision, dict):
             raise TypeError("simulator response must be an object")
@@ -292,35 +305,14 @@ class SessionRegistry:
         turn: int,
         message_sent: bool,
     ) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
-        """Shared runtime scheduling; every due update crosses this boundary."""
-        due = due_interventions(
-            state.session,
-            state.delivered_interventions,
-            event_surfaced_step=(
-                state.event_surfaced_turn
-                if state.event_surfaced_turn is not None
-                else turn
-                if signal is not None
-                else None
-            ),
-            step=turn,
-        )
+        """Shared runtime scheduling: the shopper replies to a message or an event notice
+        unless a timeline line speaks for it this turn; queued lines are reworded."""
         decisions = []
-        if signal is not None or (message_sent and not due):
+        lines = state.session.env.utterances
+        if signal is not None or (message_sent and not lines):
             decisions.append((self._simulator_response(state, signal), signal))
-        for index in due:
-            rule = state.session.task.interventions[index]
-            intervention_signal = {
-                "kind": "intervention",
-                "index": index,
-                "action": rule.action,
-            }
-            decisions.append(
-                (
-                    self._simulator_response(state, intervention_signal, index),
-                    intervention_signal,
-                )
-            )
+        if lines:
+            asyncio.run(loop.reword_utterances(self._simulator(state), state.session))
         return decisions
 
     def start(
@@ -412,9 +404,7 @@ class SessionRegistry:
                 "tool_contract_version does not match the active session"
             )
         if state.quarantined_reason is not None:
-            raise InvalidSessionError(
-                f"session is quarantined: {state.quarantined_reason}"
-            )
+            raise InvalidSessionError("session is quarantined")
         if self.key_exhausted.is_set():
             raise AgentInferenceBudgetError("miner inference key exhausted")
 
@@ -508,8 +498,7 @@ class SessionRegistry:
     @staticmethod
     def _event_ready(state: _SessionState, turn: int) -> bool:
         return (
-            state.session.env.applied_event is not None
-            and not state.event_surfaced
+            not state.event_surfaced
             and not state.session.state_blind
             and state.event_fired_turn is not None
             and turn > state.event_fired_turn
@@ -612,57 +601,20 @@ class SessionRegistry:
         trace.tool_latency_ms = _elapsed_ms(started)
         return result if is_group else [result]
 
-    def _simulate_user_turn(
+    def _in_simulator(
         self,
         session_id: str,
         state: _SessionState,
-        turn: int,
-        call_group: list[dict[str, Any]],
         trace: _CallTrace,
-    ) -> dict[str, str] | None:
-        if state.session.env.done():
-            return None
-        message_sent = any(
-            item["action"].get("name") == "message" for item in call_group
-        )
-        # Preserve one unaided policy turn after a public event. The agent
-        # must react to the observation before the shopper simulator can
-        # reinforce it; a terminal action in that turn gets no rescue.
-        event_ready = self._event_ready(state, turn)
-        # As in loop.run, due requirements share the event-notice boundary.
-        due = due_interventions(
-            state.session,
-            state.delivered_interventions,
-            event_surfaced_step=state.event_surfaced_turn,
-            step=turn,
-        )
-        if not (message_sent or event_ready or due):
-            return None
-
-        signal = None
-        if event_ready:
-            event = state.session.env.applied_event
-            signal = {"kind": event.kind}
-            if event.kind == "price_change":
-                signal.update(
-                    {
-                        "old_price": event.old_price,
-                        "new_price": event.new_price,
-                        "currency": event.currency,
-                    }
-                )
-
+        work: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
+        """Run simulator work under its timeout; a failure quarantines the session."""
         started = time.perf_counter()
         snapshot = self._session_snapshot(state)
-        future = self._executor.submit(
-            self._shopper_turn_decisions,
-            state,
-            signal,
-            turn,
-            message_sent,
-        )
+        future = self._executor.submit(work, *args)
         try:
-            decisions = future.result(timeout=self.simulator_timeout_s)
+            result = future.result(timeout=self.simulator_timeout_s)
         except concurrent.futures.TimeoutError as exc:
             trace.simulator_latency_ms = _elapsed_ms(started)
             future.cancel()
@@ -685,28 +637,87 @@ class SessionRegistry:
                 error_detail=state.quarantined_reason,
                 simulator_exchanges=self._simulator_exchanges(state.simulator),
             )
-            raise error_type(
-                f"{state.quarantined_reason}; session quarantined"
-            ) from exc
-
-        trace.simulator_latency_ms = _elapsed_ms(started)
-        contents = []
-        for decision, decision_signal in decisions:
-            content = str(decision.get("content") or "").strip()
-            contents.append(content)
-            _record_user_message(
-                state.session,
-                step=turn,
-                decision={**decision, "content": content},
-                signal=decision_signal,
+            # The detail stays in the validator's trace and result; the agent
+            # gets no provider status or body.
+            public = (
+                state.quarantined_reason
+                if error_type is AgentInferenceBudgetError
+                else "user simulator failed"
             )
-            state.transcript.append({"role": "user", "content": content})
-            if decision_signal and decision_signal.get("kind") == "intervention":
-                state.delivered_interventions.add(decision_signal["index"])
-        state.event_surfaced = state.event_surfaced or event_ready
-        if event_ready and state.event_surfaced_turn is None:
-            state.event_surfaced_turn = turn
-        return {"content": "\n".join(content for content in contents if content)}
+            raise error_type(f"{public}; session quarantined") from exc
+        trace.simulator_latency_ms = (trace.simulator_latency_ms or 0.0) + _elapsed_ms(
+            started
+        )
+        return result
+
+    def _simulate_user_turn(
+        self,
+        session_id: str,
+        state: _SessionState,
+        turn: int,
+        call_group: list[dict[str, Any]],
+        trace: _CallTrace,
+    ) -> dict[str, str] | None:
+        env = state.session.env
+        if env.done():
+            return None
+        said = len(state.transcript)
+        message_sent = any(
+            item["action"].get("name") == "message" for item in call_group
+        )
+        # Preserve one unaided policy turn after a public event. The agent
+        # must react to the observation before the shopper simulator can
+        # reinforce it; a terminal action in that turn gets no rescue.
+        event_ready = self._event_ready(state, turn)
+        if message_sent or event_ready or env.utterances:
+            signal = None
+            if event_ready:
+                announced = env.announced_events()
+                event = env.applied_events[announced[0]]
+                signal = {"kind": event.kind}
+                if event.kind == "price_change":
+                    signal.update(
+                        {
+                            "old_price": event.old_price,
+                            "new_price": event.new_price,
+                            "currency": event.currency,
+                        }
+                    )
+            decisions = self._in_simulator(
+                session_id,
+                state,
+                trace,
+                self._shopper_turn_decisions,
+                state,
+                signal,
+                turn,
+                message_sent,
+            )
+            _deliver(state.session, state.transcript, decisions, step=turn)
+            state.event_surfaced = state.event_surfaced or event_ready
+        # The next turn's boundary fires now, so its lines are heard before the agent
+        # acts on that turn, as loop.run says them.
+        if turn < state.session.max_steps:
+            env.begin_solver_turn(turn + 1)
+            if env.utterances:
+                self._in_simulator(
+                    session_id,
+                    state,
+                    trace,
+                    lambda: asyncio.run(
+                        loop.reword_utterances(self._simulator(state), state.session)
+                    ),
+                )
+                loop.say_utterances(state.session, state.transcript, step=turn + 1)
+        if len(state.transcript) == said:
+            return None
+        return {
+            "content": "\n".join(
+                message["content"]
+                for message in state.transcript[said:]
+                if message["content"]
+            )
+        }
 
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
         """Execute or replay one strictly ordered solver-turn envelope."""
@@ -754,7 +765,6 @@ class SessionRegistry:
                 request=copy.deepcopy(envelope),
                 state_hash_before=_state_hash(state.session),
             )
-            event_before_group = state.session.env.applied_event
             observations = self._execute_actions(
                 session_id,
                 state,
@@ -775,11 +785,9 @@ class SessionRegistry:
                     call_group, public_observations, strict=True
                 )
             ]
-            if (
-                state.event_fired_turn is None
-                and event_before_group is None
-                and state.session.env.applied_event is not None
-            ):
+            # A silent market change is left for the agent to see; only an
+            # announced one gets a shopper notice.
+            if state.event_fired_turn is None and state.session.env.announced_events():
                 state.event_fired_turn = turn
             state.transcript.append(
                 {

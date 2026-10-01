@@ -329,10 +329,8 @@ def build_episode_payload(
 
     - ``aggregate_reward`` is the on-chain payment. Populated ONLY when
       ``verdict_correct=True``.
-    - ``reward_components`` is the full ``reward_record`` telemetry.
-      TF4 shadow rewards (paid_value > 0 with correct=False) still
-      appear here for training signal, but do NOT influence the
-      on-chain payment.
+    - ``reward_components`` is the full ``reward_record`` telemetry; it
+      never influences the on-chain payment.
 
     Enforces two Backend invariants at the emitter boundary so a bad
     verdict fails fast with a specific error instead of coming back as
@@ -612,9 +610,7 @@ def replay_ledger(
 
     ``verdict_matches`` compares the semantically-important fields
     (``correct``, ``paid_reward``, ``efficiency``, ``checks``) rather
-    than the full dict — TF4 judge nondeterminism (async LLM call)
-    means full equality would flap on preference_reasoning tasks; the
-    deterministic core still matches.
+    than the full dict; the deterministic core is what must match.
     """
     replayed_terminal_hash = ledger[-1].state_hash if ledger else None
     terminal_hash_matches = (

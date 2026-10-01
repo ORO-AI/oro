@@ -149,6 +149,7 @@ export function renderOutcome(trajectory) {
       <span class="eyebrow">Evaluation outcome</span>
       <strong>${state.text}</strong>
       <p>${escapeHtml(trajectory.verdict?.explanation ?? trajectory.terminalReason)}</p>
+      ${trajectory.failure?.primary ? `<p>Failure <b>${escapeHtml(trajectory.failure.primary)}</b> (${escapeHtml(trajectory.failure.categories.join(", "))})</p>` : ""}
       <div class="outcome-numbers"><span>Reward <b>${escapeHtml(trajectory.reward ?? "n/a")}</b></span><span>Terminal <b>${escapeHtml(trajectory.terminalReason)}</b></span></div>
     </section>
     <section class="evidence-section"><h3>Verifier checks</h3>${renderChecks(trajectory.verdict?.checks)}</section>

@@ -153,6 +153,19 @@ def test_console_report_groups_tasks_by_family_with_means() -> None:
     )
 
 
+def test_console_report_names_each_failure_category() -> None:
+    summary = _summary()
+    task = _task("TF8-composed-1", "composed", 0.0)
+    task["failure"] = {
+        "primary": "needs_not_found",
+        "categories": ["needs_not_found", "process_issue"],
+    }
+    summary["tasks"] = [task, _task("TF8-composed-2", "composed", 1.0)]
+    failed, passed = (l for l in _render(summary).splitlines() if "TF8-composed-" in l)
+    assert failed.endswith("0.00  needs_not_found (needs_not_found, process_issue)")
+    assert passed.endswith("1.00")
+
+
 def test_console_report_keeps_a_gap_after_a_long_family_name() -> None:
     summary = _summary()
     summary["tasks"] = [_task("t1", "intent_decomposition", 1.0)]

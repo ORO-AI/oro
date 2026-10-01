@@ -94,6 +94,9 @@ test("renders failed checks and provenance evidence", () => {
   assert.match(html, /0\.2\.0/);
   assert.match(html, /no order placed/);
   assert.match(html, /ranking aligned success/);
+  assert.doesNotMatch(html, /Failure/);
+  const failed = renderOutcome({ ...trajectory, failure: { primary: "did_not_finish", categories: ["did_not_finish"] } });
+  assert.match(failed, /Failure <b>did_not_finish<\/b> \(did_not_finish\)/);
 });
 
 test("summarizes non-object observations as themselves", () => {

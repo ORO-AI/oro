@@ -16,6 +16,7 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
+from .simulator_completion import VALIDATOR_CALLER_SECRET
 
 if TYPE_CHECKING:
     from .session_registry import SessionRegistry
@@ -45,7 +46,7 @@ class SessionRuntime:
             authorized = (
                 time.time() < grant[2]
                 and authorization is not None
-                and compare_digest(authorization, "Bearer " + grant[1])
+                and compare_digest(authorization.encode(), f"Bearer {grant[1]}".encode())
             )
             return grant[0], authorized
 
@@ -94,6 +95,7 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
     @app.get("/v1/inference/authorize")
     def authorize_inference(
         authorization: str | None = Header(default=None),
+        x_oro_validator: str | None = Header(default=None),
     ) -> Response:
         run_id, authorized = runtime.authorize_inference(authorization)
         headers = {"X-ORO-Run-ID": run_id} if run_id else None
@@ -103,6 +105,12 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
                 detail="Inference key does not match active run",
                 headers=headers,
             )
+        # Read by the proxy only: the validator's own calls carry its secret.
+        # Bytes: a str compare raises on a non-ASCII header.
+        validator = x_oro_validator is not None and compare_digest(
+            x_oro_validator.encode(), VALIDATOR_CALLER_SECRET.encode()
+        )
+        headers = {**(headers or {}), "X-ORO-Caller": "validator" if validator else "agent"}
         return Response(status_code=204, headers=headers)
 
     @app.post("/v1/session/call")

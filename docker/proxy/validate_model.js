@@ -160,13 +160,44 @@ function getAllowlist(r, provider, callback) {
   );
 }
 
+// Every route an inference request may take, as "METHOD decoded-path". Only an exact match
+// passes, so no escape, query, fragment, parameter, dot segment, trailing slash or case
+// variant (`/inference/alpha/decisions%3F`, `%252F`, `/Chat/Completions/`) reaches upstream,
+// and the upstream path is always one of these literals.
+var ROUTES = [
+  "GET /inference/models",
+  "POST /inference/chat/completions",
+  "POST /inference/alpha/decisions",
+];
+// Typed decisions are the validator's own (the simulator's disclosure reader); an agent
+// could rehearse the reader with them. They go to their own upstream location, never to
+// the generic one agent routes use.
+var DECISIONS = "/inference/alpha/decisions";
+// The one model the decisions route serves: the runtime's pinned disclosure reader. It is
+// checked here instead of against the agent allowlist, so it never becomes an agent model.
+var DECISIONS_MODEL = "typesafe/jev-1.13";
+
+function _forbid(r) {
+  _tag(r, "internal-forbidden");
+  r.headersOut["Content-Type"] = "application/json";
+  r.return(403, JSON.stringify({ error: "forbidden" }));
+}
+
 function _validatedRequest(r) {
   var provider = detectProvider(r);
-  var upstreamLocation = provider === "openrouter" ? "/_openrouter_proxy/" : "/_chutes_proxy/";
+  var decisions = r.uri === DECISIONS;
+  if (decisions && (r._oroCaller !== "validator" || provider !== "openrouter")) {
+    _forbid(r);
+    return;
+  }
+  var upstreamLocation = decisions
+    ? "/_openrouter_decisions"
+    : (provider === "openrouter" ? "/_openrouter_proxy/" : "/_chutes_proxy/") +
+      r.uri.replace(/^\/inference\//, "");
 
-  if (r.method !== "POST") {
-    var passUri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
-    r.subrequest(passUri, { method: r.method, args: r.variables.args || "" }, function (reply) {
+  if (r.method === "GET") {
+    // The model listing: the one read passed through.
+    r.subrequest(upstreamLocation, { method: "GET" }, function (reply) {
       _tag(r, _upstreamLabel(reply.status));
       for (var h in reply.headersOut) {
         r.headersOut[h] = reply.headersOut[h];
@@ -268,8 +299,9 @@ function _validatedRequest(r) {
   // tracking) and miner agent code can then read `resp.usage.cost`
   // deterministically. Chutes ignores unknown top-level fields but skip
   // there to keep the outbound body untouched.
+  // The decisions endpoint is forwarded exactly as the runtime sends it.
   var usageInjected = false;
-  if (provider === "openrouter") {
+  if (provider === "openrouter" && !decisions) {
     parsed.usage = { include: true };
     usageInjected = true;
   }
@@ -312,7 +344,7 @@ function _validatedRequest(r) {
       parsed.model = aliases[parsed.model];
     }
 
-    if (allowed.indexOf(parsed.model) === -1) {
+    if (decisions ? parsed.model !== DECISIONS_MODEL : allowed.indexOf(parsed.model) === -1) {
       _tag(r, "internal-model-not-allowed");
       r.error("Model not allowed for " + provider + ": " + parsed.model);
       r.headersOut["Content-Type"] = "application/json";
@@ -328,10 +360,9 @@ function _validatedRequest(r) {
 
     var forwardBody = stripped.length > 0 || usageInjected || fallbackInjected || parsed.model !== requestedModel
       ? JSON.stringify(parsed) : body;
-    var uri = upstreamLocation + r.uri.replace(/^\/inference\//, "");
     r.subrequest(
-      uri,
-      { method: "POST", body: forwardBody, args: r.variables.args || "" },
+      upstreamLocation,
+      { method: "POST", body: forwardBody },
       function (reply) {
         _tag(r, _upstreamLabel(reply.status));
         // Belt-and-suspenders forensic trail for ORO-2191. The Python side
@@ -360,6 +391,10 @@ function _validatedRequest(r) {
 }
 
 function validate(r) {
+  if (ROUTES.indexOf(r.method + " " + r.uri) === -1) {
+    _forbid(r);
+    return;
+  }
   r.subrequest("/_inference_grant", { method: "GET" }, function (reply) {
     r._oroRunId = reply.headersOut["X-ORO-Run-ID"];
     if (reply.status !== 204) {
@@ -370,6 +405,7 @@ function validate(r) {
       }));
       return;
     }
+    r._oroCaller = reply.headersOut["X-ORO-Caller"];
     if (!r._oroRunId) {
       _tag(r, "internal-grant-unavailable");
       r.return(503, JSON.stringify({ error: "Inference grant unavailable" }));

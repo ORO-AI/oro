@@ -139,6 +139,10 @@ def render_console_report(
                 classification = row.get("error_classification") or "error"
                 problem = f"{classification}: {row.get('error_detail') or outcome}"
                 detail = f"  {paint(problem, _RED)}"
+            failure = row.get("failure") or {}
+            if failure.get("primary"):
+                text = f"{failure['primary']} ({', '.join(failure['categories'])})"
+                detail += f"  {paint(text, _YELLOW)}"
             lines.append(
                 f"  {str(row.get('task_id')):<{width}}  {outcome:<18}"
                 f"{reward_paint(reward, outcome)}{detail}"

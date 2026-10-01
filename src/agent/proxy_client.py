@@ -330,6 +330,7 @@ class ProxyClient:
         self.retry_delay = retry_delay
         self.rate_limit_retry_delay = rate_limit_retry_delay
         self.api_key = api_key or os.getenv("INFERENCE_ACCESS_TOKEN")
+        self.headers: dict[str, str] = {}  # sent on every POST
         stats_file = inference_stats_file or os.environ.get(
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
@@ -485,7 +486,7 @@ class ProxyClient:
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
         """Make a POST request to the proxy."""
         url = self._build_url(path)
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = dict(self.headers)
         if self.api_key and "/inference/" in path:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -528,7 +529,7 @@ class ProxyClient:
         provider body.
         """
         url = self._build_url(path)
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = dict(self.headers)
         if self.api_key and "/inference/" in path:
             headers["Authorization"] = f"Bearer {self.api_key}"
 

@@ -18,7 +18,7 @@ from oro_env_runtime.schema import CandidateRef
 
 from . import environment_preflight_agent
 from .env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
-from .session_registry import SessionRegistry
+from .session_registry import SessionRegistry, _deliver
 from .session_service import SessionRuntime
 
 
@@ -99,19 +99,15 @@ def _drive_replay(
     task_id: str,
     groups: list[list[dict[str, Any]]],
 ) -> Any:
-    """Drive action groups through a fresh replay session, mirroring the
-    deterministic simulator fallback so it reproduces the real run's verdict."""
+    """Drive action groups through a fresh replay session and the session
+    boundary, mirroring the deterministic simulator so it reproduces the real
+    run's ledger and verdict (a due timeline line speaks instead of the reply)."""
     replay = loaded_pack.open_session(task_id)
     for turn, actions in enumerate(groups, start=1):
         observations = replay.step_parallel(actions)
         if turn == 1 and not any(item.get("done") is True for item in observations):
-            replay.env.ledger.append(
-                turn=replay.env._turn,
-                kind="user_message",
-                actor="user_sim",
-                payload={"step": turn, **_SIMULATOR_REPLY, "fallback": False},
-                state_hash=replay.env.state_hash_now(),
-            )
+            reply = [] if replay.env.utterances else [(dict(_SIMULATOR_REPLY), None)]
+            _deliver(replay, [], reply, step=turn)
     return replay
 
 
@@ -129,14 +125,12 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
     """Select any task with a self-verified positive/negative case.
 
     Task-family-agnostic (the scripted policy still assumes the commerce tool
-    contract). Eventless tasks preferred so an event can't invalidate the
-    positive order mid-episode; each candidate is validated against the real
+    contract). Tasks without a timeline are preferred so a change can't invalidate
+    the positive order mid-episode; each candidate is validated against the real
     verifier so a case that would false-fail the preflight is never shipped.
     """
     tasks = list(zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True))
-    ordered = [t for t in tasks if t[1].event_rule is None] + [
-        t for t in tasks if t[1].event_rule is not None
-    ]
+    ordered = sorted(tasks, key=lambda t: bool(t[1].situation and t[1].situation.timeline))
     for task_id, task in ordered:
         probe = loaded_pack.open_session(task_id)
         targets = _reference_targets(task, probe)
@@ -152,8 +146,7 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
 
 def _action_groups(task: Any, targets: Any) -> dict[str, list[list[dict[str, Any]]]]:
     positive_targets, negative = targets
-    theme = task.family_payload.get("theme") or []
-    query = " ".join(str(token) for token in theme) or task.goal_text
+    query = task.goal_text
     first_turn = [
         {"name": "search", "args": {"query": query, "k": 10, "in_stock": True}},
         {
