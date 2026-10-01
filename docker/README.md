@@ -232,7 +232,7 @@ The proxy service acts as a gateway for sandboxed agent containers, providing co
 - **Proxy Container**: Only container with internet access, runs nginx reverse proxy
 - **Sandbox Network**: Internal Docker network (no internet access) for agent containers
 - **Path-based Routing**:
-  - `/environment/call` → session runtime (ORO Bench tool actions)
+  - `/environment/call` → session runtime (ORO Bench tool actions; bodies over 64 KB get 413)
   - `/inference/*` → configured inference provider (external, auth forwarded from sandbox client)
   - `/search/*` → 410 Gone (ShoppingBench routes, removed)
 

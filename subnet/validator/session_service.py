@@ -11,6 +11,7 @@ import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Response
 
 from .session_errors import (
+    AgentFaultError,
     AgentInferenceBudgetError,
     HarnessExecutionError,
     HarnessTimeoutError,
@@ -20,6 +21,9 @@ from .simulator_completion import VALIDATOR_CALLER_SECRET
 
 if TYPE_CHECKING:
     from .session_registry import SessionRegistry
+
+# The largest session call body, in bytes; the sandbox proxy's limit for the route matches it.
+MAX_CALL_BYTES = 64 * 1024
 
 
 class SessionRuntime:
@@ -114,7 +118,11 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
         return Response(status_code=204, headers=headers)
 
     @app.post("/v1/session/call")
-    def call(envelope: dict[str, Any]) -> dict[str, Any]:
+    def call(
+        envelope: dict[str, Any], content_length: int = Header(default=0)
+    ) -> dict[str, Any]:
+        if content_length > MAX_CALL_BYTES:
+            raise HTTPException(status_code=413, detail={"error": "call body too large"})
         try:
             return runtime.call(envelope)
         except HarnessTimeoutError as exc:
@@ -125,6 +133,11 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
         except AgentInferenceBudgetError as exc:
             raise HTTPException(
                 status_code=402,
+                detail={"error": str(exc), "environment_error": False},
+            ) from exc
+        except AgentFaultError as exc:
+            raise HTTPException(
+                status_code=422,
                 detail={"error": str(exc), "environment_error": False},
             ) from exc
         except HarnessExecutionError as exc:

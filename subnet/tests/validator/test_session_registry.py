@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from unittest.mock import MagicMock
+from urllib.error import HTTPError, URLError
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from validator.session_registry import (
     InvalidSessionError,
     SessionRegistry,
 )
-from validator.session_service import SessionRuntime, create_session_app
+from validator.session_service import MAX_CALL_BYTES, SessionRuntime, create_session_app
 from validator.simulator_completion import (
     VALIDATOR_CALLER_SECRET,
     InferenceProviderError,
@@ -266,8 +267,15 @@ def test_default_simulator_failure_is_an_environment_error(
     assert private_detail not in json.dumps(result)
 
 
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, '{"error":{"message":"Key limit exceeded (total limit)"}}'),
+        (402, '{"error":{"message":"This request requires more credits"}}'),
+    ],
+)
 def test_miner_key_exhaustion_is_agent_error_and_stops_run(
-    loaded_pack: LoadedPack,
+    loaded_pack: LoadedPack, status: int, body: str
 ) -> None:
     from src.agent.proxy_client import PostResult
 
@@ -278,11 +286,7 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
         post = MagicMock(
             return_value=PostResult(
                 data=None,
-                error={
-                    "kind": "upstream",
-                    "status": 403,
-                    "body": '{"error":{"message":"Key limit exceeded (total limit)"}}',
-                },
+                error={"kind": "upstream", "status": status, "body": body},
             )
         )
         state.simulator._completion._client.post_verbose = post
@@ -312,6 +316,85 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
     assert result["environment_error"] is False
     assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
     assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
+
+
+def test_a_provider_refusal_of_the_agents_content_is_agent_error(
+    loaded_pack: LoadedPack,
+) -> None:
+    """A 400 (say, a message too long for the model's context) is not retried or infra."""
+    from src.agent.proxy_client import PostResult
+
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        post = MagicMock(
+            return_value=PostResult(
+                data=None,
+                error={"kind": "upstream", "status": 400, "body": "context length"},
+            )
+        )
+        state.simulator._completion._client.post_verbose = post
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call",
+            json=_call_envelope(
+                registry, action={"name": "message", "args": {"content": "x" * 2000}}
+            ),
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"] == {
+            "error": "user simulator failed; session quarantined",
+            "environment_error": False,
+        }
+        result = registry.finalized_results()[0]
+
+    assert post.call_count == 2  # the disclosure reader's read, then one simulator call
+    assert result["outcome"] == "agent_error" and result["environment_error"] is False
+    assert not registry.key_exhausted.is_set()
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (HTTPError("http://search", 400, "Bad Request", None, None), "agent_error"),
+        (TypeError("unhashable type: 'list'"), "agent_error"),
+        (HTTPError("http://search", 503, "Unavailable", None, None), "environment_error"),
+        (HTTPError("http://search", 429, "Too Many", None, None), "environment_error"),
+        (URLError("connection refused"), "environment_error"),
+        (TimeoutError("timed out"), "environment_error"),
+    ],
+)
+def test_a_tool_call_failure_is_the_agents_unless_the_environment_failed(
+    registry: SessionRegistry, error: Exception, outcome: str
+) -> None:
+    _start(registry)
+    registry._sessions["session-1"].session.step = MagicMock(side_effect=error)
+    runtime = SessionRuntime()
+    runtime.install(registry)
+    response = TestClient(create_session_app(runtime)).post(
+        "/v1/session/call", json=_call_envelope(registry)
+    )
+    infra = outcome == "environment_error"
+    assert infra or response.status_code == 422
+    assert response.json()["detail"]["environment_error"] is infra
+    result = registry.finalized_results()[0]
+    assert result["outcome"] == outcome and result["environment_error"] is infra
+
+
+def test_an_oversized_call_is_refused_before_it_reaches_a_session(
+    registry: SessionRegistry,
+) -> None:
+    runtime = SessionRuntime()
+    runtime.install(registry)
+    _start(registry)
+    action = {"name": "message", "args": {"content": "x" * MAX_CALL_BYTES}}
+    response = TestClient(create_session_app(runtime)).post(
+        "/v1/session/call", json=_call_envelope(registry, action=action)
+    )
+    assert response.status_code == 413
+    assert registry._sessions["session-1"].session.step_count == 0
 
 
 def test_default_simulator_rejects_missing_miner_credentials(

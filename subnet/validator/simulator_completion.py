@@ -61,7 +61,16 @@ class InferenceProviderError(RuntimeError):
     @property
     def key_exhausted(self) -> bool:
         """OpenRouter's per-run key budget is spent, not a transient outage."""
-        return self.status == 403 and "key limit exceeded" in self.body.lower()
+        return self.status == 402 or (
+            self.status == 403 and "key limit exceeded" in self.body.lower()
+        )
+
+    @property
+    def agent_fault(self) -> bool:
+        """The request is too large for the model, which only the agent's messages in it can
+        make it; a retry would get the same answer. Any other 400 (such as a bad model id)
+        stays the environment's."""
+        return self.status == 413 or (self.status == 400 and "context" in self.body.lower())
 
 
 class SimulatorCompletion:
@@ -167,6 +176,8 @@ class SimulatorCompletion:
             provider_error = InferenceProviderError(upstream_status, upstream_body)
             if provider_error.key_exhausted:
                 logger.warning("miner inference key budget exhausted during user simulation")
+                raise provider_error
+            if provider_error.agent_fault:
                 raise provider_error
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(

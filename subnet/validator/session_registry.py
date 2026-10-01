@@ -12,6 +12,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
+from urllib.error import HTTPError
 from uuid import uuid4
 
 from oro_env_runtime import loop
@@ -21,6 +22,7 @@ from oro_env_runtime.user_sim import UserSim
 
 from .env_pack_loader import LoadedPack
 from .session_errors import (
+    AgentFaultError,
     AgentInferenceBudgetError,
     HarnessError,
     HarnessExecutionError,
@@ -109,6 +111,14 @@ def _deliver(
             session.env.disclose_facet(decision["disclosed"])
         transcript.append({"role": "user", "content": content})
     loop.say_utterances(session, transcript, step=step)
+
+
+def _environment_fault(exc: Exception) -> bool:
+    """Whether a tool call failed on the environment, not on the agent's input: the search
+    server gave no response or timed out (an ``OSError``), or answered 429 or 5xx."""
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return isinstance(exc, OSError)
 
 
 def _strip_undeclared_arguments(
@@ -507,19 +517,18 @@ class SessionRegistry:
     def _simulator_error(
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
+        error_type: type[HarnessExecutionError] = HarnessExecutionError
         if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
             self.key_exhausted.set()
-            state.quarantined_outcome = "agent_error"
-            summary = "miner inference key exhausted"
+            error_type, summary = AgentInferenceBudgetError, "miner inference key exhausted"
         elif isinstance(exc, InferenceProviderError):
             summary = f"upstream status={exc.status} body={exc.body!r}"
+            if exc.agent_fault:
+                error_type = AgentFaultError
         else:
             summary = type(exc).__name__
-        error_type = (
-            AgentInferenceBudgetError
-            if state.quarantined_outcome == "agent_error"
-            else HarnessExecutionError
-        )
+        if issubclass(error_type, AgentFaultError):
+            state.quarantined_outcome = "agent_error"
         return error_type, f"user simulator failed: {summary}"
 
     def _raise_timeout(
@@ -590,14 +599,15 @@ class SessionRegistry:
         except Exception as exc:
             trace.tool_latency_ms = _elapsed_ms(started)
             state.quarantined_reason = f"tool call failed: {type(exc).__name__}"
+            error_type = HarnessExecutionError
+            if not _environment_fault(exc):
+                error_type, state.quarantined_outcome = AgentFaultError, "agent_error"
             trace.record(
                 state,
-                error_type="HarnessExecutionError",
+                error_type=error_type.__name__,
                 error_detail=state.quarantined_reason,
             )
-            raise HarnessExecutionError(
-                f"{state.quarantined_reason}; session quarantined"
-            ) from exc
+            raise error_type(f"{state.quarantined_reason}; session quarantined") from exc
         trace.tool_latency_ms = _elapsed_ms(started)
         return result if is_group else [result]
 
@@ -1018,6 +1028,7 @@ class SessionRegistry:
 
 
 __all__ = [
+    "AgentFaultError",
     "AgentInferenceBudgetError",
     "DEFAULT_SIMULATOR_TIMEOUT_S",
     "DEFAULT_TOOL_TIMEOUT_S",

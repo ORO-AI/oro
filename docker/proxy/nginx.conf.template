@@ -111,6 +111,8 @@ http {
         # creation and verdict endpoints are intentionally not exposed.
         location = /environment/call {
             limit_req zone=agent burst=50 nodelay;
+            # Matches the validator's MAX_CALL_BYTES (session_service.py).
+            client_max_body_size 64k;
 
             resolver 127.0.0.11 valid=10s;
             set $session_upstream http://${SESSION_RUNTIME_HOST}:${SESSION_RUNTIME_PORT};
