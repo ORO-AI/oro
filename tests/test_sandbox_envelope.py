@@ -62,6 +62,8 @@ class TestExecuteSingleProblemStatus:
             "from src.agent.proxy_client import RequestLog\n"
             "import os\n"
             "def agent_main(problem):\n"
+            "    if problem.get('make_directory'):\n"
+            "        os.mkdir(os.environ['REQUEST_LOG_FILE'])\n"
             "    if problem.get('log_call'):\n"
             "        RequestLog(os.environ['REQUEST_LOG_FILE']).record('GET', '/search')\n"
             "    return [{'role': 'assistant', 'content': 'done'}]\n"
@@ -110,6 +112,17 @@ class TestExecuteSingleProblemStatus:
 
         assert result.success and len(result.proxy_calls or []) == 1
         assert not Path(read_log.call_args.args[0]).exists()
+
+        with patch.object(
+            sandbox_executor,
+            "_read_request_log",
+            wraps=sandbox_executor._read_request_log,
+        ) as read_log:
+            result = sandbox_executor.execute_single_problem(
+                {**problem, "make_directory": True}, agent_file=str(agent_file)
+            )
+        assert result.success and result.proxy_calls is None
+        Path(read_log.call_args.args[0]).rmdir()
 
     def test_timed_out_when_process_alive_after_join(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))

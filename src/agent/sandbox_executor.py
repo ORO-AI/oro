@@ -11,6 +11,7 @@ import queue
 import sys
 import time
 import uuid
+from contextlib import suppress
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
@@ -425,7 +426,8 @@ def execute_single_problem(
     inf_total = int((inference_usage or {}).get("inference_total", 0))
     proxy_calls = _read_request_log(request_log_file)
     if not output_file:
-        Path(request_log_file).unlink(missing_ok=True)
+        with suppress(OSError):
+            Path(request_log_file).unlink(missing_ok=True)
 
     if timed_out:
         result_queue.close()
