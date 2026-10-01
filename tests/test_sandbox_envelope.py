@@ -100,6 +100,12 @@ class TestExecuteSingleProblemStatus:
         )
         assert len(list(tmp_path.glob("request_log_repeated_*.jsonl"))) == 3
 
+        long_id_result = sandbox_executor.execute_single_problem(
+            {**problem, "problem_id": "x" * 220, "log_call": True},
+            agent_file=str(agent_file),
+        )
+        assert long_id_result.success and len(long_id_result.proxy_calls or []) == 1
+
         monkeypatch.delenv("SANDBOX_OUTPUT_FILE", raising=False)
         with patch.object(
             sandbox_executor,
