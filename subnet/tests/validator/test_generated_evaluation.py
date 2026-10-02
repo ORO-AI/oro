@@ -71,7 +71,7 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
 @pytest.mark.parametrize(
     ("provider", "stats", "expected_status"),
     [
-        ("openrouter", {"inference_cost_usd": 0.25}, "complete"),
+        ("openrouter", {"inference_cost_usd": 0.25, "cached_tokens": 8}, "complete"),
         (
             "openrouter",
             {"inference_cost_usd": 0.25, "inference_cost_missing": 1},
@@ -89,6 +89,7 @@ def test_episode_inference_usage_status(provider, stats, expected_status) -> Non
     )["task"]
 
     assert usage["inference_cost_status"] == expected_status
+    assert usage["cached_tokens"] == (stats or {}).get("cached_tokens", 0)
     assert ("inference_cost_usd" in usage) is (
         stats is not None and provider == "openrouter"
     )
@@ -101,6 +102,7 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
                 "inference_total": 2,
                 "inference_failed": 0,
                 "prompt_tokens": 11,
+                "cached_tokens": 8,
                 "completion_tokens": 7,
                 "inference_cost_usd": 0.3,
                 "requested_models": {"requested/a": {"requests": 2}},
@@ -119,6 +121,7 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
 
     assert summary["inference_requests"] == 3
     assert summary["inference_failed_requests"] == 1
+    assert summary["cached_tokens"] == 8
     assert summary["requested_models"] == {
         "requested/a": {"requests": 2},
         "requested/b": {"requests": 1, "failed_requests": 1},

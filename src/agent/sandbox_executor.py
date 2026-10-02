@@ -171,6 +171,7 @@ _INFERENCE_COUNTERS = (
     "inference_cost_usd",
     "inference_cost_missing",
     "prompt_tokens",
+    "cached_tokens",
     "completion_tokens",
 )
 
@@ -209,6 +210,7 @@ def _model_inference_counters(
                 "requests",
                 "failed_requests",
                 "prompt_tokens",
+                "cached_tokens",
                 "completion_tokens",
                 "cost_usd",
                 "cost_missing",

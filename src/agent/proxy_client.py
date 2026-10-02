@@ -129,6 +129,7 @@ class InferenceStats:
         self._cost_usd = 0.0
         self._cost_missing = 0
         self._prompt_tokens = 0
+        self._cached_tokens = 0
         self._completion_tokens = 0
         self._requested_models: dict[str, dict[str, int | float]] = {}
         self._served_models: dict[str, dict[str, int | float]] = {}
@@ -172,6 +173,7 @@ class InferenceStats:
         *,
         failed: bool,
         prompt_tokens: int | None = None,
+        cached_tokens: int | None = None,
         completion_tokens: int | None = None,
         cost_usd: float | None = None,
     ) -> None:
@@ -181,6 +183,7 @@ class InferenceStats:
                 "requests": 0,
                 "failed_requests": 0,
                 "prompt_tokens": 0,
+                "cached_tokens": 0,
                 "completion_tokens": 0,
                 "cost_usd": 0.0,
                 "cost_missing": 0,
@@ -189,6 +192,7 @@ class InferenceStats:
         totals["requests"] += 1
         totals["failed_requests"] += int(failed)
         totals["prompt_tokens"] += prompt_tokens or 0
+        totals["cached_tokens"] += cached_tokens or 0
         totals["completion_tokens"] += completion_tokens or 0
         if cost_usd is None:
             totals["cost_missing"] += int(not failed)
@@ -210,14 +214,20 @@ class InferenceStats:
             else:
                 self._cost_missing += 1
             prompt_tokens = self._tokens(usage, "prompt_tokens")
+            cached_tokens = self._tokens(
+                usage.get("prompt_tokens_details") if isinstance(usage, dict) else None,
+                "cached_tokens",
+            )
             completion_tokens = self._tokens(usage, "completion_tokens")
             self._prompt_tokens += prompt_tokens or 0
+            self._cached_tokens += cached_tokens or 0
             self._completion_tokens += completion_tokens or 0
             self._record_model(
                 self._requested_models,
                 self._model(requested_model),
                 failed=False,
                 prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
             )
@@ -226,6 +236,7 @@ class InferenceStats:
                 self._model(result_model),
                 failed=False,
                 prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
             )
@@ -262,6 +273,7 @@ class InferenceStats:
                 "inference_cost_usd": self._cost_usd,
                 "inference_cost_missing": self._cost_missing,
                 "prompt_tokens": self._prompt_tokens,
+                "cached_tokens": self._cached_tokens,
                 "completion_tokens": self._completion_tokens,
                 "requested_models": self._requested_models,
                 "served_models": self._served_models,
