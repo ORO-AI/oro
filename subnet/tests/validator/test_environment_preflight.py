@@ -8,10 +8,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from oro_env_runtime.environment import Environment
+from oro_env_runtime.situation import (
+    Budget,
+    Requirement,
+    Situation,
+    SolverTurn,
+    Transition,
+    Utterance,
+)
 
 from validator import environment_preflight, environment_preflight_agent, main
 from validator.env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
 from validator.environment_preflight import run_environment_preflight
+from validator.session_registry import SessionRegistry
 from validator.session_service import SessionRuntime
 
 pytest_plugins = ("tests.compat_fixture",)
@@ -144,6 +154,73 @@ def test_select_reference_case_requires_a_discriminating_case(
         match="self-verifiable positive/negative",
     ):
         environment_preflight._select_reference_case(loaded_pack)
+
+
+def test_replay_matches_live_when_a_line_is_due_at_turn_2(
+    loaded_pack: LoadedPack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeline line due at turn 2 is said at turn 1's boundary in the live
+    session; the replay must say it at the same boundary to match."""
+    task_id, task, targets = environment_preflight._select_reference_case(loaded_pack)
+    situation = Situation(
+        preset="boundary",
+        requirements=[
+            Requirement(
+                id="budget",
+                predicate=Budget(max=task.hard.budget, currency=task.hard.currency),
+            )
+        ],
+        timeline=[
+            Transition(
+                id="second",
+                trigger=SolverTurn(turn=2),
+                effects=[Utterance(text="one more thing.")],
+            )
+        ],
+    )
+    open_session = LoadedPack.open_session
+
+    def with_line(self, task_id, **kwargs):  # noqa: ANN001, ANN202
+        session = open_session(self, task_id, **kwargs)
+        session.task = session.task.model_copy(update={"situation": situation})
+        session.env = Environment(session.task, session.catalog, search=session.search)
+        return session
+
+    monkeypatch.setattr(LoadedPack, "open_session", with_line)
+    with SessionRegistry(
+        loaded_pack,
+        simulator_factory=lambda _session: environment_preflight._DeterministicSimulator(),
+    ) as registry:
+        for policy, groups in environment_preflight._action_groups(task, targets).items():
+            binding = environment_preflight._binding(
+                registry.start(
+                    evaluation_run_id="run",
+                    agent_version_id=policy,
+                    task_id=task_id,
+                    session_id=policy,
+                )
+            )
+            for turn, actions in enumerate(groups, start=1):
+                registry.call(
+                    {
+                        **binding,
+                        "call_id": f"{turn}",
+                        "idempotency_key": f"{turn}",
+                        "turn": turn,
+                        "calls": [
+                            {"call_id": f"{turn}-{index}", "action": action}
+                            for index, action in enumerate(actions)
+                        ],
+                    }
+                )
+            result = registry.verdict(binding)
+            assert {"kind": "user_message", "content": "one more thing."} in [
+                {"kind": e["kind"], "content": e["payload"].get("content")}
+                for e in result["ledger"]
+            ]
+            checks = environment_preflight._replay_checks(loaded_pack, result, groups)
+            assert all(checks.values()), checks
 
 
 def test_preflight_clears_runtime_when_sandbox_fails(

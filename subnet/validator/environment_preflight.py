@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from oro_env_runtime import loop
 from oro_env_runtime.schema import CandidateRef
 
 from . import environment_preflight_agent
@@ -43,6 +44,12 @@ class EnvironmentPreflightError(RuntimeError):
 
 
 class _DeterministicSimulator:
+    def __init__(self) -> None:
+        self._discloser = self  # loop.reword_utterances says each line through it
+
+    async def say(self, _tid: str, line: str) -> tuple[str, dict[str, Any]]:
+        return line, {}
+
     async def respond(
         self,
         _transcript: list[dict[str, Any]],
@@ -100,14 +107,25 @@ def _drive_replay(
     groups: list[list[dict[str, Any]]],
 ) -> Any:
     """Drive action groups through a fresh replay session and the session
-    boundary, mirroring the deterministic simulator so it reproduces the real
-    run's ledger and verdict (a due timeline line speaks instead of the reply)."""
+    boundary as ``SessionRegistry`` does with the deterministic simulator, so it
+    reproduces the real run's ledger and verdict: a sent message gets the reply
+    unless a timeline line speaks instead, then the next turn begins and its
+    lines are said."""
     replay = loaded_pack.open_session(task_id)
     for turn, actions in enumerate(groups, start=1):
-        observations = replay.step_parallel(actions)
-        if turn == 1 and not any(item.get("done") is True for item in observations):
-            reply = [] if replay.env.utterances else [(dict(_SIMULATOR_REPLY), None)]
-            _deliver(replay, [], reply, step=turn)
+        replay.step_parallel(actions)
+        if replay.env.done():
+            break
+        message_sent = any(action.get("name") == "message" for action in actions)
+        reply = (
+            [(dict(_SIMULATOR_REPLY), None)]
+            if message_sent and not replay.env.utterances
+            else []
+        )
+        _deliver(replay, [], reply, step=turn)
+        if turn < replay.max_steps:
+            replay.env.begin_solver_turn(turn + 1)
+            loop.say_utterances(replay, [], step=turn + 1)
     return replay
 
 
