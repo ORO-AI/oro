@@ -196,6 +196,7 @@ def summarize_episode_resource_usage(
             "inference_requests": int(stats.get("inference_total", 0)),
             "inference_failed_requests": int(stats.get("inference_failed", 0)),
             "prompt_tokens": int(stats.get("prompt_tokens", 0)),
+            "cached_tokens": int(stats.get("cached_tokens", 0)),
             "completion_tokens": int(stats.get("completion_tokens", 0)),
             "requested_models": dict(stats.get("requested_models") or {}),
             "served_models": dict(stats.get("served_models") or {}),
@@ -228,6 +229,7 @@ def summarize_agent_inference_usage(
         "inference_requests": 0,
         "inference_failed_requests": 0,
         "prompt_tokens": 0,
+        "cached_tokens": 0,
         "completion_tokens": 0,
         "requested_models": {},
         "served_models": {},
@@ -238,6 +240,7 @@ def summarize_agent_inference_usage(
         totals["inference_requests"] += int(stats.get("inference_total", 0))
         totals["inference_failed_requests"] += int(stats.get("inference_failed", 0))
         totals["prompt_tokens"] += int(stats.get("prompt_tokens", 0))
+        totals["cached_tokens"] += int(stats.get("cached_tokens", 0))
         totals["completion_tokens"] += int(stats.get("completion_tokens", 0))
         cost_usd += float(stats.get("inference_cost_usd", 0))
         cost_missing += int(stats.get("inference_cost_missing", 0))

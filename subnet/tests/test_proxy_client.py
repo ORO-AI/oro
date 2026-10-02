@@ -69,10 +69,15 @@ class TestInferenceStats:
             with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-1"}'}):
                 stats = InferenceStats(stats_file=path)
                 stats.record_success(
-                    {"cost": 0.25, "prompt_tokens": 10, "completion_tokens": 4}
+                    {
+                        "cost": 0.25,
+                        "prompt_tokens": 10,
+                        "prompt_tokens_details": {"cached_tokens": 6},
+                        "completion_tokens": 4,
+                    }
                 )
                 stats.record_failure()
-                stats.record_success()
+                stats.record_success({"prompt_tokens_details": {"cached_tokens": True}})
 
             with open(path) as f:
                 lines = [json.loads(line) for line in f if line.strip()]
@@ -91,12 +96,14 @@ class TestInferenceStats:
                 "inference_cost_usd": 0.25,
                 "inference_cost_missing": 1,
                 "prompt_tokens": 10,
+                "cached_tokens": 6,
                 "completion_tokens": 4,
                 "requested_models": {
                     "Unknown model": {
                         "requests": 3,
                         "failed_requests": 1,
                         "prompt_tokens": 10,
+                        "cached_tokens": 6,
                         "completion_tokens": 4,
                         "cost_usd": 0.25,
                         "cost_missing": 1,
@@ -107,6 +114,7 @@ class TestInferenceStats:
                         "requests": 2,
                         "failed_requests": 0,
                         "prompt_tokens": 10,
+                        "cached_tokens": 6,
                         "completion_tokens": 4,
                         "cost_usd": 0.25,
                         "cost_missing": 1,
@@ -137,6 +145,7 @@ class TestInferenceStats:
             "requests": 1,
             "failed_requests": 0,
             "prompt_tokens": 3,
+            "cached_tokens": 0,
             "completion_tokens": 5,
             "cost_usd": 0.2,
             "cost_missing": 0,

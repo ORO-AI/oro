@@ -71,7 +71,7 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
 @pytest.mark.parametrize(
     ("provider", "stats", "expected_status"),
     [
-        ("openrouter", {"inference_cost_usd": 0.25}, "complete"),
+        ("openrouter", {"inference_cost_usd": 0.25, "cached_tokens": 8}, "complete"),
         (
             "openrouter",
             {"inference_cost_usd": 0.25, "inference_cost_missing": 1},
@@ -89,6 +89,7 @@ def test_episode_inference_usage_status(provider, stats, expected_status) -> Non
     )["task"]
 
     assert usage["inference_cost_status"] == expected_status
+    assert usage["cached_tokens"] == (stats or {}).get("cached_tokens", 0)
     assert ("inference_cost_usd" in usage) is (
         stats is not None and provider == "openrouter"
     )
@@ -101,6 +102,7 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
                 "inference_total": 2,
                 "inference_failed": 0,
                 "prompt_tokens": 11,
+                "cached_tokens": 8,
                 "completion_tokens": 7,
                 "inference_cost_usd": 0.3,
                 "requested_models": {"requested/a": {"requests": 2}},
@@ -119,6 +121,7 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
 
     assert summary["inference_requests"] == 3
     assert summary["inference_failed_requests"] == 1
+    assert summary["cached_tokens"] == 8
     assert summary["requested_models"] == {
         "requested/a": {"requests": 2},
         "requested/b": {"requests": 1, "failed_requests": 1},
@@ -584,7 +587,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
 
 
 @pytest.mark.parametrize(
-    ("sidecar_stats", "output_stats", "expected_cost"),
+    ("sidecar_stats", "output_stats", "expected_cost", "expected_requests"),
     [
         (
             {
@@ -598,8 +601,9 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
             },
             None,
             0.125,
+            2,
         ),
-        ({"problem_id": "session", "inference_total": "invalid"}, None, None),
+        ({"problem_id": "session", "inference_total": "invalid"}, None, None, 0),
         (
             None,
             {
@@ -612,6 +616,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
                 "completion_tokens": 5,
             },
             0.25,
+            3,
         ),
         (
             {
@@ -625,11 +630,36 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
                 "inference_cost_usd": 0.25,
             },
             0.25,
+            3,
+        ),
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 4,
+                "inference_cost_usd": 1.5,
+            },
+            {
+                "inference_total": "invalid",
+                "inference_cost_usd": "x",
+                "cached_tokens": 5,
+            },
+            1.5,
+            4,
+        ),
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 4,
+                "inference_cost_usd": 1.5,
+            },
+            {"inference_total": "invalid", "prompt_tokens": 7},
+            1.5,
+            4,
         ),
     ],
 )
 def test_generated_runner_retains_agent_inference_summary(
-    tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost
+    tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost, expected_requests
 ):
     result = {
         "task_id": "public",
@@ -710,4 +740,6 @@ def test_generated_runner_retains_agent_inference_summary(
         assert usage["inference_cost_status"] == "missing"
         assert "inference_cost_usd" not in usage
     else:
+        assert usage["inference_cost_status"] == "complete"
         assert usage["inference_cost_usd"] == expected_cost
+    assert usage["inference_requests"] == expected_requests
