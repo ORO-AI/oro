@@ -1,13 +1,11 @@
 """Tests for subnet.sandbox shared utilities."""
 
-import json
 import os
 from unittest import mock
 
 
 from subnet.sandbox import (
     host_path,
-    load_problems,
     build_sandbox_command,
     attach_title_embeddings,
 )
@@ -59,40 +57,6 @@ class TestHostPath:
                 workspace_dir="/opt/validator",
             )
             assert result == "/other/path/file.py"
-
-
-# ---------------------------------------------------------------------------
-# load_problems()
-# ---------------------------------------------------------------------------
-
-
-class TestLoadProblems:
-    """Tests for load_problems() JSON/JSONL loader."""
-
-    def test_json_array(self, tmp_path):
-        problems = [{"query": "a", "reward": 1}, {"query": "b", "reward": 2}]
-        p = tmp_path / "problems.json"
-        p.write_text(json.dumps(problems))
-        assert load_problems(p) == problems
-
-    def test_jsonl(self, tmp_path):
-        lines = [{"query": "a"}, {"query": "b"}]
-        p = tmp_path / "problems.jsonl"
-        p.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
-        assert load_problems(p) == lines
-
-    def test_empty_file(self, tmp_path):
-        p = tmp_path / "empty.json"
-        p.write_text("")
-        assert load_problems(p) == []
-
-    def test_jsonl_with_blank_lines(self, tmp_path):
-        p = tmp_path / "problems.jsonl"
-        p.write_text('{"query": "a"}\n\n{"query": "b"}\n\n')
-        result = load_problems(p)
-        assert len(result) == 2
-        assert result[0]["query"] == "a"
-        assert result[1]["query"] == "b"
 
 
 # ---------------------------------------------------------------------------
