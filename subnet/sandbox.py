@@ -1,7 +1,7 @@
 """Shared Docker sandbox utilities for local runs and the validator.
 
-Centralises sandbox image/network configuration, host-path mapping, problem
-loading, and Docker command construction so the call sites stay in sync.
+Centralises sandbox image/network configuration, host-path mapping, and
+Docker command construction so the call sites stay in sync.
 """
 
 import os
