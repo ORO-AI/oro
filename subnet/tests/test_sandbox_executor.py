@@ -102,12 +102,14 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
         "inference_cost_usd": 0.25,
         "inference_cost_missing": 0,
         "prompt_tokens": 10,
+        "cached_tokens": 6,
         "completion_tokens": 2,
             "requested_models": {
                 "Unknown model": {
                 "requests": 1,
                 "failed_requests": 0,
                 "prompt_tokens": 10,
+                "cached_tokens": 6,
                 "completion_tokens": 2,
                 "cost_usd": 0.25,
                 "cost_missing": 0,
@@ -118,6 +120,7 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
                     "requests": 1,
                     "failed_requests": 0,
                     "prompt_tokens": 10,
+                    "cached_tokens": 6,
                     "completion_tokens": 2,
                     "cost_usd": 0.25,
                     "cost_missing": 0,

@@ -170,6 +170,7 @@ def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path)
                     }
                 ],
                 "_shadow_proxy_calls": [call],
+                "_shadow_inference_usage": {"cached_tokens": 3},
             }
         )
         + "\n",
@@ -190,6 +191,7 @@ def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path)
     assert transcript["calls"][0]["json_data"]["nested"] == {}
     assert scoped_token not in transcript["calls"][0]["json_data"]["note"]
     assert "proxy_calls" not in transcript["agent_output"]["dialogue"][0]["extra_info"]
+    assert "_shadow_inference_usage" not in transcript["agent_output"]
 
 
 def test_transcript_loader_ignores_malformed_and_duplicate_output(tmp_path, caplog):

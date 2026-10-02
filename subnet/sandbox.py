@@ -1,10 +1,9 @@
 """Shared Docker sandbox utilities for local runs and the validator.
 
-Centralises sandbox image/network configuration, host-path mapping, problem
-loading, and Docker command construction so the call sites stay in sync.
+Centralises sandbox image/network configuration, host-path mapping, and
+Docker command construction so the call sites stay in sync.
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -47,28 +46,6 @@ def host_path(path: str, workspace_dir: str | None = None) -> str:
     if path.startswith("/workspace/"):
         return str(Path(HOST_PROJECT_DIR) / path[len("/workspace/") :])
     return path
-
-
-def load_problems(problem_path: Path) -> list[dict]:
-    """Load problems from a JSON array or JSONL file.
-
-    Supports both formats so callers don't need to care which one the file
-    uses.  Returns an empty list for empty files.
-    """
-    with open(problem_path) as f:
-        content = f.read().strip()
-    if not content:
-        return []
-    # JSON array format (e.g. problem_suite_v1.json)
-    if content.startswith("["):
-        return json.loads(content)
-    # JSONL format (one JSON object per line)
-    problems: list[dict] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if line:
-            problems.append(json.loads(line))
-    return problems
 
 
 def attach_title_embeddings(reward, title_embeddings) -> None:
