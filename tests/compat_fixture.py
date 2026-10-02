@@ -15,10 +15,16 @@ import pytest
 
 from oro_env_runtime import contracts
 from oro_env_runtime.grading import Grading
-from oro_env_runtime.pack import COMPILED_EPOCH_VERSION, fingerprint, write_checksums
+from oro_env_runtime.delivery import DELIVERY_SUBSET_VERSION
+from oro_env_runtime.pack import (
+    COMPILED_EPOCH_VERSION,
+    fingerprint,
+    sha256_file,
+    task_set_fingerprint,
+)
 from oro_env_runtime.reward import REWARD_VERSION
 from oro_env_runtime.search_index import source_listing_id
-from oro_env_runtime.schema import TaskSpec
+from oro_env_runtime.schema import CandidateRef, TaskSpec
 from validator.env_pack_loader import LoadedPack
 
 COMPAT_ARCHIVE = (
@@ -70,7 +76,11 @@ def _migrate_to_composed(epoch: Path, manifest: dict) -> None:
             ).model_dump(mode="json"),
         )
         row["task_id"] = f"TF8-composed-{task['seed']}"
-        row["task"] = TaskSpec.model_validate(task).model_dump(mode="json")
+        # Qualifying deliveries keep the accepted keys beside the runtime's task model.
+        row["task"] = {
+            **TaskSpec.model_validate(task).model_dump(mode="json"),
+            "acceptance": {"acceptable_keys": keys},
+        }
     task_path.write_text(
         "".join(
             json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
@@ -91,6 +101,64 @@ def _migrate_to_composed(epoch: Path, manifest: dict) -> None:
             ]
         ),
     )
+
+
+def _write_checksums(epoch: Path) -> None:
+    (epoch / "checksums.sha256").write_text(
+        "".join(
+            f"{sha256_file(path)}  {path.relative_to(epoch).as_posix()}\n"
+            for path in sorted(epoch.rglob("*"))
+            if path.is_file() and path.name != "checksums.sha256"
+        )
+    )
+
+
+def delivery_archive(
+    epoch: Path,
+    task_ids: list[str],
+    *,
+    scope: str,
+    parent_pack_sha256: str,
+    scope_id: str | None = None,
+    runtime_contract: int | None = contracts.RUNTIME_CONTRACT,
+) -> bytes:
+    """Delivery bytes for ``task_ids`` of ``epoch``, declared as the Backend declares
+    them; ``runtime_contract=None`` leaves the contract out, as older deliveries did."""
+
+    out = epoch.parent / f"delivery-{fingerprint([scope, scope_id, task_ids])[:12]}"
+    shutil.copytree(epoch, out / "epoch")
+    task_path = out / "epoch/data/tasks/private_tasks.jsonl"
+    rows = [
+        row
+        for line in task_path.read_text().splitlines()
+        if line.strip()
+        for row in [json.loads(line)]
+        if row["task_id"] in task_ids
+    ]
+    task_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    manifest = json.loads((out / "epoch/manifest.json").read_text())
+    manifest["epoch"].update(
+        family_counts={"composed": len(rows)},
+        task_set_fingerprint=task_set_fingerprint(rows),
+    )
+    manifest["delivery"] = {
+        "version": DELIVERY_SUBSET_VERSION,
+        "scope": scope,
+        "parent_pack_sha256": parent_pack_sha256,
+        "task_ids": [row["task_id"] for row in rows],
+        **({"scope_id": scope_id} if scope == "race" else {}),
+        **({} if runtime_contract is None else {"runtime_contract": runtime_contract}),
+    }
+    (out / "epoch/manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    _write_checksums(out / "epoch")
+    return Path(shutil.make_archive(str(out / "delivery"), "gztar", out, "epoch")).read_bytes()
+
+
+def accepted_ref(task: TaskSpec) -> CandidateRef:
+    """The first listing the compat task accepts (its rows grade a category table)."""
+
+    product_id, _, sku = next(iter(task.grading.situation_tables["cat"])).partition("::")
+    return CandidateRef(product_id=product_id, sku=sku)
 
 
 @pytest.fixture
@@ -126,7 +194,7 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (epoch / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     )
-    write_checksums(epoch)
+    _write_checksums(epoch)
     shutil.make_archive(str(epoch), "gztar", root_dir=tmp_path, base_dir="epoch")
 
     def catalog_record(product_id: str) -> dict:
@@ -205,7 +273,6 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         return StubSearch()
 
     monkeypatch.setattr("oro_env_runtime.runtime.SearchServerClient", client)
-    monkeypatch.setattr("oro_env_runtime.validation.SearchServerClient", client)
     return epoch
 
 
@@ -233,4 +300,4 @@ def loaded_pack(compiled_epoch: Path, tmp_path: Path) -> LoadedPack:
     )
 
 
-__all__ = ["COMPAT_ARCHIVE", "COMPAT_METADATA"]
+__all__ = ["COMPAT_ARCHIVE", "COMPAT_METADATA", "accepted_ref", "delivery_archive"]

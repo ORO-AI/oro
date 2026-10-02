@@ -14,6 +14,8 @@ from validator.generated_evaluation import write_problem_file
 from validator.session_registry import SessionRegistry
 from validator.session_service import SessionRuntime
 
+from tests.compat_fixture import accepted_ref
+
 pytest_plugins = ("tests.compat_fixture",)
 
 
@@ -23,7 +25,7 @@ def test_example_agent_uses_dynamic_tools_to_complete_a_runtime_session(
     tmp_path: Path,
 ) -> None:
     runtime = SessionRuntime()
-    candidate = loaded_pack.task_specs[0].gold_set[0]
+    candidate = accepted_ref(loaded_pack.task_specs[0])
     planned_actions = [
         {
             "name": "add_to_cart",

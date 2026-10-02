@@ -37,6 +37,8 @@ from oro_env_runtime.schema import CandidateRef
 from oro_env_runtime.user_sim import UserSim
 from validator.session_registry import SessionRegistry
 
+from tests.compat_fixture import accepted_ref
+
 pytest_plugins = ("tests.compat_fixture",)
 
 
@@ -158,7 +160,7 @@ def test_price_notice_preserves_event_currency(loaded_pack):
         state.session.env.applied_events.append(
             Event(
                 kind="price_change",
-                target=state.session.task.gold_set[0],
+                target=accepted_ref(state.session.task),
                 old_price=100,
                 new_price=130,
                 currency=state.session.task.hard.currency,
@@ -248,7 +250,7 @@ def test_a_budget_cut_is_said_at_its_boundary_and_a_silent_change_never_announce
     of that turn, and graded; the silent change is never announced (no notice, no shopper
     reaction), so only the agent's re-check notices it."""
     task = loaded_pack.task_specs[0]
-    hard, item = task.hard, task.gold_set[0].model_dump()
+    hard, item = task.hard, accepted_ref(task).model_dump()
     cut_line = "sorry, i can only spend half of that now."
     situation = Situation(
         preset="boundary",
@@ -331,7 +333,7 @@ def test_a_turn_3_cut_is_heard_before_an_order_on_turn_3(loaded_pack):
     """As loop.run says it: a cut due at turn 3's boundary is said at the end of turn 2's
     response, so an order on turn 3 is graded against a cut the agent has heard."""
     task = loaded_pack.task_specs[0]
-    hard, item = task.hard, task.gold_set[0].model_dump()
+    hard, item = task.hard, accepted_ref(task).model_dump()
     cut_line = "my budget just dropped."
     situation = Situation(
         preset="boundary",
@@ -399,7 +401,7 @@ def test_each_announced_market_change_gets_its_own_notice_in_order(
     it fires (two on the hard band) and in firing order; a silent change in between
     never gets a notice."""
     task = loaded_pack.task_specs[0]
-    hard, item = task.hard, task.gold_set[0]
+    hard, item = task.hard, accepted_ref(task)
 
     def change(turn, presentation="announced"):
         return Transition(

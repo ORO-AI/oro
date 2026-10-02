@@ -124,8 +124,8 @@ def validate_local_pack(
 
     if problem_count is None and tasks_per_family <= 0:
         raise ValueError("tasks_per_family must be positive")
-    # Local runs are practice only. A race-regime row, or a row without the public
-    # (decoupled) grader, is sealed race material and never runs here;
+    # Local runs are practice only. A row without the public (decoupled) grader is
+    # sealed race material and never runs here;
     # nor does a process that holds any race configuration.
     if any(name.startswith("ORO_RACE_") and value for name, value in os.environ.items()):
         raise ValueError("local generated validator refuses to run with race configuration set")
@@ -135,8 +135,7 @@ def validate_local_pack(
     race = [
         task_id
         for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True)
-        if (task.family_payload.get("world") or {}).get("regime") == "race"
-        or not (task.grading and task.grading.decoupled)
+        if not (task.grading and task.grading.decoupled)
     ]
     if race:
         raise ValueError(f"local generated pack holds race rows: {','.join(race[:5])}")
@@ -849,7 +848,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         inference_base_url=base_url,
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
-        or "8495b9d81a8590ddb907d04a1565352a711edbd94a8531e48577cd2b98eeab72",
+        or "662a99caab23a850a95e08832a98ca552362141ddf85832ab54843e7077f9d5a",
         problem_count=args.problems,
         seed=seed,
         max_workers=max_workers,

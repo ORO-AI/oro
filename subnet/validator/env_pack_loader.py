@@ -36,11 +36,16 @@ from .env_backend import call_environment_api, environment_client
 from oro_env_runtime.contracts import (
     ENV_CONTRACT_VERSION,
     RESULT_SCHEMA_VERSION,
+    RUNTIME_CONTRACT,
     RUNTIME_VERSION,
     TOOL_CONTRACT_VERSION,
     VERIFIER_VERSION,
 )
-from oro_env_runtime.delivery import DeliverySubsetError, validate_delivery_binding
+from oro_env_runtime.delivery import (
+    DeliverySubsetError,
+    check_epoch,
+    validate_delivery_binding,
+)
 from oro_env_runtime.pack import sha256_file
 from oro_env_runtime.runtime import (
     TaskSession,
@@ -48,7 +53,6 @@ from oro_env_runtime.runtime import (
     evict_epoch_resources,
 )
 from oro_env_runtime.schema import TaskSpec
-from oro_env_runtime.validation import validate_epoch
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +75,7 @@ PACK_LOAD_METRICS_SCHEMA_VERSION = "oro.validator.pack_load.v2"
 # The dedup key is the delivered-bytes SHA, not the parent pack SHA.
 # Qualifying + race sub-archives share a parent pack_sha256 but ship distinct
 # byte streams; keying by parent would let the second (distinct) archive skip
-# ``validate_epoch`` on a stale cache hit.
+# ``check_epoch`` on a stale cache hit.
 _VALIDATED_PACKS: set[str] = set()
 _VALIDATED_PACKS_LOCK = threading.Lock()
 
@@ -113,7 +117,7 @@ class PackValidationError(ValueError):
 
 
 class PackCompatibilityError(PackValidationError):
-    """A pack advertises a public contract version this validator cannot use."""
+    """A delivery declares a runtime contract this validator does not run."""
 
 
 @contextmanager
@@ -156,9 +160,7 @@ def _pack_load_metrics(
     return metrics
 
 
-def _validate_portable_once(
-    archive_sha256: str, pack_dir: Path
-) -> tuple[dict[str, Any], bool]:
+def _validate_portable_once(archive_sha256: str, pack_dir: Path) -> tuple[list[str], bool]:
     """Validate identical archive bytes once per validator process.
 
     Keyed by the delivered-bytes ``archive_sha256`` (the response's
@@ -174,11 +176,11 @@ def _validate_portable_once(
     # is CPU-bound.
     with _VALIDATED_PACKS_LOCK:
         if archive_sha256 in _VALIDATED_PACKS:
-            return {"status": "pass"}, True
-        validation = validate_epoch(pack_dir)
-        if validation.get("status") == "pass":
+            return [], True
+        errors = check_epoch(pack_dir)
+        if not errors:
             _VALIDATED_PACKS.add(archive_sha256)
-        return validation, False
+        return errors, False
 
 
 def _parse_expiry(value: Any) -> datetime:
@@ -204,13 +206,6 @@ def _require_metadata(metadata: Any, requested_sha256: str) -> dict[str, Any]:
         raise PackValidationError(
             "pack fetch response hash does not match the requested hash"
         )
-
-    for field_name, expected in PACK_VERSION_IDENTITIES.items():
-        actual = metadata.get(field_name)
-        if actual != expected:
-            raise PackCompatibilityError(
-                f"incompatible {field_name}: expected {expected!r}, got {actual!r}"
-            )
 
     download_url = metadata.get("download_url")
     if not isinstance(download_url, str) or not download_url:
@@ -295,11 +290,10 @@ def _require_race_metadata(
     """Schema-validate ``POST /v1/validator/race/{race_id}/pack`` response.
 
     Same download-URL fields + integrity hash as :func:`_require_metadata`.
-    The response also echoes the parent pack's contract
-    identity so ``SessionRegistry._provenance()`` finds real values (not
-    ``None``) when it walks ``loaded_pack.metadata`` for race results. The
-    race archive is compiled from the parent pack, so it inherits the
-    parent's contract pins — fast-fail here on any drift.
+    The response also echoes the parent pack's version labels so
+    ``SessionRegistry._provenance()`` finds real values (not ``None``) when it
+    walks ``loaded_pack.metadata`` for race results. Compatibility is the
+    delivery's runtime contract, checked when the archive is loaded.
     """
     if not isinstance(metadata, dict):
         raise PackValidationError("race pack fetch response must be a JSON object")
@@ -311,12 +305,6 @@ def _require_race_metadata(
         raise PackValidationError(
             "race pack fetch response pack_sha256 does not match qualifying pack"
         )
-    for field_name, expected in PACK_VERSION_IDENTITIES.items():
-        actual = metadata.get(field_name)
-        if actual != expected:
-            raise PackCompatibilityError(
-                f"incompatible {field_name}: expected {expected!r}, got {actual!r}"
-            )
     download_url = metadata.get("download_url")
     if not isinstance(download_url, str) or not download_url:
         raise PackValidationError("download_url must be a non-empty string")
@@ -448,15 +436,21 @@ def _load_validated_contents(
     with _record_timing(timings, "archive_extract"):
         pack_dir = _safe_extract(archive_path, scratch_dir)
     with _record_timing(timings, "portable_validation"):
+        manifest = json.loads((pack_dir / "manifest.json").read_text())
+        contract = (manifest.get("delivery") or {}).get("runtime_contract")
+        if contract != RUNTIME_CONTRACT:
+            raise PackCompatibilityError(
+                f"delivery runtime contract {contract!r}; this validator runs "
+                f"{RUNTIME_CONTRACT}"
+            )
         # Deduplicate on delivered-bytes SHA, not parent pack SHA, so
         # qualifying and race sub-archives (same parent, distinct bytes) are
         # each validated independently at the loader stage.
-        validation, cache_hit = _validate_portable_once(
+        errors, cache_hit = _validate_portable_once(
             metadata["download_url_sha256"], pack_dir
         )
-    if validation.get("status") != "pass":
-        detail = json.dumps(validation, sort_keys=True, separators=(",", ":"))
-        raise PackValidationError(f"sealed epoch validation failed: {detail}")
+    if errors:
+        raise PackValidationError(f"epoch check failed: {'; '.join(errors)}")
 
     with _record_timing(timings, "pack_contents_load"):
         try:
@@ -525,10 +519,9 @@ def load_local_pack(
     )
     try:
         pack_dir = _safe_extract(source, scratch_dir)
-        validation = validate_epoch(pack_dir)
-        if validation.get("status") != "pass":
-            detail = json.dumps(validation, sort_keys=True, separators=(",", ":"))
-            raise PackValidationError(f"sealed epoch validation failed: {detail}")
+        errors = check_epoch(pack_dir)
+        if errors:
+            raise PackValidationError(f"epoch check failed: {'; '.join(errors)}")
 
         manifest = json.loads((pack_dir / "manifest.json").read_text())
         rows = [
@@ -816,7 +809,7 @@ async def fetch_and_validate_race_pack(
             timings,
         )
         # Cache the validated epoch so the first TaskSession opened on this
-        # race pack does not re-run validate_epoch (matches qualifying path).
+        # race pack does not re-run check_epoch (matches qualifying path).
         current_stage = "cache_validated_epoch"
         with _record_timing(timings, current_stage):
             await asyncio.to_thread(cache_validated_epoch, pack_dir)
@@ -850,7 +843,6 @@ async def fetch_and_validate_race_pack(
         elif isinstance(exc, BackendError):
             error = f"BackendError status={exc.status_code}"
         elif isinstance(exc, PackCompatibilityError):
-            # Now reachable: _require_race_metadata validates PACK_VERSION_IDENTITIES.
             error = f"PackValidationError: {exc}"
         else:
             error = type(exc).__name__

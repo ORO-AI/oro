@@ -28,6 +28,8 @@ from validator.simulator_completion import (
     InferenceProviderError,
 )
 
+from tests.compat_fixture import accepted_ref
+
 pytest_plugins = ("tests.compat_fixture",)
 
 
@@ -348,7 +350,7 @@ def test_fresh_sessions_are_isolated_and_hide_private_truth(
     second_state_hash = registry._sessions["session-2"].session.env.state_hash_now()
     assert first_state_hash == second_state_hash
     task = registry.loaded_pack.task_specs[0]
-    candidate = task.gold_set[0]
+    candidate = accepted_ref(task)
     changed = registry.call(
         _call_envelope(
             registry,
@@ -570,7 +572,7 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
         state.session.env.applied_events.append(
             Event(
                 kind="price_change",
-                target=state.session.task.gold_set[0],
+                target=accepted_ref(state.session.task),
                 old_price=10.0,
                 new_price=12.0,
                 currency=state.session.task.hard.currency,
@@ -717,7 +719,7 @@ def test_terminal_call_allows_replay_but_rejects_new_turn(
     registry: SessionRegistry,
 ) -> None:
     _start(registry)
-    candidate = registry.loaded_pack.task_specs[0].gold_set[0]
+    candidate = accepted_ref(registry.loaded_pack.task_specs[0])
     registry.call(
         _call_envelope(
             registry,
@@ -804,7 +806,7 @@ def test_terminal_results_snapshot_does_not_finalize_registry(
     registry: SessionRegistry,
 ) -> None:
     _start(registry)
-    candidate = registry.loaded_pack.task_specs[0].gold_set[0]
+    candidate = accepted_ref(registry.loaded_pack.task_specs[0])
     registry.call(
         _call_envelope(
             registry,

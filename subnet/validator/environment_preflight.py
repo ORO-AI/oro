@@ -15,6 +15,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from oro_env_runtime import loop
+from oro_env_runtime.pack import TASKS_PATH, read_jsonl
 from oro_env_runtime.schema import CandidateRef
 
 from . import environment_preflight_agent
@@ -65,14 +66,16 @@ def _candidate_ref(key: str) -> CandidateRef | None:
     return CandidateRef(product_id=product_id, sku=sku)
 
 
-def _reference_targets(task: Any, probe: Any) -> tuple[list[CandidateRef], CandidateRef] | None:
+def _reference_targets(
+    task: Any, acceptable_keys: list[str], probe: Any
+) -> tuple[list[CandidateRef], CandidateRef] | None:
     """Build ``(positive_targets, negative)`` from the task's accepted keys and
     the first in-stock, in-budget, non-accepted catalog candidate; ``None`` if
     unusable."""
-    if task.acceptance is None or not task.acceptance.acceptable_keys:
+    if not acceptable_keys:
         return None
     accepted: list[CandidateRef] = []
-    for key in task.acceptance.acceptable_keys:
+    for key in acceptable_keys:
         ref = _candidate_ref(key)
         if ref is None:
             return None
@@ -84,7 +87,7 @@ def _reference_targets(task: Any, probe: Any) -> tuple[list[CandidateRef], Candi
     )
     if second is not None:
         positive_targets.append(second)
-    accepted_keys = set(task.acceptance.acceptable_keys)
+    accepted_keys = set(acceptable_keys)
     negative = next(
         (
             ref
@@ -149,9 +152,15 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
     """
     tasks = list(zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True))
     ordered = sorted(tasks, key=lambda t: bool(t[1].situation and t[1].situation.timeline))
+    # The qualifying delivery's rows carry ``acceptance.acceptable_keys``; the
+    # runtime's task model does not, so read them from the delivered rows.
+    acceptable_keys = {
+        row["task_id"]: (row["task"].get("acceptance") or {}).get("acceptable_keys")
+        for row in read_jsonl(loaded_pack.pack_dir / TASKS_PATH)
+    }
     for task_id, task in ordered:
         probe = loaded_pack.open_session(task_id)
-        targets = _reference_targets(task, probe)
+        targets = _reference_targets(task, acceptable_keys[task_id], probe)
         if targets is None:
             continue
         if _case_discriminates(loaded_pack, task_id, task, targets):

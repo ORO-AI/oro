@@ -14,8 +14,9 @@ from typing import Any, Callable
 
 import httpx
 import pytest
-from oro_env_runtime.delivery import build_delivery_subset_archive
+from oro_env_runtime.contracts import RUNTIME_CONTRACT
 
+from tests.compat_fixture import delivery_archive
 from validator import env_pack_loader
 from validator.env_pack_loader import (
     PackValidationError,
@@ -26,7 +27,7 @@ from validator.env_pack_loader import (
 
 pytest_plugins = ("tests.compat_fixture",)
 
-_REAL_VALIDATE_EPOCH = env_pack_loader.validate_epoch
+_REAL_CHECK_EPOCH = env_pack_loader.check_epoch
 _REAL_VALIDATE_DELIVERY_BINDING = env_pack_loader.validate_delivery_binding
 
 
@@ -62,13 +63,16 @@ def _task_row() -> dict:
     }
 
 
-def _archive_bytes() -> bytes:
+def _archive_bytes(delivery: dict | None = None) -> bytes:
     files = {
         "epoch/manifest.json": json.dumps(
             {
                 "pack_version": "test",
                 "catalog_fingerprint": "1" * 64,
                 "search": {"index_sha256": "2" * 64},
+                "delivery": (
+                    {"runtime_contract": RUNTIME_CONTRACT} if delivery is None else delivery
+                ),
             }
         ).encode(),
         "epoch/data/tasks/private_tasks.jsonl": (
@@ -126,7 +130,7 @@ def test_local_pack_removes_scratch_data_when_validation_is_interrupted(
     scratch_root = tmp_path / "scratch"
     monkeypatch.setattr(
         env_pack_loader,
-        "validate_epoch",
+        "check_epoch",
         lambda _pack_dir: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
@@ -258,9 +262,7 @@ def _stub_auth_and_epoch_validation(monkeypatch: pytest.MonkeyPatch) -> None:
             "X-Signature": "0xsigned",
         },
     )
-    monkeypatch.setattr(
-        env_pack_loader, "validate_epoch", lambda _path: {"status": "pass"}
-    )
+    monkeypatch.setattr(env_pack_loader, "check_epoch", lambda _path: [])
     monkeypatch.setattr(
         env_pack_loader,
         "validate_delivery_binding",
@@ -341,26 +343,26 @@ def test_portable_validation_cache_reuses_only_successful_results(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    outcomes = iter(({"status": "pass"}, {"status": "fail"}, {"status": "pass"}))
+    outcomes = iter(([], ["bad"], []))
     validation_calls = 0
 
-    def validate(_path: Path) -> dict[str, str]:
+    def validate(_path: Path) -> list[str]:
         nonlocal validation_calls
         validation_calls += 1
         return next(outcomes)
 
-    monkeypatch.setattr(env_pack_loader, "validate_epoch", validate)
+    monkeypatch.setattr(env_pack_loader, "check_epoch", validate)
     first_pass = env_pack_loader._validate_portable_once("a" * 64, tmp_path)
     cached_pass = env_pack_loader._validate_portable_once("a" * 64, tmp_path)
     first_failure = env_pack_loader._validate_portable_once("b" * 64, tmp_path)
     later_pass = env_pack_loader._validate_portable_once("b" * 64, tmp_path)
     cached_later_pass = env_pack_loader._validate_portable_once("b" * 64, tmp_path)
 
-    assert first_pass == ({"status": "pass"}, False)
-    assert cached_pass == ({"status": "pass"}, True)
-    assert first_failure == ({"status": "fail"}, False)
-    assert later_pass == ({"status": "pass"}, False)
-    assert cached_later_pass == ({"status": "pass"}, True)
+    assert first_pass == ([], False)
+    assert cached_pass == ([], True)
+    assert first_failure == (["bad"], False)
+    assert later_pass == ([], False)
+    assert cached_later_pass == ([], True)
     assert validation_calls == 3
 
 
@@ -370,25 +372,27 @@ async def test_loads_generator_compatibility_fixture_and_executes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Exercise extraction and the real sealed-epoch validator together."""
+    """Exercise extraction and the real epoch check together."""
 
-    monkeypatch.setattr(env_pack_loader, "validate_epoch", _REAL_VALIDATE_EPOCH)
-    archive_path = compiled_epoch.parent / f"{compiled_epoch.name}.tar.gz"
-    artifact = archive_path.read_bytes()
-    pack_sha256 = hashlib.sha256(artifact).hexdigest()
+    monkeypatch.setattr(env_pack_loader, "check_epoch", _REAL_CHECK_EPOCH)
+    pack_sha256 = "e" * 64
+    task_ids = [
+        json.loads(line)["task_id"]
+        for line in (compiled_epoch / "data/tasks/private_tasks.jsonl")
+        .read_text()
+        .splitlines()
+        if line.strip()
+    ]
+    artifact = delivery_archive(
+        compiled_epoch, task_ids, scope="qualifying", parent_pack_sha256=pack_sha256
+    )
     family_counts = {"composed": 14}
     metadata = _metadata(
         pack_sha256,
         artifact,
         task_count=14,
         family_counts=family_counts,
-        delivery_task_ids=[
-            json.loads(line)["task_id"]
-            for line in (compiled_epoch / "data/tasks/private_tasks.jsonl")
-            .read_text()
-            .splitlines()
-            if line.strip()
-        ],
+        delivery_task_ids=task_ids,
     )
     async with _client(metadata, artifact) as client:
         loaded = await fetch_and_validate_pack(
@@ -404,7 +408,7 @@ async def test_loads_generator_compatibility_fixture_and_executes(
     assert len(loaded.task_specs) == 14
     assert loaded.manifest["epoch"]["family_counts"] == family_counts
     monkeypatch.setattr(
-        "oro_env_runtime.runtime.validate_epoch",
+        "oro_env_runtime.runtime.check_epoch",
         lambda _path: pytest.fail("preflighted epoch was validated again"),
     )
     session = loaded.open_session(loaded.task_ids[0])
@@ -422,14 +426,13 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(env_pack_loader, "validate_epoch", _REAL_VALIDATE_EPOCH)
+    monkeypatch.setattr(env_pack_loader, "check_epoch", _REAL_CHECK_EPOCH)
     monkeypatch.setattr(
         env_pack_loader,
         "validate_delivery_binding",
         _REAL_VALIDATE_DELIVERY_BINDING,
     )
-    source = (compiled_epoch.parent / f"{compiled_epoch.name}.tar.gz").read_bytes()
-    parent_sha = hashlib.sha256(source).hexdigest()
+    parent_sha = "e" * 64
     source_rows = [
         json.loads(line)
         for line in (compiled_epoch / "data/tasks/private_tasks.jsonl")
@@ -438,21 +441,18 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
         if line.strip()
     ]
     selected_ids = [row["task_id"] for row in source_rows[:3]]
-    delivery = build_delivery_subset_archive(
-        source,
-        selected_ids,
-        scope="qualifying",
-        parent_pack_sha256=parent_sha,
+    delivery = delivery_archive(
+        compiled_epoch, selected_ids, scope="qualifying", parent_pack_sha256=parent_sha
     )
     metadata = _metadata(
         parent_sha,
-        delivery.body,
+        delivery,
         delivery_task_ids=selected_ids,
         task_count=3,
-        family_counts=delivery.family_counts,
+        family_counts={"composed": 3},
     )
 
-    async with _client(metadata, delivery.body) as client:
+    async with _client(metadata, delivery) as client:
         loaded = await fetch_and_validate_pack(
             parent_sha,
             "https://backend.test",
@@ -468,7 +468,7 @@ async def test_loads_scope_bound_delivery_and_rejects_wrong_roster(
         row["task_id"] for row in source_rows if row["task_id"] not in selected_ids
     )
     metadata["delivery_task_ids"] = [*selected_ids[:-1], unauthorized_id]
-    async with _client(metadata, delivery.body) as client:
+    async with _client(metadata, delivery) as client:
         rejected = await fetch_and_validate_pack(
             parent_sha,
             "https://backend.test",
@@ -733,42 +733,29 @@ async def test_backend_metadata_403_logs_status_and_stage(
 
 @_run_async
 @pytest.mark.parametrize(
-    ("field_name", "bad_value"),
-    [
-        ("contract_version", "oro.env.v999"),
-        ("runtime_version", "99.0.0"),
-        ("tool_contract_version", "other_tools"),
-        ("verifier_version", "99.0.0"),
-        ("result_schema_version", "v99"),
-    ],
+    ("delivery", "declared"),
+    [({}, None), ({"runtime_contract": RUNTIME_CONTRACT + 1}, RUNTIME_CONTRACT + 1)],
 )
-async def test_version_mismatch_skips_without_downloading(
+async def test_refuses_delivery_for_another_runtime_contract(
     tmp_path: Path,
-    field_name: str,
-    bad_value: str,
+    delivery: dict,
+    declared: int | None,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    artifact = _archive_bytes()
+    """A delivery without a contract (cut before contracts existed) or with another
+    contract is refused with the reason, whatever version labels the Backend echoes."""
+
+    artifact = _archive_bytes(delivery)
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
-    requests: list[httpx.Request] = []
-    metadata = _metadata(pack_sha256, artifact, **{field_name: bad_value})
+    metadata = _metadata(pack_sha256, artifact, tool_contract_version="other_tools")
     with caplog.at_level("WARNING", logger=env_pack_loader.__name__):
-        async with _client(metadata, artifact, requests) as client:
-            loaded = await fetch_and_validate_pack(
-                pack_sha256,
-                "https://backend.test",
-                object(),
-                scratch_root=tmp_path,
-                http_client=client,
-                backend_transport=client._transport,
-            )
+        loaded = await _fetch_pack(metadata, artifact, tmp_path)
 
     assert loaded is None
-    assert len(requests) == 1
+    assert list(tmp_path.iterdir()) == []
     assert (
-        f"PackValidationError: incompatible {field_name}: "
-        f"expected {env_pack_loader.PACK_VERSION_IDENTITIES[field_name]!r}, "
-        f"got {bad_value!r}"
+        f"PackValidationError: delivery runtime contract {declared!r}; "
+        f"this validator runs {RUNTIME_CONTRACT}"
     ) in caplog.text
 
 
@@ -798,11 +785,7 @@ async def test_rejects_failed_sealed_epoch_validation(
 ) -> None:
     artifact = _archive_bytes()
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
-    monkeypatch.setattr(
-        env_pack_loader,
-        "validate_epoch",
-        lambda _path: {"status": "fail", "checksum_errors": ["bad checksum"]},
-    )
+    monkeypatch.setattr(env_pack_loader, "check_epoch", lambda _path: ["bad checksum"])
     with caplog.at_level("WARNING", logger=env_pack_loader.__name__):
         async with _client(_metadata(pack_sha256, artifact), artifact) as client:
             loaded = await fetch_and_validate_pack(

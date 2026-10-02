@@ -138,7 +138,7 @@ parentheses:
 
 ```text
 ORO Bench local run  local-7c1f2a
-  pack        8495b9d8…ab72
+  pack        662a99ca…9d5a
   problems    5 of 30, qualifying roster
   runtime     0.3.4  verifier 0.4.0
   inference   openrouter

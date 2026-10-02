@@ -33,7 +33,6 @@ def _pack(families: list[str]) -> SimpleNamespace:
         task_specs=[
             SimpleNamespace(
                 family=family,
-                family_payload={},
                 grading=SimpleNamespace(decoupled=True),
                 situation=SimpleNamespace(requirements=[], obligations=[], metrics=[]),
             )
@@ -193,11 +192,7 @@ def test_local_pack_never_runs_race_rows_or_with_race_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     roster = ["composed"] * 5
-    race = _pack(roster)
-    race.task_specs[0].family_payload = {"world": {"regime": "race"}}
-    with pytest.raises(ValueError, match="race rows: task-0"):
-        validate_local_pack(race)
-    sealed = _pack(["composed"] * 5)
+    sealed = _pack(roster)
     sealed.task_specs[1].grading = SimpleNamespace(decoupled=False)
     with pytest.raises(ValueError, match="race rows: task-1"):
         validate_local_pack(sealed, frozenset({"composed"}))
