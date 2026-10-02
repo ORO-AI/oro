@@ -164,17 +164,18 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
-_ADMITTING_COUNTERS = (
-    "inference_success",
+# An entry counts only with a valid request count; the other counters are
+# summed once admitted but cannot admit an entry on their own.
+_ADMITTING_COUNTERS = ("inference_success", "inference_total")
+_INFERENCE_COUNTERS = (
+    *_ADMITTING_COUNTERS,
     "inference_failed",
-    "inference_total",
     "inference_cost_usd",
     "inference_cost_missing",
     "prompt_tokens",
+    "cached_tokens",
     "completion_tokens",
 )
-# cached_tokens is summed but cannot admit an entry on its own.
-_INFERENCE_COUNTERS = (*_ADMITTING_COUNTERS, "cached_tokens")
 
 
 def _numeric_counter_map(entry: dict, keys: tuple[str, ...]) -> dict[str, int | float]:

@@ -646,6 +646,16 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
             1.5,
             4,
         ),
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 4,
+                "inference_cost_usd": 1.5,
+            },
+            {"inference_total": "invalid", "prompt_tokens": 7},
+            1.5,
+            4,
+        ),
     ],
 )
 def test_generated_runner_retains_agent_inference_summary(
