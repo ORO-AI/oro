@@ -587,7 +587,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
 
 
 @pytest.mark.parametrize(
-    ("sidecar_stats", "output_stats", "expected_cost"),
+    ("sidecar_stats", "output_stats", "expected_cost", "expected_requests"),
     [
         (
             {
@@ -601,8 +601,9 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
             },
             None,
             0.125,
+            2,
         ),
-        ({"problem_id": "session", "inference_total": "invalid"}, None, None),
+        ({"problem_id": "session", "inference_total": "invalid"}, None, None, 0),
         (
             None,
             {
@@ -615,6 +616,7 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
                 "completion_tokens": 5,
             },
             0.25,
+            3,
         ),
         (
             {
@@ -628,11 +630,26 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
                 "inference_cost_usd": 0.25,
             },
             0.25,
+            3,
+        ),
+        (
+            {
+                "problem_id": "session",
+                "inference_total": 4,
+                "inference_cost_usd": 1.5,
+            },
+            {
+                "inference_total": "invalid",
+                "inference_cost_usd": "x",
+                "cached_tokens": 5,
+            },
+            1.5,
+            4,
         ),
     ],
 )
 def test_generated_runner_retains_agent_inference_summary(
-    tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost
+    tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost, expected_requests
 ):
     result = {
         "task_id": "public",
@@ -713,4 +730,6 @@ def test_generated_runner_retains_agent_inference_summary(
         assert usage["inference_cost_status"] == "missing"
         assert "inference_cost_usd" not in usage
     else:
+        assert usage["inference_cost_status"] == "complete"
         assert usage["inference_cost_usd"] == expected_cost
+    assert usage["inference_requests"] == expected_requests

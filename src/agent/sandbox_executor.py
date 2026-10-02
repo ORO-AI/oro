@@ -164,16 +164,17 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
-_INFERENCE_COUNTERS = (
+_ADMITTING_COUNTERS = (
     "inference_success",
     "inference_failed",
     "inference_total",
     "inference_cost_usd",
     "inference_cost_missing",
     "prompt_tokens",
-    "cached_tokens",
     "completion_tokens",
 )
+# cached_tokens is summed but cannot admit an entry on its own.
+_INFERENCE_COUNTERS = (*_ADMITTING_COUNTERS, "cached_tokens")
 
 
 def _numeric_counter_map(entry: dict, keys: tuple[str, ...]) -> dict[str, int | float]:
@@ -268,7 +269,7 @@ def read_inference_stats(
     totals: dict[str, dict] = {}
     for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)
-        if not numeric:
+        if numeric.keys().isdisjoint(_ADMITTING_COUNTERS):
             continue
         total = totals.setdefault(problem_id, {"problem_id": problem_id})
         for counter in _INFERENCE_COUNTERS:
@@ -286,7 +287,7 @@ def merge_inference_stats(*sources: dict[str, dict]) -> dict[str, dict]:
             if not isinstance(entry, dict):
                 continue
             numeric = _numeric_inference_counters(entry)
-            if not numeric:
+            if numeric.keys().isdisjoint(_ADMITTING_COUNTERS):
                 continue
             total = totals.setdefault(problem_id, {"problem_id": problem_id})
             for counter, value in numeric.items():
