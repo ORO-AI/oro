@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from oro_env_runtime import loop
 from oro_env_runtime.loop import record_user_message
+from oro_env_runtime.observations import event_observed_or_signaled
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
 from oro_env_runtime.user_sim import UserSim
 
@@ -497,15 +498,27 @@ class SessionRegistry:
 
     @staticmethod
     def _pending_event(state: _SessionState, turn: int) -> int | None:
-        """The first announced event still owed a shopper notice, one turn after it fired."""
-        if state.session.state_blind:
+        """The first announced event still owed a shopper notice, as loop.run picks it."""
+        session = state.session
+        if session.state_blind:
             return None
+        hard_band = session.task.difficulty_band == "hard"
+        if hard_band:
+            entries = session.env.ledger.entries()
+            state.surfaced_events.update(
+                index
+                for index in state.event_fired_turns
+                if event_observed_or_signaled(
+                    entries, None, index=index, budget=session.render_budget
+                )
+            )
+        notice_delay = 2 if hard_band else 1
         return next(
             (
                 index
                 for index in sorted(state.event_fired_turns)
                 if index not in state.surfaced_events
-                and turn > state.event_fired_turns[index]
+                and turn >= state.event_fired_turns[index] + notice_delay
             ),
             None,
         )
@@ -671,7 +684,8 @@ class SessionRegistry:
         message_sent = any(
             item["action"].get("name") == "message" for item in call_group
         )
-        # Preserve one unaided policy turn after each public event. The agent must react to the observation before the
+        # Preserve an unaided policy turn (two on the hard band) after each
+        # public event. The agent must react to the observation before the
         # shopper simulator can reinforce it; a terminal action in that turn
         # gets no rescue. Each announced event gets its own notice, in order.
         pending_event = self._pending_event(state, turn)

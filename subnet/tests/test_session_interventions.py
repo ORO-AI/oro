@@ -8,6 +8,7 @@ import json
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
 
 
 from oro_env_runtime import loop
@@ -382,9 +383,21 @@ def test_a_turn_3_cut_is_heard_before_an_order_on_turn_3(loaded_pack):
     assert graded.fired == ("cut",) and graded.checks["requirement:budget:cut"] is False
 
 
-def test_each_announced_market_change_gets_its_own_notice_in_order(loaded_pack):
-    """Every announced change is noticed once, one turn after it fires and in firing
-    order; a silent change in between never gets a notice."""
+@pytest.mark.parametrize(
+    ("band", "inspect_turn", "noticed_events", "noticed_turns"),
+    [
+        ("standard", None, [0, 2], [3, 7]),
+        ("hard", None, [0, 2], [4, 8]),
+        # On the hard band an event the agent already saw needs no notice.
+        ("hard", 2, [2], [8]),
+    ],
+)
+def test_each_announced_market_change_gets_its_own_notice_in_order(
+    loaded_pack, band, inspect_turn, noticed_events, noticed_turns
+):
+    """As loop.run tracks them: every announced change is noticed once, one turn after
+    it fires (two on the hard band) and in firing order; a silent change in between
+    never gets a notice."""
     task = loaded_pack.task_specs[0]
     hard, item = task.hard, task.gold_set[0]
 
@@ -411,6 +424,7 @@ def test_each_announced_market_change_gets_its_own_notice_in_order(loaded_pack):
         timeline=[change(2), change(3, "silent"), change(6)],
     )
     with _registry(loaded_pack, situation) as (registry, state, sim):
+        state.session.task = state.session.task.model_copy(update={"difficulty_band": band})
         signals = []
 
         async def respond(transcript, signal):
@@ -418,15 +432,16 @@ def test_each_announced_market_change_gets_its_own_notice_in_order(loaded_pack):
             return {"action": "no_op", "content": "", "reason": "test"}
 
         sim.respond = respond
+        inspect = {"name": "inspect_stock", "args": item.model_dump()}
         for turn in range(1, 10):
-            _call(registry, turn)
+            _call(registry, turn, [inspect] if turn == inspect_turn else None)
         env = state.session.env
 
     assert env.announced_events() == [0, 2]
-    assert signals == [loop._event_signal(env.applied_events[i]) for i in (0, 2)]
+    assert signals == [loop._event_signal(env.applied_events[i]) for i in noticed_events]
     noticed = [
         entry.turn
         for entry in env.ledger.entries()
         if entry.kind == "user_message" and entry.payload.get("env_signal")
     ]
-    assert noticed == [3, 7]
+    assert noticed == noticed_turns
