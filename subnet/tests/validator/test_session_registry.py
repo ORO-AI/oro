@@ -576,7 +576,7 @@ def test_grouped_calls_keep_order_ids_and_simulator_reply(
                 currency=state.session.task.hard.currency,
             )
         )
-        state.event_fired_turn = 1
+        state.event_fired_turns[0] = 1
         event_response = registry.call(
             _call_envelope(
                 registry,

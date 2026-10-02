@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 
 
+from oro_env_runtime import loop
 from oro_env_runtime.schema import Event
 from oro_env_runtime.situation import (
     AfterTransition,
@@ -161,7 +162,7 @@ def test_price_notice_preserves_event_currency(loaded_pack):
                 currency=state.session.task.hard.currency,
             )
         )
-        state.event_fired_turn = 1
+        state.event_fired_turns[0] = 1
         _call(registry, 2)
         assert sim.last_signal == {
             "kind": "price_change",
@@ -378,3 +379,56 @@ def test_a_turn_3_cut_is_heard_before_an_order_on_turn_3(loaded_pack):
     assert said.payload["content"] == cut_line
     graded = evaluate(situation, ledger, {})
     assert graded.fired == ("cut",) and graded.checks["requirement:budget:cut"] is False
+
+
+def test_each_announced_market_change_gets_its_own_notice_in_order(loaded_pack):
+    """As loop.run tracks them: every announced change is noticed once, a turn after it
+    fires and in firing order; a silent change in between never gets a notice."""
+    task = loaded_pack.task_specs[0]
+    hard, key = task.hard, task.gold_set[0].key()
+
+    def change(turn, presentation="announced"):
+        return Transition(
+            id=f"market:{turn}",
+            trigger=SolverTurn(turn=turn),
+            effects=[
+                MarketChange(
+                    change="price_change",
+                    price_multiplier=1.1,
+                    target="keys",
+                    keys=[key],
+                    presentation=presentation,
+                )
+            ],
+        )
+
+    situation = Situation(
+        preset="boundary",
+        requirements=[
+            Requirement(id="budget", predicate=Budget(max=hard.budget, currency=hard.currency))
+        ],
+        timeline=[change(2), change(3, "silent"), change(4)],
+    )
+    with _registry(loaded_pack, situation) as (registry, state, sim):
+        signals = []
+
+        async def respond(transcript, signal):
+            signals.append(signal)
+            return {"action": "no_op", "content": "", "reason": "test"}
+
+        sim.respond = respond
+        for turn in range(1, 8):
+            _call(registry, turn)
+        env = state.session.env
+
+    assert env.announced_events() == [0, 2]
+    assert signals == [
+        loop._event_signal(env.applied_events[0]),
+        loop._event_signal(env.applied_events[2]),
+    ]
+    noticed = [
+        entry.turn
+        for entry in env.ledger.entries()
+        if entry.kind == "user_message" and entry.payload.get("env_signal")
+    ]
+    assert noticed == [3, 5]

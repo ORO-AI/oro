@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from oro_env_runtime import loop
 from oro_env_runtime.loop import record_user_message
+from oro_env_runtime.observations import event_observed_or_signaled
 from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
 from oro_env_runtime.user_sim import UserSim
 
@@ -142,8 +143,8 @@ class _SessionState:
     started_at: float
     finished_at: float | None = None
     call_trace: list[dict[str, Any]] = field(default_factory=list)
-    event_fired_turn: int | None = None
-    event_surfaced: bool = False
+    event_fired_turns: dict[int, int] = field(default_factory=dict)
+    surfaced_events: set[int] = field(default_factory=set)
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
@@ -496,12 +497,30 @@ class SessionRegistry:
             )
 
     @staticmethod
-    def _event_ready(state: _SessionState, turn: int) -> bool:
-        return (
-            not state.event_surfaced
-            and not state.session.state_blind
-            and state.event_fired_turn is not None
-            and turn > state.event_fired_turn
+    def _pending_event(state: _SessionState, turn: int) -> int | None:
+        """The first announced event still owed a shopper notice, as loop.run picks it."""
+        session = state.session
+        if session.state_blind:
+            return None
+        hard_band = session.task.difficulty_band == "hard"
+        if hard_band:
+            entries = session.env.ledger.entries()
+            state.surfaced_events.update(
+                index
+                for index in state.event_fired_turns
+                if event_observed_or_signaled(
+                    entries, None, index=index, budget=session.render_budget
+                )
+            )
+        notice_delay = 2 if hard_band else 1
+        return next(
+            (
+                index
+                for index in sorted(state.event_fired_turns)
+                if index not in state.surfaced_events
+                and turn >= state.event_fired_turns[index] + notice_delay
+            ),
+            None,
         )
 
     def _simulator_error(
@@ -665,24 +684,15 @@ class SessionRegistry:
         message_sent = any(
             item["action"].get("name") == "message" for item in call_group
         )
-        # Preserve one unaided policy turn after a public event. The agent
-        # must react to the observation before the shopper simulator can
-        # reinforce it; a terminal action in that turn gets no rescue.
-        event_ready = self._event_ready(state, turn)
-        if message_sent or event_ready or env.utterances:
+        # Preserve an unaided policy turn (two on the hard band) after each
+        # public event. The agent must react to the observation before the
+        # shopper simulator can reinforce it; a terminal action in that turn
+        # gets no rescue. Each announced event gets its own notice, in order.
+        pending_event = self._pending_event(state, turn)
+        if message_sent or pending_event is not None or env.utterances:
             signal = None
-            if event_ready:
-                announced = env.announced_events()
-                event = env.applied_events[announced[0]]
-                signal = {"kind": event.kind}
-                if event.kind == "price_change":
-                    signal.update(
-                        {
-                            "old_price": event.old_price,
-                            "new_price": event.new_price,
-                            "currency": event.currency,
-                        }
-                    )
+            if pending_event is not None:
+                signal = loop._event_signal(env.applied_events[pending_event])
             decisions = self._in_simulator(
                 session_id,
                 state,
@@ -694,7 +704,8 @@ class SessionRegistry:
                 message_sent,
             )
             _deliver(state.session, state.transcript, decisions, step=turn)
-            state.event_surfaced = state.event_surfaced or event_ready
+            if pending_event is not None:
+                state.surfaced_events.add(pending_event)
         # The next turn's boundary fires now, so its lines are heard before the agent
         # acts on that turn, as loop.run says them.
         if turn < state.session.max_steps:
@@ -787,8 +798,8 @@ class SessionRegistry:
             ]
             # A silent market change is left for the agent to see; only an
             # announced one gets a shopper notice.
-            if state.event_fired_turn is None and state.session.env.announced_events():
-                state.event_fired_turn = turn
+            for index in state.session.env.announced_events():
+                state.event_fired_turns.setdefault(index, turn)
             state.transcript.append(
                 {
                     "role": "assistant",
