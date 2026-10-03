@@ -4,14 +4,15 @@ Uses temp_storage_path and mock_backend_client fixtures from conftest.py.
 """
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 
 from oro_sdk.models.terminal_status import TerminalStatus
 
-from validator.backend_client import BackendError
+from validator.backend_client import BackendClient, BackendError
 from validator.models import CompletionRequest
 from validator.retry_queue import LocalRetryQueue
 
@@ -136,3 +137,34 @@ class TestLocalRetryQueue:
 
         queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
         assert queue.get_pending_count() == 1
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(httpx.ReadError("connection reset by peer"), id="read-error"),
+            pytest.param(
+                httpx.RemoteProtocolError("Server disconnected without sending a response."),
+                id="server-disconnected",
+            ),
+        ],
+    )
+    def test_dropped_connection_keeps_completion_queued(
+        self, temp_storage_path, mock_wallet, sample_completion, exc
+    ):
+        """A connection dropped during a complete_run replay goes through the
+        real BackendClient error mapping and must leave the entry queued for
+        the next pass, not drop the result."""
+        client = BackendClient("https://api.example.com", mock_wallet)
+        queue = LocalRetryQueue(client, temp_storage_path)
+        queue.add(sample_completion)
+
+        with patch(
+            "validator.backend_client.complete_run.sync_detailed",
+            side_effect=exc,
+        ) as sdk_call:
+            queue.process_pending()
+
+        sdk_call.assert_called_once()
+        assert queue.get_pending_count() == 1
+        with open(temp_storage_path) as f:
+            assert json.load(f)["pending"][0]["retry_count"] == 1
