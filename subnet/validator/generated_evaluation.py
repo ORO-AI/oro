@@ -96,10 +96,7 @@ def write_problem_file(path: Path, sessions: list[dict[str, Any]]) -> None:
                 "category": "generated_environment",
                 "environment": {
                     "schema_version": GENERATED_PROBLEM_SCHEMA,
-                    "binding": {
-                        "session_id": session_id,
-                        "tool_contract_version": policy_view["tool_contract_version"],
-                    },
+                    "binding": {"session_id": session_id},
                     "policy_view": policy_view,
                 },
             }

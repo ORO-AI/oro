@@ -32,7 +32,7 @@ from oro_env_runtime.observations import event_observed_or_signaled
 from oro_env_runtime.situation_eval import evaluate
 from oro_env_runtime.catalog import CandidateMeta
 from oro_env_runtime.environment import Environment
-from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
+from oro_env_runtime.runtime import TaskSession
 from oro_env_runtime.schema import CandidateRef
 from oro_env_runtime.user_sim import UserSim
 from validator.session_registry import SessionRegistry
@@ -142,7 +142,6 @@ def _call(registry, turn, actions=None):
     actions = actions or [{"name": "inspect_cart", "args": {}}]
     envelope = {
         "session_id": "session",
-        "tool_contract_version": TOOL_CONTRACT_VERSION,
         "turn": turn,
         "call_id": f"turn-{turn}",
         "idempotency_key": f"turn-{turn}",

@@ -17,7 +17,7 @@ from uuid import uuid4
 from oro_env_runtime import loop
 from oro_env_runtime.loop import record_user_message
 from oro_env_runtime.observations import event_observed_or_signaled
-from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION, TaskSession
+from oro_env_runtime.runtime import TaskSession
 from oro_env_runtime.user_sim import UserSim
 
 from .env_pack_loader import LoadedPack
@@ -39,7 +39,6 @@ DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
 _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
-    "tool_contract_version",
     "result_schema_version",
     "catalog_epoch",
     "catalog_sha256",
@@ -53,7 +52,6 @@ _PACK_PROVENANCE_FIELDS = (
 _PUBLIC_POLICY_FIELDS = (
     "query",
     "max_steps",
-    "tool_contract_version",
     "tools",
 )
 _PUBLIC_STEP_FIELDS = ("observation", "done", "error")
@@ -399,10 +397,6 @@ class SessionRegistry:
         for key, value in optional_expected.items():
             if key in envelope and envelope[key] != value:
                 raise InvalidSessionError(f"{key} does not match the active session")
-        if envelope.get("tool_contract_version") != TOOL_CONTRACT_VERSION:
-            raise InvalidSessionError(
-                "tool_contract_version does not match the active session"
-            )
         if state.quarantined_reason is not None:
             raise InvalidSessionError("session is quarantined")
         if self.key_exhausted.is_set():
@@ -828,7 +822,6 @@ class SessionRegistry:
                 "turn": turn,
                 "solver_turn_count": state.session.solver_turn_count,
                 "action_count": state.session.step_count,
-                "tool_contract_version": TOOL_CONTRACT_VERSION,
                 "calls": call_results,
                 "user_message": user_message,
                 "provider_status": "complete",

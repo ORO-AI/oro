@@ -374,7 +374,6 @@ class TestSandboxIsolation:
                 json.dumps(
                     {
                         "session_id": "integration-session",
-                        "tool_contract_version": "oro_task_tools_v2",
                         "call_id": "integration-group-1",
                         "idempotency_key": "integration-group-1",
                         "turn": 1,
@@ -416,10 +415,7 @@ class TestSandboxIsolation:
                     "problem_id": "positive",
                     "query": "Run the deterministic environment preflight.",
                     "environment": {
-                        "binding": {
-                            "session_id": "integration-session",
-                            "tool_contract_version": "oro_task_tools_v2",
-                        },
+                        "binding": {"session_id": "integration-session"},
                         "action_groups": [
                             [
                                 {"name": "search", "args": {"query": "shoes"}},
@@ -489,7 +485,6 @@ class TestSandboxIsolation:
                             "policy_view": {
                                 "query": "Public shopper request",
                                 "max_steps": 10,
-                                "tool_contract_version": "oro_task_tools_v2",
                                 "tools": [],
                                 "max_calls_per_turn": 16,
                             },

@@ -193,14 +193,13 @@ def test_replay_matches_live_when_a_line_is_due_at_turn_2(
         simulator_factory=lambda _session: environment_preflight._DeterministicSimulator(),
     ) as registry:
         for policy, groups in environment_preflight._action_groups(task, targets).items():
-            binding = environment_preflight._binding(
-                registry.start(
-                    evaluation_run_id="run",
-                    agent_version_id=policy,
-                    task_id=task_id,
-                    session_id=policy,
-                )
+            registry.start(
+                evaluation_run_id="run",
+                agent_version_id=policy,
+                task_id=task_id,
+                session_id=policy,
             )
+            binding = {"session_id": policy}
             for turn, actions in enumerate(groups, start=1):
                 registry.call(
                     {

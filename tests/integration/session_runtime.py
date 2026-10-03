@@ -25,10 +25,6 @@ class _IntegrationRegistry:
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
         if envelope.get("session_id") != "integration-session":
             raise InvalidSessionError("unknown session_id")
-        if envelope.get("tool_contract_version") != "oro_task_tools_v2":
-            raise InvalidSessionError(
-                "tool_contract_version does not match the active session"
-            )
         call_id = envelope.get("call_id")
         idempotency_key = envelope.get("idempotency_key")
         if not isinstance(call_id, str) or not call_id:
@@ -85,7 +81,6 @@ class _IntegrationRegistry:
             "turn": int(envelope.get("turn") or 1),
             "solver_turn_count": int(envelope.get("turn") or 1),
             "action_count": len(calls),
-            "tool_contract_version": "oro_task_tools_v2",
             "calls": public_calls,
             "user_message": {"content": "continue with the selected option"},
             "provider_status": "complete",

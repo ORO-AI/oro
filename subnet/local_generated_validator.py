@@ -848,7 +848,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         inference_base_url=base_url,
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
-        or "06d63140150f0f998adbc8f8fbbd4ea878e7c01041adf4c27d3b5d1db951c72b",
+        or "90169a076abeab6aff11d60ea7e711b66df2764ab91b5606d62eb713788ea7e8",
         problem_count=args.problems,
         seed=seed,
         max_workers=max_workers,

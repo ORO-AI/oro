@@ -32,7 +32,6 @@ def test_problem_file_contains_only_public_session_contract(tmp_path) -> None:
     policy_view = {
         "query": "Find a blue mug",
         "max_steps": 5,
-        "tool_contract_version": "v1",
         "tools": [],
         "max_calls_per_turn": 16,
     }
@@ -47,10 +46,7 @@ def test_problem_file_contains_only_public_session_contract(tmp_path) -> None:
         "category": "generated_environment",
         "environment": {
             "schema_version": GENERATED_PROBLEM_SCHEMA,
-            "binding": {
-                "session_id": "session-1",
-                "tool_contract_version": "v1",
-            },
+            "binding": {"session_id": "session-1"},
             "policy_view": policy_view,
         },
     }
@@ -306,7 +302,7 @@ def test_generated_runner_delivers_failed_completion(
     validator = Validator.__new__(Validator)
     validator._create_environment_sessions = MagicMock(return_value=(
         registry,
-        [{"session_id": "session", "policy_view": {"query": "query", "tool_contract_version": "v1"}}],
+        [{"session_id": "session", "policy_view": {"query": "query"}}],
         {"task": "right"},
     ))
     validator._eval_dir = MagicMock(return_value=tmp_path)
@@ -364,7 +360,7 @@ def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monke
     validator = Validator.__new__(Validator)
     validator._create_environment_sessions = MagicMock(return_value=(
         registry,
-        [{"session_id": "session", "policy_view": {"query": "query", "tool_contract_version": "v1"}}],
+        [{"session_id": "session", "policy_view": {"query": "query"}}],
         {"t1": "right", "t2": "right", "t3": "right", "t4": "right"},
     ))
     validator._eval_dir = MagicMock(return_value=tmp_path)
@@ -446,7 +442,7 @@ def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
     registry = MagicMock()
     registry.start.side_effect = lambda **kw: {
         "session_id": kw["task_id"],
-        "policy_view": {"query": "public query", "tool_contract_version": "v1"},
+        "policy_view": {"query": "public query"},
     }
     monkeypatch.setattr(
         validator_main, "SessionRegistry", MagicMock(return_value=registry)
@@ -685,10 +681,7 @@ def test_generated_runner_retains_agent_inference_summary(
             [
                 {
                     "session_id": "session",
-                    "policy_view": {
-                        "query": "query",
-                        "tool_contract_version": "v1",
-                    },
+                    "policy_view": {"query": "query"},
                 }
             ],
             {"public": "right"},

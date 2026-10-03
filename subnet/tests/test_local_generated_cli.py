@@ -13,14 +13,13 @@ from oro_env_runtime import (
     REPLAY_CONTRACT_VERSION,
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
-    TOOL_CONTRACT_VERSION,
 )
 
 from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "06d63140150f0f998adbc8f8fbbd4ea878e7c01041adf4c27d3b5d1db951c72b"
+    "90169a076abeab6aff11d60ea7e711b66df2764ab91b5606d62eb713788ea7e8"
 )
 
 
@@ -129,7 +128,6 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "replay": REPLAY_CONTRACT_VERSION,
         "result": RESULT_SCHEMA_VERSION,
         "runtime": RUNTIME_VERSION,
-        "tools": TOOL_CONTRACT_VERSION,
     }
     family_counts = manifest["epoch"]["family_counts"]
     # The bundled pack may ship a subset of the supported families (currently

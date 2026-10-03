@@ -6,7 +6,6 @@ import json
 
 from fastapi.testclient import TestClient
 
-from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION
 from oro_env_runtime.user_sim import UserSim
 
 from validator.session_registry import SessionRegistry
@@ -40,7 +39,6 @@ def _start(registry: SessionRegistry) -> dict:
 def _call(*, action: dict | None = None) -> dict:
     return {
         "session_id": "public-session-token",
-        "tool_contract_version": TOOL_CONTRACT_VERSION,
         "call_id": "call-1",
         "idempotency_key": "idem-1",
         "turn": 1,
@@ -56,7 +54,6 @@ def test_bootstrap_is_an_explicit_public_projection(loaded_pack) -> None:  # noq
     assert set(bootstrap["policy_view"]) == {
         "query",
         "max_steps",
-        "tool_contract_version",
         "tools",
         "max_calls_per_turn",
     }
@@ -114,7 +111,6 @@ def test_runtime_ledger_entries_never_cross_the_public_boundary(
         "turn",
         "solver_turn_count",
         "action_count",
-        "tool_contract_version",
         "calls",
         "user_message",
         "observation",

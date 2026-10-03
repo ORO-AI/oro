@@ -158,7 +158,6 @@ def _metadata(pack_sha256: str, artifact: bytes, **updates: object) -> dict:
         "delivery_task_ids": ["TF2-retrieval_recall-1"],
         "contract_version": env_pack_loader.ENV_CONTRACT_VERSION,
         "runtime_version": env_pack_loader.RUNTIME_VERSION,
-        "tool_contract_version": env_pack_loader.TOOL_CONTRACT_VERSION,
         "result_schema_version": env_pack_loader.RESULT_SCHEMA_VERSION,
         "catalog_epoch": "test-catalog",
         "catalog_sha256": "1" * 64,
@@ -746,7 +745,7 @@ async def test_refuses_delivery_for_another_runtime_contract(
 
     artifact = _archive_bytes(delivery)
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
-    metadata = _metadata(pack_sha256, artifact, tool_contract_version="other_tools")
+    metadata = _metadata(pack_sha256, artifact, runtime_version="other")
     with caplog.at_level("WARNING", logger=env_pack_loader.__name__):
         loaded = await _fetch_pack(metadata, artifact, tmp_path)
 
@@ -824,7 +823,6 @@ def _race_metadata(
         "download_url_size_bytes": len(artifact),
         "contract_version": env_pack_loader.ENV_CONTRACT_VERSION,
         "runtime_version": env_pack_loader.RUNTIME_VERSION,
-        "tool_contract_version": env_pack_loader.TOOL_CONTRACT_VERSION,
         "result_schema_version": env_pack_loader.RESULT_SCHEMA_VERSION,
         "catalog_epoch": "test-catalog",
         "catalog_sha256": "1" * 64,

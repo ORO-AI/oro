@@ -187,7 +187,6 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         == manifest["source_sha256"]["products_schema_b.jsonl"]
     )
     manifest["contracts"]["runtime"] = contracts.RUNTIME_VERSION
-    manifest["contracts"]["tools"] = contracts.TOOL_CONTRACT_VERSION
     _migrate_to_composed(epoch, manifest)
     (epoch / "tf4_hybrid_release_gate.json").unlink(missing_ok=True)
     (epoch / "manifest.json").write_text(

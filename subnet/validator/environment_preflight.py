@@ -208,13 +208,6 @@ def _action_groups(task: Any, targets: Any) -> dict[str, list[list[dict[str, Any
     }
 
 
-def _binding(started: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "session_id": started["session_id"],
-        "tool_contract_version": started["policy_view"]["tool_contract_version"],
-    }
-
-
 def _write_sandbox_inputs(
     run_dir: Path,
     *,
@@ -241,7 +234,7 @@ def _write_sandbox_inputs(
                     environment_preflight_agent.POLICY_PROTOCOL_VERSION
                 ),
                 "reference_policy_version": policy,
-                "binding": _binding(starts[policy]),
+                "binding": {"session_id": starts[policy]["session_id"]},
                 "policy_view": starts[policy]["policy_view"],
                 # This is validator-owned test input, never miner-supplied work.
                 "action_groups": groups[policy],
@@ -365,7 +358,7 @@ def run_environment_preflight(
 
         policies = []
         for policy in (POSITIVE_POLICY, NEGATIVE_POLICY):
-            result = registry.verdict(_binding(starts[policy]))
+            result = registry.verdict({"session_id": starts[policy]["session_id"]})
             policies.append(
                 {
                     "reference_policy_version": policy,

@@ -12,7 +12,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION
 from oro_env_runtime.schema import Event, LedgerEntry
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
@@ -71,7 +70,6 @@ def _call_envelope(
         "call_id": call_id,
         "idempotency_key": idempotency_key,
         "pack_sha256": registry.pack_sha256,
-        "tool_contract_version": TOOL_CONTRACT_VERSION,
         "turn": turn,
         "action": action or {"name": "inspect_cart", "args": {}},
     }
@@ -338,7 +336,6 @@ def test_fresh_sessions_are_isolated_and_hide_private_truth(
     assert set(first["policy_view"]) == {
         "query",
         "max_steps",
-        "tool_contract_version",
         "tools",
         "max_calls_per_turn",
     }
@@ -389,7 +386,6 @@ def test_forged_session_token_is_rejected(registry: SessionRegistry) -> None:
         ("agent_version_id", "other-agent"),
         ("task_id", "other-task"),
         ("pack_sha256", "0" * 64),
-        ("tool_contract_version", "other-tools"),
     ],
 )
 def test_call_must_match_full_session_binding(
@@ -399,6 +395,15 @@ def test_call_must_match_full_session_binding(
     envelope = {**_call_envelope(registry), field: value}
     with pytest.raises(InvalidSessionError, match=field):
         registry.call(envelope)
+
+
+def test_call_ignores_a_tool_contract_version_from_older_agents(
+    registry: SessionRegistry,
+) -> None:
+    _start(registry)
+    envelope = {**_call_envelope(registry), "tool_contract_version": "oro_task_tools_v6"}
+
+    assert registry.call(envelope)["observation"]["error"] is None
 
 
 def test_idempotency_is_serialized_and_call_ids_are_bound(
