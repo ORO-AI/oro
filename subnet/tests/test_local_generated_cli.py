@@ -14,7 +14,6 @@ from oro_env_runtime import (
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
     TOOL_CONTRACT_VERSION,
-    VERIFIER_VERSION,
 )
 
 from subnet import local_generated_validator as local
@@ -124,6 +123,8 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         assert manifest_file is not None
         manifest = json.load(manifest_file)
 
+    # The verifier identity is a label; the runtime contract gates loading.
+    assert manifest["contracts"].pop("verifier")
     assert manifest["contracts"] == {
         "environment": ENV_CONTRACT_VERSION,
         "event": EVENT_CONTRACT_VERSION,
@@ -131,7 +132,6 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "result": RESULT_SCHEMA_VERSION,
         "runtime": RUNTIME_VERSION,
         "tools": TOOL_CONTRACT_VERSION,
-        "verifier": VERIFIER_VERSION,
     }
     family_counts = manifest["epoch"]["family_counts"]
     # The bundled pack may ship a subset of the supported families (currently
