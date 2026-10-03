@@ -1268,7 +1268,7 @@ wheels = [
 
 [[package]]
 name = "oro-env-runtime"
-version = "3.1.0"
+version = "3.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -1277,12 +1277,12 @@ dependencies = [
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/e1/955202d32ac5652d54bac7770060a554da0351798f2641da098d15706b35/oro_env_runtime-3.1.0-py3-none-any.whl", hash = "sha256:090ce6860fc3c1d8c17ca7927b9b58a7cfd1e4fb15f012c1320c003231379885", size = 67347, upload-time = "2026-10-03T00:13:57.813Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/37/5a5871295cf11830fb8835e7f00b032a6a53e7385cca775295a17182a7b3/oro_env_runtime-3.2.0-py3-none-any.whl", hash = "sha256:831bc3b6900926338e2a3bc1894d4b8f0c9c8355d163da2f4706e8fa0c6b7c92", size = 67980, upload-time = "2026-10-03T07:16:16.801Z" },
 ]
 
 [[package]]
 name = "oro-sdk"
-version = "3.0.0"
+version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -1290,9 +1290,9 @@ dependencies = [
     { name = "httpx" },
     { name = "python-dateutil" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e0/da/542d300624c0e525adc34ff47046d04003598fc3d007f6ccbb6028fe2491/oro_sdk-3.0.0.tar.gz", hash = "sha256:0a0201bdb784d6539aac2d754eb080980a3e4d16517abc8b30456e59a21e2bff", size = 178373, upload-time = "2026-10-03T00:34:09.366Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/47/b00390b3c9ad9ee9f44b61546d64bdf8fbb419f278eb9ca59cda33ce3d27/oro_sdk-4.0.0.tar.gz", hash = "sha256:2147dda54b54006197596763320592a70f5b190d734c7ff5419d5a92b129fd3b", size = 178181, upload-time = "2026-10-03T07:35:02.556Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/aa/9d/b0f2ae1172f05eeca517a6034197a8046c282f7a6e18c25e17af6c0d9bb7/oro_sdk-3.0.0-py3-none-any.whl", hash = "sha256:911c74d9aec2ccd617fd39da8ed7d272811af4e6e166eb2aa7159792988e64eb", size = 423981, upload-time = "2026-10-03T00:34:07.462Z" },
+    { url = "https://files.pythonhosted.org/packages/55/36/b143c2e91a5bf1c47378cbd9a4bd69dbd6f4695a7b2cb29f164d09a7dde4/oro_sdk-4.0.0-py3-none-any.whl", hash = "sha256:0c3a63644064678edf9d9be2450ab8ffded5ddd7f97c8a852a9aca153fc077b4", size = 423727, upload-time = "2026-10-03T07:35:00.541Z" },
 ]
 
 [[package]]
@@ -1336,7 +1336,7 @@ requires-dist = [
     { name = "bittensor-wallet", specifier = "==4.1.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "openai", specifier = "==2.44.0" },
-    { name = "oro-sdk", specifier = "==3.0.0" },
+    { name = "oro-sdk", specifier = "==4.0.0" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "psutil", specifier = ">=5.9.0" },
     { name = "py-spy", specifier = ">=0.4.1" },
@@ -1350,8 +1350,8 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-local-test = [{ name = "oro-env-runtime", specifier = "==3.1.0" }]
-validator = [{ name = "oro-env-runtime", specifier = "==3.1.0" }]
+local-test = [{ name = "oro-env-runtime", specifier = "==3.2.0" }]
+validator = [{ name = "oro-env-runtime", specifier = "==3.2.0" }]
 
 [[package]]
 name = "packaging"
