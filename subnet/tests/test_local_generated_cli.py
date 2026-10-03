@@ -20,7 +20,7 @@ from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "662a99caab23a850a95e08832a98ca552362141ddf85832ab54843e7077f9d5a"
+    "06d63140150f0f998adbc8f8fbbd4ea878e7c01041adf4c27d3b5d1db951c72b"
 )
 
 
@@ -123,8 +123,6 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         assert manifest_file is not None
         manifest = json.load(manifest_file)
 
-    # The verifier identity is a label; the runtime contract gates loading.
-    assert manifest["contracts"].pop("verifier")
     assert manifest["contracts"] == {
         "environment": ENV_CONTRACT_VERSION,
         "event": EVENT_CONTRACT_VERSION,

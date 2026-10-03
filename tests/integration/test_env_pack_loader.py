@@ -18,7 +18,6 @@ from validator.env_pack_loader import (
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
     TOOL_CONTRACT_VERSION,
-    VERIFIER_VERSION,
     fetch_and_validate_pack,
 )
 
@@ -99,7 +98,6 @@ async def _provision_pack(
         "search_index_sha256": None,
         "runtime_version": RUNTIME_VERSION,
         "tool_contract_version": TOOL_CONTRACT_VERSION,
-        "verifier_version": VERIFIER_VERSION,
         "result_schema_version": RESULT_SCHEMA_VERSION,
         "artifact_uri": f"s3://{_PACK_BUCKET}/{artifact_key}",
         "artifact_size_bytes": len(artifact),

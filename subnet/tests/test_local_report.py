@@ -69,7 +69,7 @@ def test_console_report_names_run_models_and_versions() -> None:
     report = _report()
     assert "local-abc123" in report
     assert "9e5d11c6" in report
-    assert "runtime" in report and "verifier" in report
+    assert "runtime" in report
     assert "openrouter" in report
     assert "deepseek-ai/DeepSeek-V3.2-TEE" in report
     assert "mistralai/mistral-small-2603" in report

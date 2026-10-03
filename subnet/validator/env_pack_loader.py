@@ -39,7 +39,6 @@ from oro_env_runtime.contracts import (
     RUNTIME_CONTRACT,
     RUNTIME_VERSION,
     TOOL_CONTRACT_VERSION,
-    VERIFIER_VERSION,
 )
 from oro_env_runtime.delivery import (
     DeliverySubsetError,
@@ -60,7 +59,6 @@ PACK_VERSION_IDENTITIES = {
     "contract_version": ENV_CONTRACT_VERSION,
     "runtime_version": RUNTIME_VERSION,
     "tool_contract_version": TOOL_CONTRACT_VERSION,
-    "verifier_version": VERIFIER_VERSION,
     "result_schema_version": RESULT_SCHEMA_VERSION,
 }
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

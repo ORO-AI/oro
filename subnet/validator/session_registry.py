@@ -40,7 +40,6 @@ _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
     "tool_contract_version",
-    "verifier_version",
     "result_schema_version",
     "catalog_epoch",
     "catalog_sha256",

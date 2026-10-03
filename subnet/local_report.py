@@ -101,10 +101,7 @@ def render_console_report(
         f"{paint('ORO Bench local run', _BOLD)}  {paint(str(summary['run_id']), _CYAN)}",
         f"  pack        {pack_sha256[:8]}…{pack_sha256[-4:]}",
         f"  problems    {_problem_line(summary, len(tasks))}",
-        (
-            f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}"
-            f"  verifier {PACK_VERSION_IDENTITIES['verifier_version']}"
-        ),
+        f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}",
         f"  inference   {provider}",
         f"  agent       {_agent_line(summary)}",
         (
