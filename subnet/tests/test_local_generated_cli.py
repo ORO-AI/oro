@@ -14,6 +14,7 @@ from oro_env_runtime import (
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
 )
+from oro_env_runtime.contracts import RUNTIME_CONTRACT
 
 from subnet import local_generated_validator as local
 
@@ -115,7 +116,7 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "3.2.0"
+    assert version("oro-env-runtime") == "3.3.0"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         manifest_file = archive.extractfile("epoch/manifest.json")
@@ -129,6 +130,8 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "result": RESULT_SCHEMA_VERSION,
         "runtime": RUNTIME_VERSION,
     }
+    # The validator refuses a delivery sealed for another runtime contract.
+    assert manifest["delivery"]["runtime_contract"] == RUNTIME_CONTRACT
     family_counts = manifest["epoch"]["family_counts"]
     # The bundled pack may ship a subset of the supported families (currently
     # six of seven — preference_reasoning is omitted); every present family

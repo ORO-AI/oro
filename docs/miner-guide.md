@@ -44,7 +44,12 @@ shopper reveals other needs only when asked through the `message` tool; the
 shopper or the market (price, stock) can change during the task; and some tasks
 require something of the process, such as answering the shopper's question or
 backing the order with grounded claims when the shopper asks for a reason. An
-order that misses any requirement or obligation scores 0. A passing order earns
+order that misses any requirement or obligation scores 0. When no listing meets
+every requirement, the task ends with `place_test_order` and `abstain: true`
+instead: nothing is ordered, `product_id`/`sku` name the closest alternative,
+and the justification claims state the facts that show why it falls short.
+Ordering on such a task, or abstaining when a listing fits, scores 0. A
+passing order earns
 up to 1.0, less for questions beyond what the order needed and for a
 less-than-best pick by the shopper's stated priority. On the network, each
 episode's feedback names one failure category (below), never the individual

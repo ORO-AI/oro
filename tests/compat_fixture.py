@@ -24,6 +24,7 @@ from oro_env_runtime.pack import (
 )
 from oro_env_runtime.reward import REWARD_VERSION
 from oro_env_runtime.search_index import source_listing_id
+from oro_env_runtime.situation import LINE_SLOTS
 from oro_env_runtime.schema import CandidateRef, TaskSpec
 from validator.env_pack_loader import LoadedPack
 
@@ -36,6 +37,11 @@ COMPAT_PRODUCTS = COMPAT_ARCHIVE.with_name("oro_env_runtime_compat_v1_products.j
 
 # Legacy task fields the checked-in archive carries; composed rows have none of them.
 _LEGACY_FIELDS = ("event_rule", "event_rules", "interventions", "preferred", "latent_prefs")
+# Every stock line a situation must word: the line's name followed by its slots.
+_LINES = {
+    key: " ".join((key, *(f"{{{slot}}}" for slot in slots)))
+    for key, slots in LINE_SLOTS.items()
+}
 
 
 def _migrate_to_composed(epoch: Path, manifest: dict) -> None:
@@ -57,6 +63,7 @@ def _migrate_to_composed(epoch: Path, manifest: dict) -> None:
             family_payload={"world": {"regime": "qualifying"}, "compat_source": row["task_id"]},
             situation={
                 "preset": "compat",
+                "lines": _LINES,
                 "requirements": [
                     {"id": "cat", "predicate": {"kind": "category", "value": "*"}},
                     {

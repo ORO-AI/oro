@@ -173,7 +173,8 @@ def test_default_simulator_evidence_is_private_and_persisted(
         )
         traces = registry.finalized_results()[0]["call_trace"]
 
-    assert response["user_message"] == {"content": "my budget is at most 200.00 USD."}
+    # The reply is the task's own budget line (the compat fixture names each line by its key).
+    assert response["user_message"] == {"content": "budget 200.00 USD"}
     assert "simulator" not in response
     evidence = traces[0]["simulator"]
     assert evidence["latency_ms"] >= 0
