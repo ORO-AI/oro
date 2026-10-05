@@ -13,6 +13,7 @@ from oro_env_runtime import (
     REPLAY_CONTRACT_VERSION,
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
+    check_epoch,
 )
 from oro_env_runtime.contracts import RUNTIME_CONTRACT
 
@@ -112,16 +113,16 @@ def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> Non
     assert config.pack_path == ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
 
-def test_bundled_pack_matches_released_runtime_contracts() -> None:
+def test_bundled_pack_matches_released_runtime_contracts(tmp_path: Path) -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
     assert version("oro-env-runtime") == "3.3.0"
 
     with tarfile.open(pack_path, "r:gz") as archive:
-        manifest_file = archive.extractfile("epoch/manifest.json")
-        assert manifest_file is not None
-        manifest = json.load(manifest_file)
+        archive.extractall(tmp_path, filter="data")
+    manifest = json.loads((tmp_path / "epoch" / "manifest.json").read_text())
+    assert check_epoch(tmp_path / "epoch") == []
 
     assert manifest["contracts"] == {
         "environment": ENV_CONTRACT_VERSION,

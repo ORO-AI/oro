@@ -153,14 +153,14 @@ ORO Bench local run  local-7c1f2a
   simulator   mistralai/mistral-small-2603
   judge       deepseek/deepseek-v4-flash-0731
 
-composed               mean 0.34  2/5 passed
-  TF8-composed-700000  completed         1.00
-  TF8-composed-700001  completed         0.70  extra_questions (extra_questions)
-  TF8-composed-700016  completed         0.00  request_not_met (request_not_met, needs_not_found, changes_missed, process_issue)
-  TF8-composed-700018  completed         0.00  needs_not_found (needs_not_found)
-  TF8-composed-700030  completed         0.00  did_not_finish (did_not_finish)
+composed               mean 0.12  1/5 passed
+  TF8-composed-700000  completed         0.60  extra_questions (extra_questions)
+  TF8-composed-700001  completed         0.00  needs_not_found (needs_not_found)
+  TF8-composed-700015  completed         0.00  request_not_met (request_not_met, needs_not_found)
+  TF8-composed-700016  completed         0.00  did_not_finish (did_not_finish)
+  TF8-composed-700023  completed         0.00  request_not_met (request_not_met, needs_not_found, process_issue)
 
-Aggregate score  0.340000
+Aggregate score  0.120000
 Artifacts        logs/environment-runs/local-7c1f2a
 Trajectories     logs/environment-runs/local-7c1f2a/trajectories.html  (open in a browser)
 ```
