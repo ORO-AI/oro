@@ -17,3 +17,7 @@ WALLET_NAME=my-validator docker compose --profile validator up -d
 ```
 
 See the [full guide](https://docs.oroagents.com/docs/validators/overview) for detailed setup instructions.
+
+## Simulator inference
+
+Simulator inference uses asynchronous HTTP requests so concurrent calls can overlap and canceled calls release their connections. Completed responses retain usage accounting; canceled requests are logged separately because their upstream usage may be unknown. The completion adapter accepts an optional `reasoning` boolean and omits that field when no preference is supplied.

@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -135,14 +135,14 @@ def test_default_simulator_evidence_is_private_and_persisted(
         inference_access_token="miner-token",
     ) as registry:
         _start(registry)
-        # SimulatorCompletion switched to ``post_verbose`` (ORO-2191);
+        # SimulatorCompletion uses the awaitable request-local result;
         # patch the new method with a ``PostResult(data=..., error=None)``
         # equivalent of the old success shape.
         from src.agent.proxy_client import PostResult
 
         state = registry._sessions["session-1"]
         state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose = MagicMock(
+        state.simulator._completion._client.post_verbose_async = AsyncMock(
             return_value=PostResult(
                 data={
                     "choices": [
@@ -204,7 +204,7 @@ def test_a_provider_error_body_never_reaches_the_agent(
         _start(registry)
         state = registry._sessions["session-1"]
         state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose = MagicMock(
+        state.simulator._completion._client.post_verbose_async = AsyncMock(
             side_effect=InferenceProviderError(400, body)
         )
         envelope = _call_envelope(
@@ -233,7 +233,7 @@ def test_default_simulator_failure_is_an_environment_error(
         inference_access_token="miner-token",
     ) as registry:
         _start(registry)
-        # SimulatorCompletion now calls ``post_verbose``; a bug/misuse in the
+        # SimulatorCompletion now calls ``post_verbose_async``; a bug/misuse in the
         # completion client that raises an arbitrary ``RuntimeError`` (as
         # opposed to returning a ``PostResult`` with an error dict) must NOT
         # leak the exception's private message into the ledger. Only the
@@ -241,7 +241,7 @@ def test_default_simulator_failure_is_an_environment_error(
         # through ``InferenceProviderError`` instead (ORO-2191).
         state = registry._sessions["session-1"]
         state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose = MagicMock(
+        state.simulator._completion._client.post_verbose_async = AsyncMock(
             side_effect=RuntimeError(private_detail)
         )
         with pytest.raises(
@@ -276,7 +276,7 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
         _start(registry)
         state = registry._sessions["session-1"]
         state.simulator = registry._default_simulator(state)
-        post = MagicMock(
+        post = AsyncMock(
             return_value=PostResult(
                 data=None,
                 error={
@@ -286,7 +286,7 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
                 },
             )
         )
-        state.simulator._completion._client.post_verbose = post
+        state.simulator._completion._client.post_verbose_async = post
         with pytest.raises(HarnessExecutionError, match="miner inference key exhausted"):
             registry.call(
                 _call_envelope(

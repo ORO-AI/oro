@@ -1,10 +1,12 @@
 """Tests for ProxyClient — covers per-attempt request logging."""
 
+import asyncio
 import json
 from unittest.mock import patch, MagicMock
 
 import pytest
 import requests
+import httpx
 
 from src.agent.proxy_client import ProxyClient, RequestLog
 
@@ -329,3 +331,125 @@ def test_non_json_200_on_every_attempt_fails_without_raising(client):
         "status": 200,
         "body": "\n         \n\n         \n",
     }
+
+
+def test_async_post_preserves_headers_retry_logging_and_usage(tmp_path, monkeypatch):
+    log_path, stats_path = tmp_path / 'requests.jsonl', tmp_path / 'stats.jsonl'
+    monkeypatch.setenv('REQUEST_LOG_FILE', str(log_path))
+    client = ProxyClient(proxy_url='http://unit.test', api_key='test-key', max_retries=4,
+                         retry_delay=0.25, rate_limit_retry_delay=0.5,
+                         inference_stats_file=str(stats_path))
+    client.headers = {'X-Test-Caller': 'validator-test'}
+    statuses, sleeps, requests_seen = [429, 503, 200, 200], [], []
+
+    async def handler(request):
+        requests_seen.append(request)
+        status = statuses[len(requests_seen) - 1]
+        if len(requests_seen) == 3:
+            return httpx.Response(status, text='not json')
+        return httpx.Response(status, json={'model': 'served-model', 'usage': {'cost': 0.02,
+                                             'prompt_tokens': 5, 'completion_tokens': 2}})
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setattr(asyncio, 'sleep', sleep)
+    result = asyncio.run(client.post_verbose_async('/inference/chat', {'model': 'requested-model'}))
+    assert result.ok and sleeps == [0.5, 0.5, 1.0]
+    assert all(r.headers['authorization'] == 'Bearer test-key' and
+               r.headers['x-test-caller'] == 'validator-test' for r in requests_seen)
+    logs = _read_jsonl(log_path)
+    assert [e['status_code'] for e in logs if e['kind'] == 'attempt'] == statuses
+    assert logs[2]['error_class'] == 'InvalidJSONBody'
+    assert len([e for e in logs if e['kind'] == 'summary']) == 1
+    stats = _read_jsonl(stats_path)[-1]
+    assert stats['inference_success'] == 1 and stats['inference_cost_usd'] == 0.02
+    assert stats['requested_models']['requested-model']['requests'] == 1
+    assert stats['served_models']['served-model']['completion_tokens'] == 2
+
+
+@pytest.mark.parametrize('kind', ['upstream', 'malformed', 'network'])
+def test_async_post_retains_stack_local_error_contract(kind, tmp_path, monkeypatch):
+    client = ProxyClient(proxy_url='http://unit.test', max_retries=1,
+                         inference_stats_file=str(tmp_path / 'stats.jsonl'))
+
+    async def handler(request):
+        if kind == 'network':
+            raise httpx.ConnectError('test connection failure', request=request)
+        return httpx.Response(503 if kind == 'upstream' else 200, text='bad body')
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    result = asyncio.run(client.post_verbose_async('/inference/chat', {'model': 'test'}))
+    assert result.data is None and result.error['kind'] == kind
+    assert result.error['status'] == {'upstream': 503, 'malformed': 200, 'network': None}[kind]
+    assert _read_jsonl(tmp_path / 'stats.jsonl')[-1]['inference_failed'] == 1
+
+
+def test_async_simulator_http_calls_overlap_and_cancel_slow_tail(tmp_path, monkeypatch):
+    # Real sockets and asyncio.run expose both serialization and executor-shutdown tails.
+    from validator.simulator_completion import SimulatorCompletion, VALIDATOR_CALLER_HEADER
+
+    log_path, stats_path = tmp_path / 'requests.jsonl', tmp_path / 'stats.jsonl'
+    monkeypatch.setenv('REQUEST_LOG_FILE', str(log_path))
+
+    async def exercise():
+        started, closed, handlers, requests_seen = asyncio.Event(), asyncio.Event(), [], []
+
+        async def handle(reader, writer):
+            handlers.append(asyncio.current_task())
+            try:
+                headers = await reader.readuntil(b'\r\n\r\n')
+                length = next(int(h.split(b':', 1)[1]) for h in headers.split(b'\r\n')
+                              if h.lower().startswith(b'content-length:'))
+                request = json.loads(await reader.readexactly(length))
+                requests_seen.append((headers, request))
+                if len(requests_seen) == 3:
+                    started.set()
+                await started.wait()  # all three must reach the server concurrently
+                if request['model'] == 'slow':
+                    assert await reader.read() == b''
+                    closed.set()
+                    return
+                body = json.dumps({'choices': [{'message': {'content': 'yes'}}],
+                                   'usage': {'cost': 0.01}}).encode()
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '
+                             + str(len(body)).encode() + b'\r\nConnection: close\r\n\r\n' + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async with await asyncio.start_server(handle, '127.0.0.1', 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            client = ProxyClient(proxy_url=f'http://127.0.0.1:{port}', api_key='test-key',
+                                 max_retries=1, inference_stats_file=str(stats_path))
+            complete = SimulatorCompletion('miner-token', client=client)
+            tasks = [asyncio.create_task(complete(model, [])) for model in ['fast1', 'fast2', 'slow']]
+            try:
+                done = []
+                for result in asyncio.as_completed(tasks):
+                    done.append(await result)
+                    if len(done) == 2:
+                        break
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.wait_for(closed.wait(), 1)
+                assert len(done) == 2 and all(r['text'] == 'yes' for r in done)
+                assert all(VALIDATOR_CALLER_HEADER.lower().encode() in h.lower() for h, _ in requests_seen)
+            finally:
+                for task in tasks + handlers:
+                    task.cancel()
+                await asyncio.gather(*tasks, *handlers, return_exceptions=True)
+
+    asyncio.run(asyncio.wait_for(exercise(), 3))
+    summaries = [e for e in _read_jsonl(log_path) if e['kind'] == 'summary']
+    assert len(summaries) == 3
+    assert [e['response'] for e in summaries if e['response'].get('kind') == 'cancelled'] == [
+        {'kind': 'cancelled', 'usage': 'unknown'}]
+    stats = _read_jsonl(stats_path)[-1]
+    assert stats['inference_success'] == 2 and stats['inference_failed'] == 0
+    assert stats['inference_cost_usd'] == 0.02  # known completed usage only

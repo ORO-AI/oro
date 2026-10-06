@@ -101,6 +101,7 @@ class SimulatorCompletion:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 8192,
         temperature: float | None = 0.0,
+        reasoning: bool | None = None,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": model,
@@ -112,15 +113,17 @@ class SimulatorCompletion:
             request["temperature"] = temperature
         if tools:
             request["tools"] = tools
+        if reasoning is not None:
+            request["reasoning"] = {"enabled": reasoning}
 
-        # Use ``post_verbose`` — its return value carries the upstream
+        # Use ``post_verbose_async`` — its return value carries the upstream
         # status+body directly. Callers must not rely on a shared client
         # attribute (see ORO-2191 review): a single ProxyClient shared by
         # concurrent sessions would let session B's failure overwrite
         # session A's just before A reads it, corrupting A's ledger.
         started = time.monotonic()
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            result = self._client.post_verbose(
+            result = await self._client.post_verbose_async(
                 "/inference/chat/completions",
                 json_data=request,
             )
@@ -207,7 +210,7 @@ class SimulatorCompletion:
         One attempt: the disclosure reader falls back to the chat model when
         this raises, so a retry here would only spend the simulator's budget.
         """
-        result = self._client.post_verbose(
+        result = await self._client.post_verbose_async(
             "/inference/alpha/decisions",
             json_data={"model": model, "state": state, "questions": questions},
         )
