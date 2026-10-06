@@ -261,8 +261,9 @@ class SessionRegistry:
 
     def _default_simulator(self, state: _SessionState) -> UserSim:
         session = state.session
+        reader = session.task.situation and session.task.situation.reader
         token = self._inference_access_token
-        if session.task.situation and session.task.situation.reader:
+        if reader:
             token = self._simulator_access_token
         if token is None:
             raise RuntimeError(
@@ -279,7 +280,7 @@ class SessionRegistry:
             model=session.model_roles["user_simulator"],
             surface_events=not session.state_blind,
             completion=completion,
-            reader_completion=completion if session.task.situation and session.task.situation.reader else None,
+            reader_completion=completion if reader else None,
             fired=lambda: session.env.fired_transitions,
         )
 

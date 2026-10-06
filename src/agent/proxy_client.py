@@ -498,34 +498,7 @@ class ProxyClient:
 
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
         """Make a POST request to the proxy."""
-        url = self._build_url(path)
-        headers: Dict[str, str] = dict(self.headers)
-        if self.api_key and "/inference/" in path:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        def make_request():
-            response = requests.post(
-                url, json=json_data, headers=headers, timeout=self.timeout
-            )
-            if response.status_code == 404:
-                logger.error(f"Resource not found: {path}")
-            return response
-
-        t0 = time.monotonic()
-        response, result = self._make_request_with_retries(make_request, "POST", path)
-        duration_ms = (time.monotonic() - t0) * 1000
-
-        self._record_inference_result(path, result, json_data)
-
-        self.request_log.record(
-            method="POST",
-            path=path,
-            json_data=json_data,
-            status_code=response.status_code if response is not None else None,
-            response_body=result if result is not None else self._full_error(response),
-            duration_ms=duration_ms,
-        )
-        return result
+        return self.post_verbose(path, json_data).data
 
     def post_verbose(self, path: str, json_data: Optional[Dict] = None) -> "PostResult":
         """POST returning both the parsed JSON on success AND the upstream
