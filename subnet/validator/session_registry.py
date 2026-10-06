@@ -629,13 +629,14 @@ class SessionRegistry:
         session_id: str,
         state: _SessionState,
         trace: _CallTrace,
+        deadline: float,
         work: Callable[..., Any],
         *args: Any,
     ) -> Any:
         """Run simulator work under its timeout; a failure quarantines the session."""
         started = time.perf_counter()
+        previous_latency_ms = trace.simulator_latency_ms or 0.0
         snapshot = self._session_snapshot(state)
-        deadline = time.monotonic() + self.simulator_timeout_s
 
         def bounded_work() -> Any:
             # All response/reword phases share the deadline, including queue time.
@@ -647,9 +648,9 @@ class SessionRegistry:
 
         future = self._executor.submit(bounded_work)
         try:
-            result = future.result(timeout=self.simulator_timeout_s)
+            result = future.result(timeout=max(0.0, deadline - time.monotonic()))
         except (concurrent.futures.TimeoutError, asyncio.TimeoutError) as exc:
-            trace.simulator_latency_ms = _elapsed_ms(started)
+            trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
             future.cancel()
             self._raise_timeout(
                 session_id,
@@ -660,7 +661,7 @@ class SessionRegistry:
                 cause=exc,
             )
         except Exception as exc:
-            trace.simulator_latency_ms = _elapsed_ms(started)
+            trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
             # Only trusted provider failures may surface status and body;
             # arbitrary simulator messages can contain private task material.
             error_type, state.quarantined_reason = self._simulator_error(state, exc)
@@ -678,9 +679,7 @@ class SessionRegistry:
                 else "user simulator failed"
             )
             raise error_type(f"{public}; session quarantined") from exc
-        trace.simulator_latency_ms = (trace.simulator_latency_ms or 0.0) + _elapsed_ms(
-            started
-        )
+        trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
         return result
 
     def _simulate_user_turn(
@@ -694,6 +693,7 @@ class SessionRegistry:
         env = state.session.env
         if env.done():
             return None
+        deadline = time.monotonic() + self.simulator_timeout_s
         said = len(state.transcript)
         message_sent = any(
             item["action"].get("name") == "message" for item in call_group
@@ -711,6 +711,7 @@ class SessionRegistry:
                 session_id,
                 state,
                 trace,
+                deadline,
                 self._shopper_turn_decisions,
                 state,
                 signal,
@@ -729,6 +730,7 @@ class SessionRegistry:
                     session_id,
                     state,
                     trace,
+                    deadline,
                     lambda: self._run_simulator(
                         loop.reword_utterances(self._simulator(state), state.session)
                     ),

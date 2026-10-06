@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from oro_env_runtime import loop
 from oro_env_runtime.schema import Event, LedgerEntry
 from src.agent.proxy_client import ProxyClient
 from validator.env_pack_loader import LoadedPack
@@ -802,6 +803,54 @@ def test_simulator_phases_share_one_deadline(loaded_pack: LoadedPack, monkeypatc
         assert cancelled.wait(timeout=1)
         assert completed == ["response"]
         assert registry._executor.submit(lambda: "available").result(timeout=1) == "available"
+
+
+def test_response_and_next_boundary_reword_share_deadline(
+    loaded_pack: LoadedPack, monkeypatch
+) -> None:
+    completed, cancelled = [], threading.Event()
+
+    class Simulator:
+        async def respond(self, _transcript, _signal):
+            await asyncio.sleep(0.15)
+            completed.append("response")
+            return {"action": "clarify", "content": "reply", "reason": "spoke"}
+
+    async def reword(_simulator, _session):
+        try:
+            await asyncio.sleep(0.15)
+            completed.append("reword")
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with SessionRegistry(
+        loaded_pack,
+        simulator_timeout_s=0.25,
+        max_workers=1,
+        simulator_factory=lambda _session: Simulator(),
+    ) as registry:
+        _start(registry)
+        env = registry._sessions["session-1"].session.env
+        begin_turn = env.begin_solver_turn
+
+        def queue_next_line(turn):
+            begin_turn(turn)
+            if turn == 2:
+                env.utterances.append(("test-line", "next turn line"))
+
+        monkeypatch.setattr(env, "begin_solver_turn", queue_next_line)
+        monkeypatch.setattr(loop, "reword_utterances", reword)
+        with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
+            registry.call(_call_envelope(
+                registry,
+                action={"name": "message", "args": {"content": "A question?"}},
+            ))
+        assert cancelled.wait(timeout=1)
+        assert completed == ["response"]
+        assert registry._executor.submit(lambda: "available").result(timeout=1) == "available"
+        timing = registry.finalized_results()[0]["call_trace"][0]["timing_ms"]
+        assert timing["simulator"] >= 240  # both phases, excluding boundary bookkeeping
 
 
 def test_grouped_calls_reject_more_than_the_declared_limit(
