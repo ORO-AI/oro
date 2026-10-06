@@ -200,6 +200,8 @@ def _claim_environment_binding(
 
 class Validator:
     def __init__(self):
+        # Keep the provider credential outside Config, which is logged at startup.
+        self._simulator_access_token = os.environ.get("ORO_SIMULATOR_ACCESS_TOKEN") or None
         self.config = self.get_config()
         self.setup_logging()
         check_host_min_specs()
@@ -1102,6 +1104,7 @@ class Validator:
                 simulator_timeout_s=self.config.session_simulator_timeout,
                 max_workers=self.config.sandbox_max_workers,
                 inference_access_token=inference_access_token,
+                simulator_access_token=self._simulator_access_token,
                 inference_stats_file=str(
                     self._simulator_inference_stats_file(str(work.eval_run_id))
                 ),
@@ -1325,7 +1328,7 @@ class Validator:
         def emit_with_transcripts(batch: list[dict[str, Any]]) -> None:
             transcripts = (
                 load_inference_transcripts(
-                    output_path, secret_values=(inference_access_token,)
+                    output_path, secret_values=(inference_access_token, self._simulator_access_token or "")
                 )
                 if output_path.exists()
                 else {}
@@ -1407,7 +1410,15 @@ class Validator:
             return None
 
         try:
-            score = aggregate_results(results)
+            score = aggregate_results(
+                results,
+                require_infrastructure_success=any(
+                    task_id in selected_roster and getattr(task.situation, "reader", None)
+                    for task_id, task in zip(
+                        registry.loaded_pack.task_ids, registry.loaded_pack.task_specs, strict=True,
+                    )
+                ),
+            )
         except ValueError as exc:
             self._complete_with_failure(
                 eval_run_id,
@@ -1641,6 +1652,7 @@ class Validator:
                 eval_run_id_str,
                 inference_access_token,
                 work.inference_token.expires_at.timestamp(),
+                simulator_token=self._simulator_access_token,
             )
             # Step 1: Download agent code
             agent_path = self.download_agent(work.code_download_url, eval_run_id_str)

@@ -15,12 +15,12 @@ const proxy = (await import(`data:text/javascript,${encodeURIComponent(script)}`
 const chutesId = "Qwen/Qwen3.8-27B-TEE";
 const openrouterId = "qwen/qwen3.8-27b";
 
-function request(model, provider, catalogs, modelHeaders = {}, uri = "/inference/chat/completions", caller = undefined) {
+function request(model, provider, catalogs, modelHeaders = {}, uri = "/inference/chat/completions", caller = undefined, fields = {}) {
   const calls = [];
   const r = {
     method: "POST",
     uri,
-    requestText: JSON.stringify({ model }),
+    requestText: JSON.stringify({ model, ...fields }),
     headersIn: { Authorization: provider === "openrouter" ? "Bearer sk-or-test" : "Bearer cak_test" },
     headersOut: {},
     variables: { args: "" },
@@ -106,4 +106,26 @@ test("decisions serve only the pinned disclosure reader, never on agent routes",
   assert.equal(request(openrouterId, "openrouter", catalogs, {}, decisions, "validator").r.status, 403);
   assert.equal(request(jev, "openrouter", catalogs, {}, decisions).r.status, 403);
   assert.equal(request(jev, "openrouter", catalogs).r.status, 403);
+});
+
+test("strict schema routing is authored only for validator OpenRouter requests", () => {
+  const schema = { type: "json_schema", json_schema: { name: "answer", strict: true, schema: { type: "object" } } };
+  for (const [provider, caller, format, expected] of [
+    ["openrouter", "validator", schema, { require_parameters: true }],
+    ["openrouter", undefined, schema, undefined],
+    ["openrouter", "validator", { type: "json_object" }, undefined],
+    ["chutes", "validator", schema, undefined],
+  ]) {
+    shared.clear();
+    const model = provider === "openrouter" ? openrouterId : chutesId;
+    const catalogs = { [provider]: { models: [model], aliases: {} } };
+    const { r, calls } = request(model, provider, catalogs, {}, undefined, caller, {
+      response_format: format, provider: { only: ["attacker"] }, reasoning: { effort: "medium" },
+    });
+    assert.equal(r.status, 200);
+    const forwarded = JSON.parse(calls.at(-1).options.body);
+    assert.deepEqual(forwarded.provider, expected);
+    assert.deepEqual(forwarded.response_format, format);
+    assert.deepEqual(forwarded.reasoning, { effort: "medium" });
+  }
 });

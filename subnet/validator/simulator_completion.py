@@ -78,7 +78,8 @@ class SimulatorCompletion:
         episode_id: str | None = None,
     ) -> None:
         if not access_token:
-            raise ValueError("miner inference access token is required")
+            raise ValueError("inference access token is required")
+        self._access_token = access_token
         # Only OpenRouter serves the decisions endpoint (Jev). On another provider
         # the disclosure reader sees no ``decide`` and reads with the chat model;
         # a decisions error there would otherwise count as an answer (no reveal).
@@ -101,7 +102,8 @@ class SimulatorCompletion:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 8192,
         temperature: float | None = 0.0,
-        reasoning: bool | None = None,
+        reasoning: bool | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": model,
@@ -114,7 +116,11 @@ class SimulatorCompletion:
         if tools:
             request["tools"] = tools
         if reasoning is not None:
-            request["reasoning"] = {"enabled": reasoning}
+            request["reasoning"] = (
+                reasoning if isinstance(reasoning, dict) else {"enabled": reasoning}
+            )
+        if response_format is not None:
+            request["response_format"] = response_format
 
         # Use ``post_verbose_async`` — its return value carries the upstream
         # status+body directly. Callers must not rely on a shared client
@@ -139,7 +145,7 @@ class SimulatorCompletion:
                         _MAX_ATTEMPTS,
                     )
                 return {
-                    "text": message.get("content") or "",
+                    "text": (message.get("content") or "").replace(self._access_token, "[REDACTED]"),
                     "tool_calls": message.get("tool_calls") or [],
                     "finish_reason": choice.get("finish_reason"),
                 }
@@ -151,7 +157,7 @@ class SimulatorCompletion:
             error = result.error or {}
             kind = error.get("kind", "unknown")
             upstream_status = error.get("status")
-            upstream_body = (error.get("body") or "").strip()
+            upstream_body = (error.get("body") or "").strip().replace(self._access_token, "[REDACTED]")
             if data is None and result.error is None:
                 # ProxyClient returned no data but no error info — treat as
                 # a malformed 200 body (see ORO-2191 non-blocker: a JSON
@@ -169,7 +175,7 @@ class SimulatorCompletion:
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
             if provider_error.key_exhausted:
-                logger.warning("miner inference key budget exhausted during user simulation")
+                logger.warning("inference key budget exhausted during user simulation")
                 raise provider_error
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
@@ -217,12 +223,13 @@ class SimulatorCompletion:
         if isinstance(result.data, dict):
             return result.data
         error = result.error or {}
+        body = (error.get("body") or "").strip().replace(self._access_token, "[REDACTED]")
         # No response is the one failure the reader treats as an outage (the fallback
         # reads); a status outside 429/502-504 or a malformed answer reads as unsure.
         if error.get("kind") == "network":
-            raise ConnectionError(error.get("body") or "no response")
+            raise ConnectionError(body or "no response")
         raise InferenceProviderError(
-            error.get("status"), (error.get("body") or "").strip()
+            error.get("status"), body
         )
 
 

@@ -27,18 +27,23 @@ class SessionRuntime:
 
     def __init__(self) -> None:
         self._registry: SessionRegistry | None = None
-        self._inference_grant: tuple[str, str, float] | None = None
+        self._inference_grant: tuple[str, str, float, str | None] | None = None
         self._lock = threading.Lock()
 
-    def set_inference_grant(self, run_id: str, token: str, expires_at: float) -> None:
+    def set_inference_grant(
+        self, run_id: str, token: str, expires_at: float, *,
+        simulator_token: str | None = None,
+    ) -> None:
         with self._lock:
-            self._inference_grant = (run_id, token, expires_at)
+            self._inference_grant = (run_id, token, expires_at, simulator_token)
 
     def clear_inference_grant(self) -> None:
         with self._lock:
             self._inference_grant = None
 
-    def authorize_inference(self, authorization: str | None) -> tuple[str | None, bool]:
+    def authorize_inference(
+        self, authorization: str | None, *, validator: bool = False,
+    ) -> tuple[str | None, bool]:
         with self._lock:
             grant = self._inference_grant
             if grant is None:
@@ -46,7 +51,10 @@ class SessionRuntime:
             authorized = (
                 time.time() < grant[2]
                 and authorization is not None
-                and compare_digest(authorization.encode(), f"Bearer {grant[1]}".encode())
+                and any(
+                    compare_digest(authorization.encode(), f"Bearer {token}".encode())
+                    for token in (grant[1], grant[3] if validator else None) if token
+                )
             )
             return grant[0], authorized
 
@@ -97,7 +105,12 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
         authorization: str | None = Header(default=None),
         x_oro_validator: str | None = Header(default=None),
     ) -> Response:
-        run_id, authorized = runtime.authorize_inference(authorization)
+        # Read by the proxy only: the validator's own calls carry its secret.
+        # Bytes: a str compare raises on a non-ASCII header.
+        validator = x_oro_validator is not None and compare_digest(
+            x_oro_validator.encode(), VALIDATOR_CALLER_SECRET.encode()
+        )
+        run_id, authorized = runtime.authorize_inference(authorization, validator=validator)
         headers = {"X-ORO-Run-ID": run_id} if run_id else None
         if not authorized:
             raise HTTPException(
@@ -105,11 +118,6 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
                 detail="Inference key does not match active run",
                 headers=headers,
             )
-        # Read by the proxy only: the validator's own calls carry its secret.
-        # Bytes: a str compare raises on a non-ASCII header.
-        validator = x_oro_validator is not None and compare_digest(
-            x_oro_validator.encode(), VALIDATOR_CALLER_SECRET.encode()
-        )
         headers = {**(headers or {}), "X-ORO-Caller": "validator" if validator else "agent"}
         return Response(status_code=204, headers=headers)
 

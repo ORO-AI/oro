@@ -107,7 +107,9 @@ def write_problem_file(path: Path, sessions: list[dict[str, Any]]) -> None:
     )
 
 
-def aggregate_results(results: list[dict[str, Any]]) -> float:
+def aggregate_results(
+    results: list[dict[str, Any]], *, require_infrastructure_success: bool = False,
+) -> float:
     """Average paid task rewards, counting agent failures as zero."""
 
     if not results:
@@ -130,11 +132,10 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
     harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
-    # Strict > matches Backend's `_is_generated_infra_failure` classifier
-    # (`failed * 10 > total * 3`). A `>=` here would trip at exactly 3/10
-    # while the classifier does NOT recognize that as infra, letting the
-    # miner's auto-discard counter increment for infra we own.
-    if harness_count * 10 > len(results) * 3:
+    # Keep the historical strict > threshold for unconfigured tasks. Configured
+    # Reader work must have no infrastructure rows; the count-token failure
+    # reason below is recognized as infrastructure independently of its ratio.
+    if (require_infrastructure_success and harness_count) or harness_count * 10 > len(results) * 3:
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )

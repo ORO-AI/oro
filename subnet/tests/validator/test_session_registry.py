@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from oro_env_runtime import loop
 from oro_env_runtime.schema import Event, LedgerEntry
+from oro_env_runtime.situation import Reader
 from src.agent.proxy_client import ProxyClient
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
@@ -196,6 +197,58 @@ def test_default_simulator_evidence_is_private_and_persisted(
     assert exchange["error"] is None
     assert "miner-token" not in json.dumps(traces)
     assert traces[1]["simulator"] is None
+
+
+@pytest.fixture
+def reader_pack(loaded_pack: LoadedPack) -> LoadedPack:
+    task = loaded_pack.task_specs[0]
+    reader = Reader(
+        model="test/reader", instructions="Answer the supplied test questions.", state={},
+        questions={key: "Is this eligible?" for key in (
+            "all", "asks", *(f"facet:{facet.id}" for facet in task.situation.facets)
+        )},
+    )
+    loaded_pack.task_specs[0] = task.model_copy(update={
+        "situation": task.situation.model_copy(update={"reader": reader}),
+    })
+    return loaded_pack
+
+
+@pytest.mark.parametrize("owner", [None, "", "cak_wrong-provider", "sk-or-miner"])
+def test_reader_pack_rejects_invalid_owner_before_start(reader_pack, owner) -> None:
+    with pytest.raises(ValueError, match="distinct validator OpenRouter"):
+        SessionRegistry(reader_pack, inference_access_token="sk-or-miner", simulator_access_token=owner)
+
+
+def test_reader_uses_owner_for_every_simulator_role_and_owner_exhaustion_is_infrastructure(
+    reader_pack: LoadedPack,
+) -> None:
+    with SessionRegistry(
+        reader_pack, inference_access_token="cak_miner", simulator_access_token="sk-or-owner",
+    ) as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.session.task = reader_pack.task_specs[0]
+        simulator = registry._default_simulator(state)
+        assert simulator._completion._client.api_key == "sk-or-owner"
+        assert simulator._discloser.reader_judges[0]._complete.func is simulator._completion
+        assert simulator._completion._client.headers["X-ORO-Validator"] == VALIDATOR_CALLER_SECRET
+        simulator.respond = AsyncMock(side_effect=InferenceProviderError(403, "Key limit exceeded"))
+        state.simulator = simulator
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call", json=_call_envelope(
+                registry, action={"name": "message", "args": {"content": "A test question?"}},
+            ),
+        )
+        assert response.status_code == 500
+        assert response.json()["detail"]["environment_error"] is True
+        assert "Key limit" not in response.text
+        assert not registry.key_exhausted.is_set()
+        result = registry.finalized_results()[0]
+        assert result["outcome"] == "environment_error"
+        assert result["environment_error"] is True
 
 
 def test_a_provider_error_body_never_reaches_the_agent(
@@ -1305,3 +1358,22 @@ def test_runtime_replacement_closes_the_previous_pack_generation() -> None:
 
     first.close.assert_called_once_with()
     second.close.assert_called_once_with()
+
+
+def test_owner_grant_requires_validator_secret_and_expires_and_clears() -> None:
+    runtime = SessionRuntime()
+    client = TestClient(create_session_app(runtime))
+    url = "/v1/inference/authorize"
+    own = {"Authorization": "Bearer sk-or-owner", "X-ORO-Validator": VALIDATOR_CALLER_SECRET}
+    runtime.set_inference_grant("run", "cak_miner", time.time() + 60, simulator_token="sk-or-owner")
+    assert client.get(url, headers={"Authorization": "Bearer sk-or-owner"}).status_code == 401
+    assert client.get(url, headers={**own, "X-ORO-Validator": "guess"}).status_code == 401
+    response = client.get(url, headers=own)
+    assert response.status_code == 204
+    assert response.headers["X-ORO-Caller"] == "validator"
+    assert "sk-or-owner" not in str(response.headers)
+    runtime.set_inference_grant("run", "cak_miner", 0, simulator_token="sk-or-owner")
+    assert client.get(url, headers=own).status_code == 401
+    runtime.set_inference_grant("run", "cak_miner", time.time() + 60, simulator_token="sk-or-owner")
+    runtime.clear_inference_grant()
+    assert client.get(url, headers=own).status_code == 401

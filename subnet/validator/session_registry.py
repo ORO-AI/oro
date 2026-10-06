@@ -220,6 +220,7 @@ class SessionRegistry:
         max_calls_per_turn: int = MAX_CALLS_PER_TURN,
         max_workers: int = 8,
         inference_access_token: str | None = None,
+        simulator_access_token: str | None = None,
         inference_stats_file: str | None = None,
         simulator_proxy_url: str = "http://proxy:80",
         simulator_factory: Callable[[TaskSession], Any] | None = None,
@@ -232,12 +233,22 @@ class SessionRegistry:
             raise ValueError("max_calls_per_turn must be positive")
         if max_workers <= 0:
             raise ValueError("max_workers must be positive")
+        if (
+            simulator_factory is None
+            and any(getattr(task.situation, "reader", None) for task in loaded_pack.task_specs)
+            and (
+                not (simulator_access_token or "").startswith("sk-or-")
+                or simulator_access_token == inference_access_token
+            )
+        ):
+            raise ValueError("a distinct validator OpenRouter simulator credential is required")
         self.loaded_pack = loaded_pack
         self.pack_sha256 = loaded_pack.pack_sha256
         self.tool_timeout_s = float(tool_timeout_s)
         self.simulator_timeout_s = float(simulator_timeout_s)
         self.max_calls_per_turn = int(max_calls_per_turn)
         self._inference_access_token = inference_access_token
+        self._simulator_access_token = simulator_access_token
         self._inference_stats_file = inference_stats_file
         self._simulator_proxy_url = simulator_proxy_url
         self._simulator_factory = simulator_factory
@@ -249,22 +260,26 @@ class SessionRegistry:
         self.key_exhausted = threading.Event()
 
     def _default_simulator(self, state: _SessionState) -> UserSim:
-        if self._inference_access_token is None:
+        session = state.session
+        token = self._inference_access_token
+        if session.task.situation and session.task.situation.reader:
+            token = self._simulator_access_token
+        if token is None:
             raise RuntimeError(
                 "miner inference credentials are required for user simulation"
             )
         completion = SimulatorCompletion(
-            self._inference_access_token,
+            token,
             proxy_url=self._simulator_proxy_url,
             inference_stats_file=self._inference_stats_file,
             episode_id=state.session_id,
         )
-        session = state.session
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
             surface_events=not session.state_blind,
             completion=completion,
+            reader_completion=completion if session.task.situation and session.task.situation.reader else None,
             fired=lambda: session.env.fired_transitions,
         )
 
@@ -530,7 +545,10 @@ class SessionRegistry:
     def _simulator_error(
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
-        if isinstance(exc, InferenceProviderError) and exc.key_exhausted:
+        if (
+            isinstance(exc, InferenceProviderError) and exc.key_exhausted
+            and not (state.session.task.situation and state.session.task.situation.reader)
+        ):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
             summary = "miner inference key exhausted"

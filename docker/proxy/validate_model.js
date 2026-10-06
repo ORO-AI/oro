@@ -293,6 +293,11 @@ function _validatedRequest(r) {
     r.error("stripped inference routing fields: " + stripped.join(","));
   }
 
+  if (r._oroCaller === "validator" && provider === "openrouter" &&
+      parsed.response_format && parsed.response_format.type === "json_schema") {
+    parsed.provider = { require_parameters: true };
+  }
+
   // OpenRouter only returns `usage.cost` (USD) on the response when the
   // request body sets `usage.include=true`. Force it on so per-call cost
   // lands in every response — both InferenceStats (per-episode budget

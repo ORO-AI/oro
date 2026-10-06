@@ -80,10 +80,11 @@ def test_forwards_user_simulator_request_through_inference_proxy() -> None:
         (None, {}),
         (False, {"reasoning": {"enabled": False}}),
         (True, {"reasoning": {"enabled": True}}),
+        ({"effort": "medium"}, {"reasoning": {"effort": "medium"}}),
     ],
 )
 def test_reasoning_payload_is_opt_in(
-    reasoning: bool | None, extra_fields: dict
+    reasoning: bool | dict | None, extra_fields: dict
 ) -> None:
     client = MagicMock(post_verbose_async=AsyncMock())
     client.post_verbose_async.return_value = _ok(
@@ -105,6 +106,20 @@ def test_reasoning_payload_is_opt_in(
             **extra_fields,
         },
     )
+
+
+def test_forwards_strict_response_format_unchanged() -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_ok(
+        {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+    )))
+    schema = {"type": "json_schema", "json_schema": {
+        "name": "answer", "strict": True,
+        "schema": {"type": "object", "additionalProperties": False},
+    }}
+    asyncio.run(SimulatorCompletion("sk-or-owner", client=client)(
+        "test-model", [], response_format=schema,
+    ))
+    assert client.post_verbose_async.call_args.kwargs["json_data"]["response_format"] == schema
 
 
 def test_decide_posts_to_decisions_endpoint_once() -> None:
@@ -192,6 +207,29 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
     assert client.post_verbose_async.call_count == (
         1 if exhausted else simulator_completion._MAX_ATTEMPTS
     )
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+def test_provider_error_redacts_the_owned_credential(decisions, caplog) -> None:
+    token = "sk-or-test-owner"
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(
+        403, f"Key limit exceeded for {token}",
+    )))
+    completion = SimulatorCompletion(token, client=client)
+    with pytest.raises(InferenceProviderError) as raised:
+        asyncio.run(completion.decide("test", {}, {}) if decisions else completion("test", []))
+    assert token not in raised.value.body
+    assert token not in str(raised.value)
+    assert token not in caplog.text
+
+
+def test_provider_message_redacts_the_owned_credential() -> None:
+    token = "sk-or-test-owner"
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_ok({
+        "choices": [{"message": {"content": f"Unexpected echo {token}"}, "finish_reason": "stop"}],
+    })))
+    result = asyncio.run(SimulatorCompletion(token, client=client)("test", []))
+    assert token not in result["text"]
 
 
 def test_backoff_walks_full_schedule_before_giving_up(

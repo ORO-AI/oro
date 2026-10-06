@@ -159,6 +159,7 @@ services:
       - ORO_BACKEND_URL=${BACKEND_URL:-https://api.oroagents.com}
       - ORO_SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
       - ORO_SESSION_SIMULATOR_TIMEOUT=${ORO_SESSION_SIMULATOR_TIMEOUT:-60}
+      - ORO_SIMULATOR_ACCESS_TOKEN=${ORO_SIMULATOR_ACCESS_TOKEN:-}
       # Optional startup preflight for an operator-selected immutable pack.
       # Pack-bound claimed work selects the generated evaluator automatically.
       - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}

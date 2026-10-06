@@ -20,6 +20,29 @@ from validator.main import Validator
 from validator import main as validator_main
 
 
+def test_owned_credential_is_read_at_startup_outside_logged_config(monkeypatch) -> None:
+    config = SimpleNamespace(backend_url="unused", session_runtime_host="localhost", session_runtime_port=1)
+    monkeypatch.setenv("ORO_SIMULATOR_ACCESS_TOKEN", "sk-or-test-owner")
+    monkeypatch.setattr(Validator, "get_config", lambda self: config)
+    monkeypatch.setattr(Validator, "setup_logging", lambda self: None)
+    monkeypatch.setattr(Validator, "setup_bittensor_objects", lambda self: setattr(self, "wallet", MagicMock()))
+    monkeypatch.setattr(validator_main, "check_host_min_specs", lambda: None)
+    for name in ("BackendClient", "LocalRetryQueue", "ExponentialBackoff", "SessionServer", "collect_service_versions"):
+        monkeypatch.setattr(validator_main, name, MagicMock())
+    validator = Validator()
+    assert validator._simulator_access_token == "sk-or-test-owner"
+    assert "sk-or-test-owner" not in str(vars(config))
+    sandbox_command = validator_main.build_sandbox_command(
+        agent_host_path="/test/agent.py", logs_host_path="/test/logs",
+        problem_file_arg="/app/logs/problems.jsonl", output_path="/app/logs/output.jsonl",
+        inference_access_token="miner-token",
+    )
+    assert "sk-or-test-owner" not in " ".join(sandbox_command)
+    assert "ORO_SIMULATOR_ACCESS_TOKEN" not in " ".join(sandbox_command)
+    monkeypatch.delenv("ORO_SIMULATOR_ACCESS_TOKEN")
+    assert Validator()._simulator_access_token is None
+
+
 def _result(task_id: str, *, correct: bool, reward: float = 0, outcome="completed"):
     return {
         "task_id": task_id,
@@ -62,6 +85,28 @@ def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
     )
 
     assert score == 0.25
+
+
+@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
+def test_reader_work_rejects_even_one_infrastructure_row(outcome) -> None:
+    results = [_result(str(i), correct=True, reward=1) for i in range(10)]
+    results[0] = _result("0", correct=False, outcome=outcome)
+    assert aggregate_results(results) == 0.9
+    with pytest.raises(ValueError, match="generated evaluation infrastructure failure"):
+        aggregate_results(results, require_infrastructure_success=True)
+
+
+def test_reader_work_keeps_low_rewards_and_agent_errors_as_scores() -> None:
+    results = [_result("one", correct=True, reward=0.03), _result("two", correct=False, outcome="agent_error")]
+    assert aggregate_results(results, require_infrastructure_success=True) == 0.015
+
+
+@pytest.mark.parametrize("outcome", ["exploit", "leakage"])
+def test_reader_infrastructure_failures_do_not_hide_integrity_failures(outcome) -> None:
+    results = [_result("one", correct=False, outcome="environment_error"),
+               _result("two", correct=False, outcome=outcome)]
+    with pytest.raises(ValueError, match="generated evaluation integrity failure"):
+        aggregate_results(results, require_infrastructure_success=True)
 
 
 @pytest.mark.parametrize(
@@ -328,6 +373,50 @@ def test_generated_runner_delivers_failed_completion(
     validator.session_runtime.clear.assert_called_once_with(registry)
 
 
+@pytest.mark.parametrize("reader_task,outcome,failed", [
+    ("0", "environment_error", True), ("0", "verifier_error", True),
+    ("hidden", "environment_error", False), ("0", "agent_error", False),
+    ("0", "completed", False),
+])
+def test_generated_reader_failure_policy_uses_selected_roster(
+    tmp_path, monkeypatch, reader_task, outcome, failed,
+) -> None:
+    roster = {str(i): "right" for i in range(10)}
+    results = [{**_result(task, correct=True, reward=0.0 if task == "0" and outcome != "completed" else 0.1,
+                         outcome=outcome if task == "0" else "completed"),
+                "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
+                "pack_sha256": "a" * 64} for task in roster]
+    registry = MagicMock()
+    registry.key_exhausted = threading.Event()
+    registry.finalized_results.return_value = results
+    registry.loaded_pack.task_ids = [*roster, "hidden"]
+    registry.loaded_pack.task_specs = [
+        SimpleNamespace(situation=SimpleNamespace(reader=task == reader_task))
+        for task in registry.loaded_pack.task_ids
+    ]
+    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock())
+    validator = Validator.__new__(Validator)
+    validator._simulator_access_token = None
+    validator._create_environment_sessions = MagicMock(return_value=(registry, [], roster))
+    validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
+    validator.session_runtime = MagicMock()
+    validator.backend_client = MagicMock()
+    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
+    completion = validator._run_generated_evaluation(
+        work, tmp_path / "agent.py", inference_access_token="synthetic",
+        inference_provider="openrouter", inference_base_url="https://example.test/v1",
+    )
+    if failed:
+        assert completion is None
+        failure = validator.backend_client.complete_run.call_args.kwargs
+        assert failure["status"] == validator_main.TerminalStatus.FAILED
+        assert failure["failure_reason"] == f"generated evaluation infrastructure failure: completed=9, {outcome}=1"
+    else:
+        assert completion.score == pytest.approx(0.1 if outcome == "completed" else 0.09)
+        validator.backend_client.complete_run.assert_not_called()
+
+
 def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monkeypatch):
     """When the miner's per-run inference key hits its cap mid-run, the
     completed episodes are scored and the run is marked SUCCESS with a
@@ -448,6 +537,7 @@ def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
         validator_main, "SessionRegistry", MagicMock(return_value=registry)
     )
     validator = Validator.__new__(Validator)
+    validator._simulator_access_token = "sk-or-owner"
     validator.config = SimpleNamespace(
         backend_url="unused",
         session_tool_timeout=1,
@@ -467,6 +557,7 @@ def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
     _, sessions, roster = validator._create_environment_sessions(
         work, inference_access_token="unused"
     )
+    assert validator_main.SessionRegistry.call_args.kwargs["simulator_access_token"] == "sk-or-owner"
     validator.backend_client.get_run_problems.assert_called_once_with(work.eval_run_id)
     assert [
         call.kwargs["task_id"] for call in registry.start.call_args_list
@@ -675,6 +766,7 @@ def test_generated_runner_retains_agent_inference_summary(
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", reporter_type)
 
     validator = Validator.__new__(Validator)
+    validator._simulator_access_token = "sk-or-test-owner"
     validator._create_environment_sessions = MagicMock(
         return_value=(
             registry,
@@ -707,6 +799,7 @@ def test_generated_runner_retains_agent_inference_summary(
                     "problem_id": "session",
                     "_shadow_inference_usage": output_stats,
                     "dialogue": [],
+                    "owner_echo": "sk-or-test-owner",
                 }
             )
             + "\n"
@@ -724,6 +817,10 @@ def test_generated_runner_retains_agent_inference_summary(
     reporter.stop.assert_called()
     reporter.flush.assert_called_once_with([result])
     validator.session_runtime.clear.assert_called_once_with(registry)
+    reporter_type.call_args.args[1]([result])
+    assert "sk-or-test-owner" not in json.dumps(
+        validator._emit_environment_result_batch.call_args.kwargs["inference_transcripts"]
+    )
     assert completion is not None
     assert completion.score == 0.5
     usage = completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"][
