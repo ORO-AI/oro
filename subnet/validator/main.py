@@ -1412,12 +1412,13 @@ class Validator:
         try:
             score = aggregate_results(
                 results,
-                require_infrastructure_success=any(
-                    task_id in selected_roster and getattr(task.situation, "reader", None)
+                selected_reader_task_ids={
+                    task_id
                     for task_id, task in zip(
                         registry.loaded_pack.task_ids, registry.loaded_pack.task_specs, strict=True,
                     )
-                ),
+                    if task_id in selected_roster and getattr(task.situation, "reader", None)
+                },
             )
         except ValueError as exc:
             self._complete_with_failure(

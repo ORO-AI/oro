@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Collection
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -108,7 +109,7 @@ def write_problem_file(path: Path, sessions: list[dict[str, Any]]) -> None:
 
 
 def aggregate_results(
-    results: list[dict[str, Any]], *, require_infrastructure_success: bool = False,
+    results: list[dict[str, Any]], *, selected_reader_task_ids: Collection[str] = (),
 ) -> float:
     """Average paid task rewards, counting agent failures as zero."""
 
@@ -132,10 +133,13 @@ def aggregate_results(
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
     harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
-    # Keep the historical strict > threshold for unconfigured tasks. Configured
-    # Reader work must have no infrastructure rows; the count-token failure
-    # reason below is recognized as infrastructure independently of its ratio.
-    if (require_infrastructure_success and harness_count) or harness_count * 10 > len(results) * 3:
+    # A selected Reader failure is fatal; ordinary rows retain the historical
+    # strict > threshold. Count-token reasons classify either as infrastructure.
+    if any(
+        result["task_id"] in selected_reader_task_ids
+        and result.get("outcome") in _HARNESS_OUTCOMES
+        for result in results
+    ) or harness_count * 10 > len(results) * 3:
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )

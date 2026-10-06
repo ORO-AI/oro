@@ -93,12 +93,12 @@ def test_reader_work_rejects_even_one_infrastructure_row(outcome) -> None:
     results[0] = _result("0", correct=False, outcome=outcome)
     assert aggregate_results(results) == 0.9
     with pytest.raises(ValueError, match="generated evaluation infrastructure failure"):
-        aggregate_results(results, require_infrastructure_success=True)
+        aggregate_results(results, selected_reader_task_ids={"0"})
 
 
 def test_reader_work_keeps_low_rewards_and_agent_errors_as_scores() -> None:
     results = [_result("one", correct=True, reward=0.03), _result("two", correct=False, outcome="agent_error")]
-    assert aggregate_results(results, require_infrastructure_success=True) == 0.015
+    assert aggregate_results(results, selected_reader_task_ids={"one", "two"}) == 0.015
 
 
 @pytest.mark.parametrize("outcome", ["exploit", "leakage"])
@@ -106,7 +106,7 @@ def test_reader_infrastructure_failures_do_not_hide_integrity_failures(outcome) 
     results = [_result("one", correct=False, outcome="environment_error"),
                _result("two", correct=False, outcome=outcome)]
     with pytest.raises(ValueError, match="generated evaluation integrity failure"):
-        aggregate_results(results, require_infrastructure_success=True)
+        aggregate_results(results, selected_reader_task_ids={"one"})
 
 
 @pytest.mark.parametrize(
@@ -375,6 +375,7 @@ def test_generated_runner_delivers_failed_completion(
 
 @pytest.mark.parametrize("reader_task,outcome,failed", [
     ("0", "environment_error", True), ("0", "verifier_error", True),
+    ("1", "environment_error", False), ("1", "verifier_error", False),
     ("hidden", "environment_error", False), ("0", "agent_error", False),
     ("0", "completed", False),
 ])
