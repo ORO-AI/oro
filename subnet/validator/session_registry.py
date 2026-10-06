@@ -9,7 +9,8 @@ import hashlib
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 from uuid import uuid4
@@ -36,6 +37,7 @@ MAX_CALLS_PER_TURN = 16
 # per attempt, so a shorter budget would quarantine sessions the provider would
 # still answer.
 DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
+_SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
@@ -279,12 +281,19 @@ class SessionRegistry:
         self, state: _SessionState, signal: dict[str, Any] | None
     ) -> dict[str, Any]:
         self._simulator(state)
-        decision = asyncio.run(state.simulator.respond(state.transcript, signal))
+        decision = self._run_simulator(state.simulator.respond(state.transcript, signal))
         if not isinstance(decision, dict):
             raise TypeError("simulator response must be an object")
         if signal is not None:
             decision = state.simulator.ensure_react(decision, signal)
         return decision
+
+    def _run_simulator(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
+        async def bounded() -> Any:
+            remaining = max(0.0, _SIMULATOR_DEADLINE.get() - time.monotonic())
+            return await asyncio.wait_for(coroutine, timeout=remaining)
+
+        return asyncio.run(bounded())
 
     @staticmethod
     def _simulator_exchanges(simulator: Any | None) -> list[dict[str, Any]]:
@@ -310,7 +319,9 @@ class SessionRegistry:
         if signal is not None or (message_sent and not lines):
             decisions.append((self._simulator_response(state, signal), signal))
         if lines:
-            asyncio.run(loop.reword_utterances(self._simulator(state), state.session))
+            self._run_simulator(
+                loop.reword_utterances(self._simulator(state), state.session)
+            )
         return decisions
 
     def start(
@@ -624,10 +635,20 @@ class SessionRegistry:
         """Run simulator work under its timeout; a failure quarantines the session."""
         started = time.perf_counter()
         snapshot = self._session_snapshot(state)
-        future = self._executor.submit(work, *args)
+        deadline = time.monotonic() + self.simulator_timeout_s
+
+        def bounded_work() -> Any:
+            # All response/reword phases share the deadline, including queue time.
+            token = _SIMULATOR_DEADLINE.set(deadline)
+            try:
+                return work(*args)
+            finally:
+                _SIMULATOR_DEADLINE.reset(token)
+
+        future = self._executor.submit(bounded_work)
         try:
             result = future.result(timeout=self.simulator_timeout_s)
-        except concurrent.futures.TimeoutError as exc:
+        except (concurrent.futures.TimeoutError, asyncio.TimeoutError) as exc:
             trace.simulator_latency_ms = _elapsed_ms(started)
             future.cancel()
             self._raise_timeout(
@@ -708,7 +729,7 @@ class SessionRegistry:
                     session_id,
                     state,
                     trace,
-                    lambda: asyncio.run(
+                    lambda: self._run_simulator(
                         loop.reword_utterances(self._simulator(state), state.session)
                     ),
                 )

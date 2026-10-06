@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from oro_env_runtime.schema import Event, LedgerEntry
+from src.agent.proxy_client import ProxyClient
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
 from validator.session_registry import (
@@ -25,6 +26,7 @@ from validator.session_service import SessionRuntime, create_session_app
 from validator.simulator_completion import (
     VALIDATOR_CALLER_SECRET,
     InferenceProviderError,
+    SimulatorCompletion,
 )
 
 from tests.compat_fixture import accepted_ref
@@ -698,6 +700,108 @@ def test_simulator_timeout_is_independent_of_the_tool_timeout(
         assert timing["total"] >= timing["simulator"]
         with pytest.raises(InvalidSessionError, match="quarantined"):
             registry.verdict(envelope)
+
+
+def test_registry_timeout_closes_http_request_and_releases_worker(
+    loaded_pack: LoadedPack, tmp_path, monkeypatch
+) -> None:
+    log_path = tmp_path / "requests.jsonl"
+    monkeypatch.setenv("REQUEST_LOG_FILE", str(log_path))
+
+    async def exercise() -> None:
+        started, closed = asyncio.Event(), asyncio.Event()
+
+        async def handle(reader, writer):
+            try:
+                headers = await reader.readuntil(b"\r\n\r\n")
+                length = next(
+                    int(header.split(b":", 1)[1])
+                    for header in headers.split(b"\r\n")
+                    if header.lower().startswith(b"content-length:")
+                )
+                await reader.readexactly(length)
+                started.set()
+                assert await reader.read() == b""
+                closed.set()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        async with await asyncio.start_server(handle, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            complete = SimulatorCompletion(
+                "test-token",
+                client=ProxyClient(
+                    proxy_url=f"http://127.0.0.1:{port}",
+                    api_key="test-token",
+                    timeout=5,
+                    max_retries=1,
+                ),
+            )
+
+            class Simulator:
+                async def respond(self, _transcript, _signal):
+                    await complete("test-model", [])
+                    raise AssertionError("timed-out response must not return")
+
+            with SessionRegistry(
+                loaded_pack,
+                simulator_timeout_s=0.5,
+                max_workers=1,
+                simulator_factory=lambda _session: Simulator(),
+            ) as registry:
+                _start(registry)
+                envelope = _call_envelope(
+                    registry,
+                    action={"name": "message", "args": {"content": "A question?"}},
+                )
+                call = asyncio.create_task(asyncio.to_thread(registry.call, envelope))
+                await asyncio.wait_for(started.wait(), 2)
+                with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
+                    await call
+                await asyncio.wait_for(closed.wait(), 1)
+                # The only worker can accept work after the socket has closed.
+                assert await asyncio.wait_for(
+                    asyncio.wrap_future(registry._executor.submit(lambda: "available")), 1
+                ) == "available"
+                with pytest.raises(InvalidSessionError, match="quarantined"):
+                    registry.verdict(envelope)
+
+    asyncio.run(asyncio.wait_for(exercise(), 4))
+    summaries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert [entry["response"] for entry in summaries if entry["kind"] == "summary"] == [
+        {"kind": "cancelled", "usage": "unknown"}
+    ]
+
+
+def test_simulator_phases_share_one_deadline(loaded_pack: LoadedPack, monkeypatch) -> None:
+    completed, cancelled = [], threading.Event()
+
+    async def phase(name):
+        try:
+            await asyncio.sleep(0.08)
+            completed.append(name)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with SessionRegistry(loaded_pack, simulator_timeout_s=0.12, max_workers=1) as registry:
+        _start(registry)
+
+        def two_phases(*_args):
+            registry._run_simulator(phase("response"))
+            registry._run_simulator(phase("reword"))
+            return []
+
+        monkeypatch.setattr(registry, "_shopper_turn_decisions", two_phases)
+        with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
+            registry.call(_call_envelope(
+                registry,
+                action={"name": "message", "args": {"content": "A question?"}},
+            ))
+        assert cancelled.wait(timeout=1)
+        assert completed == ["response"]
+        assert registry._executor.submit(lambda: "available").result(timeout=1) == "available"
 
 
 def test_grouped_calls_reject_more_than_the_declared_limit(
