@@ -820,6 +820,9 @@ def test_registry_timeout_closes_http_request_and_releases_worker(
             )
 
             class Simulator:
+                def exchange_trace(self):
+                    return [{"kind": "completed_reader", "answer": "unsure"}]
+
                 async def respond(self, _transcript, _signal):
                     await complete("test-model", [])
                     raise AssertionError("timed-out response must not return")
@@ -846,6 +849,9 @@ def test_registry_timeout_closes_http_request_and_releases_worker(
                 ) == "available"
                 with pytest.raises(InvalidSessionError, match="quarantined"):
                     registry.verdict(envelope)
+                assert registry.finalized_results()[0]["call_trace"][0]["simulator"]["exchanges"] == [
+                    {"kind": "completed_reader", "answer": "unsure"}
+                ]
 
     asyncio.run(asyncio.wait_for(exercise(), 4))
     summaries = [json.loads(line) for line in log_path.read_text().splitlines()]

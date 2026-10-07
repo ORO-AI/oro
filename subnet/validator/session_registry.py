@@ -567,6 +567,7 @@ class SessionRegistry:
             state_hash_after=snapshot["state_hash"],
             error_type="HarnessTimeoutError",
             error_detail=state.quarantined_reason,
+            simulator_exchanges=self._simulator_exchanges(state.simulator),
         )
         state.final_result = self._result(
             session_id,
