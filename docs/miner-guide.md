@@ -14,7 +14,9 @@ the qualifying inference path.
 
 The practice EnvPack is included at `data/local-test/env-pack.tar.gz` using Git
 LFS. It holds qualifying rows only: the runner refuses a pack with any race row,
-so local scores never come from race material. The local runner verifies the
+so local scores never come from race material. Its existing 30 practice tasks
+and grading are unchanged; the delivery now declares runtime contract 3 for
+`oro-env-runtime` 3.4. The local runner verifies the
 pack's digest, its runtime contracts, and the matching search-index identity
 before it starts the agent sandbox, and prints them in the run header.
 Your agent file must define a synchronous callable
@@ -143,7 +145,7 @@ parentheses:
 
 ```text
 ORO Bench local run  local-7c1f2a
-  pack        f75b76c8…cd0c
+  pack        1e86e5c5…65d6
   problems    5 of 30, qualifying roster
   runtime     0.3.4
   inference   openrouter
