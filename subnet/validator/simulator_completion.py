@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import threading
 import time
 from typing import Any
 
@@ -76,10 +77,12 @@ class SimulatorCompletion:
         client: ProxyClient | None = None,
         inference_stats_file: str | None = None,
         episode_id: str | None = None,
+        key_exhausted_event: threading.Event | None = None,
     ) -> None:
         if not access_token:
             raise ValueError("inference access token is required")
         self._access_token = access_token
+        self._key_exhausted_event = key_exhausted_event
         # Only OpenRouter serves the decisions endpoint (Jev). On another provider
         # the disclosure reader sees no ``decide`` and reads with the chat model;
         # a decisions error there would otherwise count as an answer (no reveal).
@@ -175,6 +178,8 @@ class SimulatorCompletion:
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
             if provider_error.key_exhausted:
+                if self._key_exhausted_event is not None:
+                    self._key_exhausted_event.set()
                 logger.warning("inference key budget exhausted during user simulation")
                 raise provider_error
             if attempt >= _MAX_ATTEMPTS:
@@ -228,9 +233,10 @@ class SimulatorCompletion:
         # reads); a status outside 429/502-504 or a malformed answer reads as unsure.
         if error.get("kind") == "network":
             raise ConnectionError(body or "no response")
-        raise InferenceProviderError(
-            error.get("status"), body
-        )
+        provider_error = InferenceProviderError(error.get("status"), body)
+        if provider_error.key_exhausted and self._key_exhausted_event is not None:
+            self._key_exhausted_event.set()
+        raise provider_error
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

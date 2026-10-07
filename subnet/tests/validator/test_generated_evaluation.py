@@ -20,29 +20,6 @@ from validator.main import Validator
 from validator import main as validator_main
 
 
-def test_owned_credential_is_read_at_startup_outside_logged_config(monkeypatch) -> None:
-    config = SimpleNamespace(backend_url="unused", session_runtime_host="localhost", session_runtime_port=1)
-    monkeypatch.setenv("ORO_SIMULATOR_ACCESS_TOKEN", "sk-or-test-owner")
-    monkeypatch.setattr(Validator, "get_config", lambda self: config)
-    monkeypatch.setattr(Validator, "setup_logging", lambda self: None)
-    monkeypatch.setattr(Validator, "setup_bittensor_objects", lambda self: setattr(self, "wallet", MagicMock()))
-    monkeypatch.setattr(validator_main, "check_host_min_specs", lambda: None)
-    for name in ("BackendClient", "LocalRetryQueue", "ExponentialBackoff", "SessionServer", "collect_service_versions"):
-        monkeypatch.setattr(validator_main, name, MagicMock())
-    validator = Validator()
-    assert validator._simulator_access_token == "sk-or-test-owner"
-    assert "sk-or-test-owner" not in str(vars(config))
-    sandbox_command = validator_main.build_sandbox_command(
-        agent_host_path="/test/agent.py", logs_host_path="/test/logs",
-        problem_file_arg="/app/logs/problems.jsonl", output_path="/app/logs/output.jsonl",
-        inference_access_token="miner-token",
-    )
-    assert "sk-or-test-owner" not in " ".join(sandbox_command)
-    assert "ORO_SIMULATOR_ACCESS_TOKEN" not in " ".join(sandbox_command)
-    monkeypatch.delenv("ORO_SIMULATOR_ACCESS_TOKEN")
-    assert Validator()._simulator_access_token is None
-
-
 def _result(task_id: str, *, correct: bool, reward: float = 0, outcome="completed"):
     return {
         "task_id": task_id,
@@ -397,7 +374,6 @@ def test_generated_reader_failure_policy_uses_selected_roster(
     ]
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock())
     validator = Validator.__new__(Validator)
-    validator._simulator_access_token = None
     validator._create_environment_sessions = MagicMock(return_value=(registry, [], roster))
     validator._eval_dir = MagicMock(return_value=tmp_path)
     validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
@@ -538,7 +514,6 @@ def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
         validator_main, "SessionRegistry", MagicMock(return_value=registry)
     )
     validator = Validator.__new__(Validator)
-    validator._simulator_access_token = "sk-or-owner"
     validator.config = SimpleNamespace(
         backend_url="unused",
         session_tool_timeout=1,
@@ -558,7 +533,8 @@ def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
     _, sessions, roster = validator._create_environment_sessions(
         work, inference_access_token="unused"
     )
-    assert validator_main.SessionRegistry.call_args.kwargs["simulator_access_token"] == "sk-or-owner"
+    assert validator_main.SessionRegistry.call_args.kwargs["inference_access_token"] == "unused"
+    assert "simulator_access_token" not in validator_main.SessionRegistry.call_args.kwargs
     validator.backend_client.get_run_problems.assert_called_once_with(work.eval_run_id)
     assert [
         call.kwargs["task_id"] for call in registry.start.call_args_list
@@ -767,7 +743,6 @@ def test_generated_runner_retains_agent_inference_summary(
     monkeypatch.setattr(validator_main, "GeneratedProgressReporter", reporter_type)
 
     validator = Validator.__new__(Validator)
-    validator._simulator_access_token = "sk-or-test-owner"
     validator._create_environment_sessions = MagicMock(
         return_value=(
             registry,
@@ -800,7 +775,7 @@ def test_generated_runner_retains_agent_inference_summary(
                     "problem_id": "session",
                     "_shadow_inference_usage": output_stats,
                     "dialogue": [],
-                    "owner_echo": "sk-or-test-owner",
+                    "miner_echo": "sk-or-test-miner",
                 }
             )
             + "\n"
@@ -809,7 +784,7 @@ def test_generated_runner_retains_agent_inference_summary(
     completion = validator._run_generated_evaluation(
         work,
         tmp_path / "agent.py",
-        inference_access_token="token",
+        inference_access_token="sk-or-test-miner",
         inference_provider="openrouter",
         inference_base_url="https://example.test/v1",
     )
@@ -819,7 +794,7 @@ def test_generated_runner_retains_agent_inference_summary(
     reporter.flush.assert_called_once_with([result])
     validator.session_runtime.clear.assert_called_once_with(registry)
     reporter_type.call_args.args[1]([result])
-    assert "sk-or-test-owner" not in json.dumps(
+    assert "sk-or-test-miner" not in json.dumps(
         validator._emit_environment_result_batch.call_args.kwargs["inference_transcripts"]
     )
     assert completion is not None

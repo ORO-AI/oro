@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -116,7 +117,7 @@ def test_forwards_strict_response_format_unchanged() -> None:
         "name": "answer", "strict": True,
         "schema": {"type": "object", "additionalProperties": False},
     }}
-    asyncio.run(SimulatorCompletion("sk-or-owner", client=client)(
+    asyncio.run(SimulatorCompletion("sk-or-miner", client=client)(
         "test-model", [], response_format=schema,
     ))
     assert client.post_verbose_async.call_args.kwargs["json_data"]["response_format"] == schema
@@ -210,21 +211,23 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
 
 
 @pytest.mark.parametrize("decisions", [False, True])
-def test_provider_error_redacts_the_owned_credential(decisions, caplog) -> None:
-    token = "sk-or-test-owner"
+def test_provider_error_redacts_the_miner_credential(decisions, caplog) -> None:
+    token = "sk-or-test-miner"
     client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(
         403, f"Key limit exceeded for {token}",
     )))
-    completion = SimulatorCompletion(token, client=client)
+    exhausted = threading.Event()
+    completion = SimulatorCompletion(token, client=client, key_exhausted_event=exhausted)
     with pytest.raises(InferenceProviderError) as raised:
         asyncio.run(completion.decide("test", {}, {}) if decisions else completion("test", []))
+    assert exhausted.is_set()
     assert token not in raised.value.body
     assert token not in str(raised.value)
     assert token not in caplog.text
 
 
-def test_provider_message_redacts_the_owned_credential() -> None:
-    token = "sk-or-test-owner"
+def test_provider_message_redacts_the_miner_credential() -> None:
+    token = "sk-or-test-miner"
     client = MagicMock(post_verbose_async=AsyncMock(return_value=_ok({
         "choices": [{"message": {"content": f"Unexpected echo {token}"}, "finish_reason": "stop"}],
     })))

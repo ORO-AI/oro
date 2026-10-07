@@ -27,23 +27,18 @@ class SessionRuntime:
 
     def __init__(self) -> None:
         self._registry: SessionRegistry | None = None
-        self._inference_grant: tuple[str, str, float, str | None] | None = None
+        self._inference_grant: tuple[str, str, float] | None = None
         self._lock = threading.Lock()
 
-    def set_inference_grant(
-        self, run_id: str, token: str, expires_at: float, *,
-        simulator_token: str | None = None,
-    ) -> None:
+    def set_inference_grant(self, run_id: str, token: str, expires_at: float) -> None:
         with self._lock:
-            self._inference_grant = (run_id, token, expires_at, simulator_token)
+            self._inference_grant = (run_id, token, expires_at)
 
     def clear_inference_grant(self) -> None:
         with self._lock:
             self._inference_grant = None
 
-    def authorize_inference(
-        self, authorization: str | None, *, validator: bool = False,
-    ) -> tuple[str | None, bool]:
+    def authorize_inference(self, authorization: str | None) -> tuple[str | None, bool]:
         with self._lock:
             grant = self._inference_grant
             if grant is None:
@@ -51,10 +46,7 @@ class SessionRuntime:
             authorized = (
                 time.time() < grant[2]
                 and authorization is not None
-                and any(
-                    compare_digest(authorization.encode(), f"Bearer {token}".encode())
-                    for token in (grant[1], grant[3] if validator else None) if token
-                )
+                and compare_digest(authorization.encode(), f"Bearer {grant[1]}".encode())
             )
             return grant[0], authorized
 
@@ -110,7 +102,7 @@ def create_session_app(runtime: SessionRuntime) -> FastAPI:
         validator = x_oro_validator is not None and compare_digest(
             x_oro_validator.encode(), VALIDATOR_CALLER_SECRET.encode()
         )
-        run_id, authorized = runtime.authorize_inference(authorization, validator=validator)
+        run_id, authorized = runtime.authorize_inference(authorization)
         headers = {"X-ORO-Run-ID": run_id} if run_id else None
         if not authorized:
             raise HTTPException(
