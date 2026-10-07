@@ -80,6 +80,8 @@ Keep your existing `.env`, or copy `.env.example` for a new checkout. Set
 is available in the live allowlist: use its native OpenRouter ID or a supported
 alias supplied by the Backend. The reference agent's default
 `deepseek-ai/DeepSeek-V3.2-TEE` is a supported alias for its OpenRouter model.
+If your existing `.env` sets `INFERENCE_PROVIDER=chutes`, change it to
+`INFERENCE_PROVIDER=openrouter` or remove that setting before running locally.
 `SANDBOX_MODEL` is an optional override used by the included reference agent.
 Its default is
 `deepseek-ai/DeepSeek-V3.2-TEE`, preserving the existing local-testing default.

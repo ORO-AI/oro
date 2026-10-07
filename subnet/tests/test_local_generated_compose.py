@@ -46,7 +46,7 @@ def test_compose_supports_existing_miner_command_and_env_file(
     env_file = tmp_path / "miner.env"
     env_file.write_text(
         "OPENROUTER_API_KEY=or-test\nCHUTES_API_KEY=ch-test\n"
-        f"INFERENCE_PROVIDER=chutes\nSANDBOX_MODEL={model}\n"
+        f"INFERENCE_PROVIDER=openrouter\nSANDBOX_MODEL={model}\n"
         f"IMAGE_TAG={image_tag}\nLOCAL_SEARCH_SERVER_IMAGE={search_override}\n"
     )
     environment = {
@@ -99,8 +99,8 @@ def test_compose_supports_existing_miner_command_and_env_file(
     assert service["build"]["args"]["RUNTIME_PROFILE"] == "local-test"
     assert service["environment"]["LOCAL_OUTPUT_ROOT"] == "/app/logs/environment-runs"
     assert service["environment"]["OPENROUTER_API_KEY"] == "or-test"
-    assert service["environment"]["CHUTES_API_KEY"] == "ch-test"
-    assert service["environment"]["INFERENCE_PROVIDER"] == "chutes"
+    assert service["environment"]["INFERENCE_PROVIDER"] == "openrouter"
+    assert "CHUTES_API_KEY" not in service["environment"]
     assert service["environment"]["SANDBOX_MODEL"] == (
         model or "deepseek-ai/DeepSeek-V3.2-TEE"
     )

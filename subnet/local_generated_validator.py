@@ -827,7 +827,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
 
     key, provider, base_url = resolve_inference_credentials()
     if not key or not provider or not base_url:
-        raise ValueError("set OPENROUTER_API_KEY or CHUTES_API_KEY in .env")
+        raise ValueError("set OPENROUTER_API_KEY in .env")
     model = os.environ.get("SANDBOX_MODEL") or "deepseek-ai/DeepSeek-V3.2-TEE"
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", model):
         raise ValueError("SANDBOX_MODEL contains unsupported characters")

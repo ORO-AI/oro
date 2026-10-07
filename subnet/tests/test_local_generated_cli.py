@@ -39,19 +39,18 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         "LOCAL_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     # Keep parse_config tests independent of whether this checkout has the
     # LFS pack; test_bundled_pack_matches_released_runtime_contracts covers it.
     monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(tmp_path / "env-pack.tar.gz"))
 
 
 @pytest.mark.parametrize(
-    ("openrouter", "chutes", "provider", "expected_key", "expected_provider"),
+    ("openrouter", "chutes", "provider"),
     [
-        ("or-test", "", "", "or-test", "openrouter"),
-        ("", "ch-test", "", "ch-test", "chutes"),
-        ("or-test", "ch-test", "chutes", "ch-test", "chutes"),
-        ("or-test", "ch-test", "openrouter", "or-test", "openrouter"),
-        ("or-test", "ch-test", "", "or-test", "openrouter"),
+        ("or-test", "", ""),
+        ("or-test", "ch-test", ""),
+        ("or-test", "ch-test", "openrouter"),
     ],
 )
 def test_existing_credentials_select_one_provider(
@@ -60,8 +59,6 @@ def test_existing_credentials_select_one_provider(
     openrouter,
     chutes,
     provider,
-    expected_key,
-    expected_provider,
 ) -> None:
     agent = tmp_path / "agent.py"
     agent.write_text("raise AssertionError('agent imported outside sandbox')\n")
@@ -73,22 +70,57 @@ def test_existing_credentials_select_one_provider(
     config = local.parse_config(["--agent-file", str(agent)])
 
     assert config.agent_path == agent
-    assert config.inference_access_token == expected_key
-    assert config.inference_provider == expected_provider
-    assert (
-        config.inference_base_url
-        == {
-            "openrouter": "https://openrouter.ai/api/v1",
-            "chutes": "https://llm.chutes.ai/v1",
-        }[expected_provider]
-    )
+    assert config.inference_access_token == "or-test"
+    assert config.inference_provider == "openrouter"
+    assert config.inference_base_url == "https://openrouter.ai/api/v1"
     assert config.model == "vendor/custom-model"
+
+
+def test_unsupported_provider_fails_before_evaluation(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.setenv("INFERENCE_PROVIDER", "chutes")
+    monkeypatch.setenv("LOCAL_OUTPUT_ROOT", str(tmp_path / "logs"))
+    monkeypatch.setattr(
+        local,
+        "run_local_generated_validator",
+        lambda config: pytest.fail(
+            "evaluation must not start for an unsupported provider"
+        ),
+    )
+
+    assert local.main(["--agent-file", str(agent)]) == 2
+    assert "INFERENCE_PROVIDER must be 'openrouter'" in capsys.readouterr().err
+    assert not (tmp_path / "logs").exists()
+
+
+def test_chutes_only_credentials_fail_before_evaluation(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    agent = tmp_path / "agent.py"
+    agent.touch()
+    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    monkeypatch.setenv("LOCAL_OUTPUT_ROOT", str(tmp_path / "logs"))
+    monkeypatch.setattr(
+        local,
+        "run_local_generated_validator",
+        lambda config: pytest.fail(
+            "evaluation must not start without OpenRouter credentials"
+        ),
+    )
+
+    assert local.main(["--agent-file", str(agent)]) == 2
+    assert "set OPENROUTER_API_KEY" in capsys.readouterr().err
+    assert not (tmp_path / "logs").exists()
 
 
 def test_model_flag_is_not_required(monkeypatch, tmp_path) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
 
     config = local.parse_config(["--agent-file", str(agent)])
 
@@ -104,7 +136,6 @@ def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> Non
     # path, so pin it here with the pointer probe stubbed out.
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.delenv("LOCAL_ENV_PACK_PATH", raising=False)
     monkeypatch.setattr(local, "_is_git_lfs_pointer", lambda path: False)
 
@@ -150,7 +181,6 @@ def test_invalid_model_cannot_reach_proxy_configuration(
 ) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.setenv("SANDBOX_MODEL", model)
     with pytest.raises(ValueError, match="SANDBOX_MODEL"):
         local.parse_config(["--agent-file", str(agent)])
@@ -169,7 +199,6 @@ def test_invalid_limits_fail_before_evaluation(
 ) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=name):
         local.parse_config(["--agent-file", str(agent)])
@@ -180,7 +209,6 @@ def test_problems_flag_selects_a_subset_and_reports_a_repeatable_seed(
 ) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
 
     full = local.parse_config(["--agent-file", str(agent)])
     assert full.problem_count is None
@@ -205,7 +233,6 @@ def test_seed_without_problems_is_rejected(monkeypatch, tmp_path) -> None:
     # when it ran the full qualifying roster.
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     with pytest.raises(ValueError, match="--seed only applies"):
         local.parse_config(["--agent-file", str(agent), "--seed", "5"])
 
@@ -213,20 +240,19 @@ def test_seed_without_problems_is_rejected(monkeypatch, tmp_path) -> None:
 def test_problems_flag_rejects_a_non_positive_count(monkeypatch, tmp_path) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     with pytest.raises(ValueError, match="--problems must be positive"):
         local.parse_config(["--agent-file", str(agent), "--problems", "0"])
 
 
-def test_missing_credentials_fail_without_running_agent(tmp_path) -> None:
+def test_missing_credentials_fail_without_running_agent(monkeypatch, tmp_path) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    with pytest.raises(ValueError, match="OPENROUTER_API_KEY.*CHUTES_API_KEY"):
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
         local.parse_config(["--agent-file", str(agent)])
 
 
 def test_missing_agent_is_a_configuration_error(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     assert local.main(["--agent-file", str(tmp_path / "missing.py")]) == 2
     assert "agent file does not exist" in capsys.readouterr().err
 
@@ -242,7 +268,6 @@ def test_lfs_pointer_pack_is_a_configuration_error(
         "oid sha256:" + "9" * 64 + "\n"
         "size 6304798\n"
     )
-    monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(pointer))
     # Point the run directory somewhere observable: the default is CWD-relative,
     # so asserting on tmp_path without this would pass whether or not a run started.
@@ -258,7 +283,6 @@ def test_lfs_pointer_pack_is_a_configuration_error(
 def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
     monkeypatch.setattr(
         local,
         "run_local_generated_validator",

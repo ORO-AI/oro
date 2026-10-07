@@ -85,12 +85,14 @@ test("a no-store fallback serves native IDs without replacing cached aliases", (
 });
 
 test("rejects Chutes before consulting its cached allowlist", () => {
-  shared.clear();
-  shared.set("state:chutes", JSON.stringify({ allowlist: [chutesId], aliases: {}, expiresAt: Date.now() - 1 }));
-  const { r, calls } = request(chutesId, "chutes", {});
-  assert.equal(r.status, 403);
-  assert.equal(calls.some((call) => call.uri === "/_backend_models"), false);
-  assert.equal(calls.some((call) => call.uri.startsWith("/_chutes_proxy/")), false);
+  for (const expiresAt of [Date.now() + 900000, Date.now() - 1]) {
+    shared.clear();
+    shared.set("state:chutes", JSON.stringify({ allowlist: [chutesId], aliases: {}, expiresAt }));
+    const { r, calls } = request(chutesId, "chutes", {});
+    assert.equal(r.status, 403);
+    assert.equal(calls.some((call) => call.uri === "/_backend_models"), false);
+    assert.equal(calls.some((call) => call.uri.startsWith("/_chutes_proxy/")), false);
+  }
 });
 
 test("OpenRouter still routes with a cached allowlist", () => {
