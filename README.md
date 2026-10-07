@@ -43,10 +43,10 @@ qualifying delivery with no race rows, included at
 `data/local-test/env-pack.tar.gz` using Git LFS. Network qualifying runs the
 active suite's full roster.
 
-Keep your inference credentials in `.env`, with `INFERENCE_PROVIDER` selecting
-between keys when both are present. `SANDBOX_MODEL` optionally overrides the
-included reference agent. Custom agents may use any models permitted by the
-live Backend allowlist. Run from the repository root:
+Keep `OPENROUTER_API_KEY` in `.env` for inference. `SANDBOX_MODEL` optionally
+overrides the included reference agent; use a native OpenRouter model ID or a
+supported alias from the live Backend allowlist. Custom agents may use any
+models permitted by that allowlist. Run from the repository root:
 
 ```bash
 docker compose run test --agent-file src/agent/environment_agent.py

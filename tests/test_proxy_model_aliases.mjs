@@ -84,15 +84,21 @@ test("a no-store fallback serves native IDs without replacing cached aliases", (
   assert.equal(shared.size, 0);
 });
 
-test("Chutes retains the shopper simulator's Mistral mapping", () => {
+test("rejects Chutes before consulting its cached allowlist", () => {
   shared.clear();
-  const nemo = "unsloth/Mistral-Nemo-Instruct-2407-TEE";
-  const catalogs = { chutes: { models: [chutesId, nemo] } };
-  assert.equal(request(openrouterId, "chutes", catalogs).r.status, 403);
-  assert.equal(request(chutesId, "chutes", catalogs).r.status, 200);
-  const { r, calls } = request("mistralai/mistral-small-2603", "chutes", catalogs);
+  shared.set("state:chutes", JSON.stringify({ allowlist: [chutesId], aliases: {}, expiresAt: Date.now() - 1 }));
+  const { r, calls } = request(chutesId, "chutes", {});
+  assert.equal(r.status, 403);
+  assert.equal(calls.some((call) => call.uri === "/_backend_models"), false);
+  assert.equal(calls.some((call) => call.uri.startsWith("/_chutes_proxy/")), false);
+});
+
+test("OpenRouter still routes with a cached allowlist", () => {
+  shared.clear();
+  shared.set("state:openrouter", JSON.stringify({ allowlist: [openrouterId], aliases: {}, expiresAt: Date.now() + 900000 }));
+  const { r, calls } = request(openrouterId, "openrouter", {});
   assert.equal(r.status, 200);
-  assert.equal(JSON.parse(calls.at(-1).options.body).model, nemo);
+  assert.equal(calls.some((call) => call.uri === "/_openrouter_proxy/chat/completions"), true);
 });
 
 test("decisions serve only the pinned disclosure reader, never on agent routes", () => {
@@ -114,12 +120,10 @@ test("strict schema routing is authored only for validator OpenRouter requests",
     ["openrouter", "validator", schema, { require_parameters: true }],
     ["openrouter", undefined, schema, undefined],
     ["openrouter", "validator", { type: "json_object" }, undefined],
-    ["chutes", "validator", schema, undefined],
   ]) {
     shared.clear();
-    const model = provider === "openrouter" ? openrouterId : chutesId;
-    const catalogs = { [provider]: { models: [model], aliases: {} } };
-    const { r, calls } = request(model, provider, catalogs, {}, undefined, caller, {
+    const catalogs = { [provider]: { models: [openrouterId], aliases: {} } };
+    const { r, calls } = request(openrouterId, provider, catalogs, {}, undefined, caller, {
       response_format: format, provider: { only: ["attacker"] }, reasoning: { effort: "medium" },
     });
     assert.equal(r.status, 200);
@@ -128,4 +132,7 @@ test("strict schema routing is authored only for validator OpenRouter requests",
     assert.deepEqual(forwarded.response_format, format);
     assert.deepEqual(forwarded.reasoning, { effort: "medium" });
   }
+  assert.equal(request(chutesId, "chutes", {}, {}, undefined, "validator", {
+    response_format: schema,
+  }).r.status, 403);
 });

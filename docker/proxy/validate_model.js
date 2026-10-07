@@ -1,6 +1,5 @@
-// Inference proxy: validates outgoing requests against the per-provider
-// allowlist before forwarding to either Chutes or OpenRouter, dispatched
-// by the bearer token's prefix.
+// Inference proxy: validates outgoing requests against the OpenRouter allowlist
+// before forwarding to OpenRouter, dispatched by the bearer token's prefix.
 //
 // The allowlists are fetched from the ORO Backend (`GET
 // /v1/public/inference/models?provider=<name>`) via the internal
@@ -20,7 +19,7 @@
 //
 // Provider dispatch:
 //   - Bearer token starts with "sk-or-" → OpenRouter (allowlist enforced)
-//   - Any other token shape (e.g. cak_*) → Chutes (allowlist enforced)
+//   - Any other token shape → rejected
 //
 // On OpenRouter runs, Backend may supply aliases from Chutes IDs to
 // OpenRouter IDs. The translated ID must still pass the active allowlist.
@@ -28,7 +27,7 @@
 // Per-request outcome tagging: `$upstream_status` on the parent /inference/
 // access log line is always `-` because the location uses `js_content` rather
 // than `proxy_pass`. To let CloudWatch metric filters distinguish
-// upstream-relayed errors (Chutes/OpenRouter returned 5xx) from proxy-internal
+// upstream-relayed errors (OpenRouter returned 5xx) from proxy-internal
 // failures (allowlist unavailable, model not allowed), we stash a short label
 // on the request object before every `r.return(...)` and expose it via
 // `js_set $proxy_outcome validate_model.outcome` so it lands in the access
@@ -185,15 +184,18 @@ function _forbid(r) {
 
 function _validatedRequest(r) {
   var provider = detectProvider(r);
+  if (provider !== "openrouter") {
+    _forbid(r);
+    return;
+  }
   var decisions = r.uri === DECISIONS;
-  if (decisions && (r._oroCaller !== "validator" || provider !== "openrouter")) {
+  if (decisions && r._oroCaller !== "validator") {
     _forbid(r);
     return;
   }
   var upstreamLocation = decisions
     ? "/_openrouter_decisions"
-    : (provider === "openrouter" ? "/_openrouter_proxy/" : "/_chutes_proxy/") +
-      r.uri.replace(/^\/inference\//, "");
+    : "/_openrouter_proxy/" + r.uri.replace(/^\/inference\//, "");
 
   if (r.method === "GET") {
     // The model listing: the one read passed through.
@@ -302,11 +304,10 @@ function _validatedRequest(r) {
   // request body sets `usage.include=true`. Force it on so per-call cost
   // lands in every response — both InferenceStats (per-episode budget
   // tracking) and miner agent code can then read `resp.usage.cost`
-  // deterministically. Chutes ignores unknown top-level fields but skip
-  // there to keep the outbound body untouched.
+  // deterministically.
   // The decisions endpoint is forwarded exactly as the runtime sends it.
   var usageInjected = false;
-  if (provider === "openrouter" && !decisions) {
+  if (!decisions) {
     parsed.usage = { include: true };
     usageInjected = true;
   }
@@ -324,7 +325,7 @@ function _validatedRequest(r) {
   // only. TODO(ORO): replay-parity + record served model before relying on this
   // for scoring — cross-validator fallback timing adds score variance.
   var fallbackInjected = false;
-  if (provider === "openrouter" && parsed.model === "mistralai/mistral-small-2603") {
+  if (parsed.model === "mistralai/mistral-small-2603") {
     parsed.models = [
       "mistralai/mistral-small-2603",
       "qwen/qwen3-30b-a3b-instruct-2507",
@@ -341,10 +342,7 @@ function _validatedRequest(r) {
     }
 
     var requestedModel = parsed.model;
-    if (provider === "chutes" && parsed.model === "mistralai/mistral-small-2603") {
-      // The sealed shopper simulator requests this OpenRouter ID on Chutes-funded runs.
-      parsed.model = "unsloth/Mistral-Nemo-Instruct-2407-TEE";
-    } else if (provider === "openrouter" && allowed.indexOf(parsed.model) === -1 &&
+    if (allowed.indexOf(parsed.model) === -1 &&
         aliases && Object.prototype.hasOwnProperty.call(aliases, parsed.model)) {
       parsed.model = aliases[parsed.model];
     }

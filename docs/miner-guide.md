@@ -76,13 +76,13 @@ proxy routes return 410.
 ### Setup and configuration
 
 Keep your existing `.env`, or copy `.env.example` for a new checkout. Set
-`OPENROUTER_API_KEY` or `CHUTES_API_KEY`. Both keys may remain configured;
-`INFERENCE_PROVIDER=chutes` or `INFERENCE_PROVIDER=openrouter` selects one.
-Without an explicit choice, OpenRouter takes precedence when both keys exist.
+`OPENROUTER_API_KEY`; inference requests use OpenRouter. Choose a model ID that
+is available in the live allowlist: use its native OpenRouter ID or a supported
+alias supplied by the Backend. The reference agent's default
+`deepseek-ai/DeepSeek-V3.2-TEE` is a supported alias for its OpenRouter model.
 `SANDBOX_MODEL` is an optional override used by the included reference agent.
 Its default is
 `deepseek-ai/DeepSeek-V3.2-TEE`, preserving the existing local-testing default.
-The proxy maps it to the paired OpenRouter identifier when using OpenRouter.
 Custom agents may choose one or more models in their own code. The proxy checks
 every request against the same live Backend allowlist used for qualifying. The
 shopper simulator keeps its model sealed in the EnvPack and uses that same
@@ -150,8 +150,8 @@ ORO Bench local run  local-7c1f2a
   runtime     0.3.4
   inference   openrouter
   agent       my_agent.py  sha256 3f9c1d7b0000…
-  agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, requested by the reference
-              agent and mapped per provider; custom agents choose in code)
+  agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, reference alias mapped
+              to its OpenRouter ID; custom agents choose in code)
   simulator   mistralai/mistral-small-2603
   judge       deepseek/deepseek-v4-flash-0731
 
@@ -183,8 +183,8 @@ The categories, in priority order:
 Rewards are coloured when the output is a terminal; set `NO_COLOR=1` to turn
 that off. The simulator and judge models are sealed in the pack. The agent
 model line shows `SANDBOX_MODEL`, which is a request rather than a record: only
-the included reference agent reads it, and the proxy maps it to the active
-provider's name for that model, so an OpenRouter run of the default sends
+the included reference agent reads it, and the proxy maps supported aliases to
+their OpenRouter IDs, so the default sends
 `deepseek/deepseek-v3.2`. A custom agent chooses its own models in code. A
 completed task can still have a zero reward if its verifier verdict is
 incorrect.
