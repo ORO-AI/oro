@@ -91,7 +91,7 @@ def test_reasoning_payload_is_opt_in(
     client.post_verbose_async.return_value = _ok(
         {"choices": [{"message": {"content": "yes"}, "finish_reason": "stop"}]}
     )
-    completion = SimulatorCompletion("miner-token", client=client)
+    completion = SimulatorCompletion("sk-or-miner-token", client=client)
     messages = [{"role": "user", "content": "continue?"}]
 
     asyncio.run(completion("test-model", messages, reasoning=reasoning))
@@ -107,6 +107,36 @@ def test_reasoning_payload_is_opt_in(
             **extra_fields,
         },
     )
+
+
+@pytest.mark.parametrize("reasoning", [False, {"enabled": False}])
+def test_chutes_simulator_uses_native_instant_setting(reasoning: bool | dict) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_ok(
+        {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+    )))
+    schema = {"type": "json_schema", "json_schema": {"name": "answer", "strict": True, "schema": {"type": "object"}}}
+    asyncio.run(SimulatorCompletion("chutes-miner-token", client=client)(
+        "Qwen/Qwen3.5-397B-A17B-TEE", [], reasoning=reasoning, response_format=schema,
+    ))
+    payload = client.post_verbose_async.call_args.kwargs["json_data"]
+    assert "reasoning" not in payload
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert payload["response_format"] == schema
+
+
+@pytest.mark.parametrize(("model", "reasoning"), [
+    ("Qwen/Qwen3.5-397B-A17B-TEE", True),
+    ("Qwen/Qwen3.5-397B-A17B-TEE", {}),
+    ("Qwen/Qwen3.5-397B-A17B-TEE", {"enabled": 0}),
+    ("Qwen/Qwen3.5-397B-A17B-TEE", {"effort": "low"}),
+    ("Qwen/Qwen3.5-397B-A17B-TEE", {"enabled": False, "effort": "low"}),
+    ("other/model", {"enabled": False}),
+])
+def test_chutes_simulator_rejects_unsupported_reasoning(model: str, reasoning: bool | dict) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock())
+    with pytest.raises(ValueError, match="Unsupported simulator reasoning"):
+        asyncio.run(SimulatorCompletion("chutes-miner-token", client=client)(model, [], reasoning=reasoning))
+    client.post_verbose_async.assert_not_called()
 
 
 def test_forwards_strict_response_format_unchanged() -> None:

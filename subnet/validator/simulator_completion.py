@@ -122,6 +122,13 @@ class SimulatorCompletion:
             request["reasoning"] = (
                 reasoning if isinstance(reasoning, dict) else {"enabled": reasoning}
             )
+            if not self._access_token.startswith("sk-or-"):
+                preference = request["reasoning"]
+                if model != "Qwen/Qwen3.5-397B-A17B-TEE" or preference.get("enabled") is not False or len(preference) != 1:
+                    raise ValueError("Unsupported simulator reasoning preference for Chutes")
+                # Chutes' Qwen non-thinking mode uses the vLLM template switch.
+                request["chat_template_kwargs"] = {"enable_thinking": False}
+                del request["reasoning"]
         if response_format is not None:
             request["response_format"] = response_format
 
