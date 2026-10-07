@@ -277,6 +277,44 @@ def test_real_reader_classifies_budget_and_infrastructure_failures(
         assert state.simulator._completion._client.post_verbose_async.call_count == 1
 
 
+@pytest.mark.parametrize("exhausted,http_status", [(True, 402), (False, 504)])
+def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhausted, http_status):
+    from validator.generated_evaluation import aggregate_results
+
+    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner", simulator_timeout_s=0.25) as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.session.task = reader_pack.task_specs[0]
+        state.simulator = registry._default_simulator(state)
+
+        async def stalled_reader(*args, **kwargs):
+            assert kwargs["json_data"]["model"] == "test/reader"
+            if exhausted:
+                registry.key_exhausted.set()
+            await asyncio.sleep(60)
+
+        state.simulator._completion._client.post_verbose_async = stalled_reader
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call", json=_call_envelope(
+                registry, action={"name": "message", "args": {"content": "A test question?"}},
+            ),
+        )
+        assert response.status_code == http_status
+        result = registry.finalized_results()[0]
+        assert result["environment_error"] is not exhausted
+        assert result["outcome"] == ("agent_error" if exhausted else "environment_error")
+        assert result["call_trace"][0]["error"]["type"] == (
+            "AgentInferenceBudgetError" if exhausted else "HarnessTimeoutError"
+        )
+        if exhausted:
+            assert aggregate_results([result], selected_reader_task_ids={result["task_id"]}) == 0.0
+        else:
+            with pytest.raises(ValueError, match="infrastructure failure"):
+                aggregate_results([result], selected_reader_task_ids={result["task_id"]})
+
+
 def test_a_provider_error_body_never_reaches_the_agent(
     loaded_pack: LoadedPack,
 ) -> None:

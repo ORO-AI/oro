@@ -561,23 +561,26 @@ class SessionRegistry:
         snapshot: dict[str, Any],
         cause: concurrent.futures.TimeoutError,
     ) -> NoReturn:
+        error_type = HarnessTimeoutError
+        if self.key_exhausted.is_set():
+            error_type, reason = self._simulator_error(state, cause)
         state.quarantined_reason = reason
         trace.record(
             state,
             state_hash_after=snapshot["state_hash"],
-            error_type="HarnessTimeoutError",
+            error_type=error_type.__name__,
             error_detail=state.quarantined_reason,
             simulator_exchanges=self._simulator_exchanges(state.simulator),
         )
         state.final_result = self._result(
             session_id,
             state,
-            outcome="environment_error",
+            outcome=state.quarantined_outcome,
             verdict=None,
             error_detail=state.quarantined_reason,
             snapshot=snapshot,
         )
-        raise HarnessTimeoutError(
+        raise error_type(
             f"{state.quarantined_reason}; session quarantined"
         ) from cause
 
