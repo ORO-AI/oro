@@ -1,15 +1,7 @@
-name: Publish Docker Images
+name: Build Immutable Experiment Images
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag (e.g., v1.0.0 or latest)'
-        required: true
-        default: 'latest'
 
 env:
   REGISTRY: ghcr.io
@@ -24,11 +16,7 @@ jobs:
       - name: Determine tag
         id: tag
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
-          fi
+          echo "tag=experiment-b017cba5ac7484a82e722eea29e6102f587c5ad8" >> $GITHUB_OUTPUT
 
   build:
     needs: determine-tag
@@ -407,5 +395,4 @@ jobs:
         run: |
           docker buildx imagetools create \
             -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:${{ needs.determine-tag.outputs.tag }} \
-            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest \
             $(printf '${{ env.IMAGE_PREFIX }}/${{ matrix.image }}@sha256:%s ' $(ls /tmp/digests/))
