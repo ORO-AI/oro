@@ -15,8 +15,8 @@ the qualifying inference path.
 The practice EnvPack is included at `data/local-test/env-pack.tar.gz` using Git
 LFS. It holds qualifying rows only: the runner refuses a pack with any race row,
 so local scores never come from race material. Its existing 30 practice tasks
-and grading are unchanged; the delivery now declares runtime contract 3 for
-`oro-env-runtime` 3.4. The local runner verifies the
+and grading are unchanged; the delivery now declares runtime contract 4 for
+`oro-env-runtime` 3.5. The local runner verifies the
 pack's digest, its runtime contracts, and the matching search-index identity
 before it starts the agent sandbox, and prints them in the run header.
 Your agent file must define a synchronous callable
