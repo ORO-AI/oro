@@ -339,7 +339,10 @@ class BackendClient:
             if is_auth_call:
                 self._record_failure()
             raise BackendError(f"{operation}: Request timed out")
-        except httpx.ConnectError as e:
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as e:
+            # NetworkError covers a refused connect as well as a connection
+            # reset or broken pipe mid-request; RemoteProtocolError is the
+            # server closing the connection before it answered.
             if is_auth_call:
                 self._record_failure()
             raise BackendError(f"{operation}: Connection error: {e}")
