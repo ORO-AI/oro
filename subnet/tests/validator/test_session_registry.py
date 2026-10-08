@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from oro_env_runtime import loop
+from oro_env_runtime.disclosure import JEV_MODEL
 from oro_env_runtime.schema import Event, LedgerEntry
-from oro_env_runtime.situation import Reader
-from src.agent.proxy_client import ProxyClient
+from oro_env_runtime.situation import Noul, ProbabilityRule, Reader
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
 from validator.session_registry import (
@@ -31,6 +31,7 @@ from validator.simulator_completion import (
     SimulatorCompletion,
 )
 
+from src.agent.proxy_client import ProxyClient
 from tests.compat_fixture import accepted_ref
 
 pytest_plugins = ("tests.compat_fixture",)
@@ -202,11 +203,33 @@ def test_default_simulator_evidence_is_private_and_persisted(
 @pytest.fixture
 def reader_pack(loaded_pack: LoadedPack) -> LoadedPack:
     task = loaded_pack.task_specs[0]
-    reader = Reader(
-        model="test/reader", instructions="Answer the supplied test questions.", state={},
-        questions={key: "Is this eligible?" for key in (
+    questions = {
+        key: "Is this synthetic test question eligible?"
+        for key in (
             "all", "asks", *(f"facet:{facet.id}" for facet in task.situation.facets)
-        )},
+        )
+    }
+    decisions = {
+        key: Noul(type="noul", instructions="Answer this synthetic test question.")
+        for key in questions
+    }
+    reader = Reader(
+        model="test/reader",
+        instructions="Answer the synthetic test questions.",
+        state={"opening_request": "A synthetic test request."},
+        questions=questions,
+        decisions=decisions,
+        rules={key: ProbabilityRule(op="ref", args=key) for key in questions},
+        batches=[list(decisions), []],
+        reply_templates={
+            "synthetic": Noul(
+                type="noul", instructions="Answer {question} with yes or no."
+            )
+        },
+        gates={},
+        uncertainty_gates={},
+        conflicts={},
+        reply_fallback=[],
     )
     loaded_pack.task_specs[0] = task.model_copy(update={
         "situation": task.situation.model_copy(update={"reader": reader}),
@@ -214,19 +237,21 @@ def reader_pack(loaded_pack: LoadedPack) -> LoadedPack:
     return loaded_pack
 
 
-@pytest.mark.parametrize("miner", ["sk-or-miner", "cak_miner"])
 def test_reader_uses_miner_for_every_simulator_role_and_budget_exhaustion_is_agent_error(
-    reader_pack: LoadedPack, miner: str,
+    reader_pack: LoadedPack,
 ) -> None:
-    with SessionRegistry(reader_pack, inference_access_token=miner) as registry:
+    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
         _start(registry)
         state = registry._sessions["session-1"]
         state.session.task = reader_pack.task_specs[0]
         simulator = registry._default_simulator(state)
-        assert simulator._completion._client.api_key == miner
-        assert simulator._discloser.reader_judges[0]._complete.func is simulator._completion
+        assert simulator._completion._client.api_key == "sk-or-miner"
+        reader_judge = simulator._discloser.reader_judges[0]
+        assert reader_judge._jev._decide.__self__ is simulator._completion
+        assert reader_judge._fallback._complete.func is simulator._completion
+        assert reader_judge.model == JEV_MODEL
         assert simulator._completion._client.headers["X-ORO-Validator"] == VALIDATOR_CALLER_SECRET
-        assert callable(simulator._completion.decide) == miner.startswith("sk-or-")
+        assert callable(simulator._completion.decide)
         simulator.respond = AsyncMock(side_effect=InferenceProviderError(403, "Key limit exceeded"))
         state.simulator = simulator
         runtime = SessionRuntime()
@@ -242,6 +267,15 @@ def test_reader_uses_miner_for_every_simulator_role_and_budget_exhaustion_is_age
         result = registry.finalized_results()[0]
         assert result["outcome"] == "agent_error"
         assert result["environment_error"] is False
+
+
+def test_reader_requires_bound_decisions_client_for_chutes(reader_pack: LoadedPack) -> None:
+    with SessionRegistry(reader_pack, inference_access_token="cak_miner") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.session.task = reader_pack.task_specs[0]
+        with pytest.raises(ValueError, match="Jev reader requires a bound decisions client"):
+            registry._default_simulator(state)
 
 
 @pytest.mark.parametrize("status,body,http_status", [
@@ -288,7 +322,7 @@ def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhau
         state.simulator = registry._default_simulator(state)
 
         async def stalled_reader(*args, **kwargs):
-            assert kwargs["json_data"]["model"] == "test/reader"
+            assert kwargs["json_data"]["model"] == JEV_MODEL
             if exhausted:
                 registry.key_exhausted.set()
             await asyncio.sleep(60)
