@@ -145,9 +145,9 @@ parentheses:
 
 ```text
 ORO Bench local run  local-7c1f2a
-  pack        1e86e5c5…65d6
+  pack        6172495e…8f28bb
   problems    5 of 30, qualifying roster
-  runtime     0.3.4
+  runtime     0.3.5
   inference   openrouter
   agent       my_agent.py  sha256 3f9c1d7b0000…
   agent model deepseek-ai/DeepSeek-V3.2-TEE  (SANDBOX_MODEL, requested by the reference
