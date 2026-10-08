@@ -26,4 +26,6 @@ For simulator requests to Chutes Qwen3.5-397B-A17B, the adapter translates `reas
 
 All shopper simulation, including configured disclosure Readers and typed decisions, uses the active evaluation’s miner-funded inference credential. The same run-scoped proxy grant and provider restrictions apply as for existing simulator calls. No separate validator credential is required. Pack-selected models must be available through the miner’s provider and its existing model allowlist. Exhausting the miner’s inference budget remains an agent error; it stops further work for that run.
 
+With runtime 3.5, configured Reader tasks require OpenRouter’s Jev decisions endpoint and cannot run through Chutes. Ordinary legacy qualifying tasks without a configured Reader are unaffected.
+
 Any environment or verifier failure on a selected configured Reader task fails the run through the infrastructure failure path. Failures on ordinary tasks retain the existing infrastructure threshold, including in mixed rosters. Completed low-reward episodes and ordinary agent errors continue to count normally.

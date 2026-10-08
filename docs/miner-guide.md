@@ -79,6 +79,9 @@ Keep your existing `.env`, or copy `.env.example` for a new checkout. Set
 `OPENROUTER_API_KEY` or `CHUTES_API_KEY`. Both keys may remain configured;
 `INFERENCE_PROVIDER=chutes` or `INFERENCE_PROVIDER=openrouter` selects one.
 Without an explicit choice, OpenRouter takes precedence when both keys exist.
+Runtime 3.5 Reader tasks require OpenRouter’s Jev decisions endpoint and cannot
+run through Chutes; ordinary legacy qualifying tasks without a configured Reader
+are unaffected.
 `SANDBOX_MODEL` is an optional override used by the included reference agent.
 Its default is
 `deepseek-ai/DeepSeek-V3.2-TEE`, preserving the existing local-testing default.

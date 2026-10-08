@@ -83,9 +83,8 @@ class SimulatorCompletion:
             raise ValueError("inference access token is required")
         self._access_token = access_token
         self._key_exhausted_event = key_exhausted_event
-        # Only OpenRouter serves the decisions endpoint (Jev). On another provider
-        # the disclosure reader sees no ``decide`` and reads with the chat model;
-        # a decisions error there would otherwise count as an answer (no reveal).
+        # Configured Readers require Jev's decisions endpoint, which only OpenRouter
+        # provides; runtime setup rejects them when this callable is unavailable.
         if not access_token.startswith("sk-or-"):
             self.decide = None
         self._client = client or ProxyClient(
