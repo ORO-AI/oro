@@ -241,8 +241,8 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
 
 
 _NEW_ACCOUNT_429 = (
-    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/google/'
-    'gemini-3.8-flash-20260902. Rate limit reached: new accounts are limited to 20 '
+    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/vendor/reader-model. '
+    'Rate limit reached: new accounts are limited to 20 '
     'requests per minute for this model. Please retry shortly.","metadata":{"headers":'
     '{"X-RateLimit-Limit":"20","X-RateLimit-Remaining":"0"}}}}'
 )
@@ -255,7 +255,7 @@ _NEW_ACCOUNT_429 = (
         # Other 429s stay provider outages.
         (
             '{"error":{"code":429,"message":"Rate limit exceeded: '
-            'model_limit_rpm/google/gemini-3.8-flash-20260902."}}',
+            'model_limit_rpm/vendor/reader-model."}}',
             False,
         ),
         ('{"error":{"code":429,"message":"Provider returned error"}}', False),
@@ -268,7 +268,7 @@ def test_only_a_new_account_limit_marks_the_miners_account(body: str, rate_limit
     completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
 
     with pytest.raises(InferenceProviderError) as excinfo:
-        asyncio.run(completion("google/gemini-3.8-flash", []))
+        asyncio.run(completion("vendor/reader-model", []))
 
     # Retried like any 429, and the run is never stopped for it.
     assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
@@ -282,7 +282,7 @@ def test_a_recovered_call_clears_the_account_throttle() -> None:
     client = MagicMock(post_verbose_async=AsyncMock(side_effect=[_err(429, _NEW_ACCOUNT_429), ok]))
     completion = SimulatorCompletion("sk-or-miner", client=client)
 
-    assert asyncio.run(completion("google/gemini-3.8-flash", []))["text"] == "ok"
+    assert asyncio.run(completion("vendor/reader-model", []))["text"] == "ok"
     assert completion.account_rate_limited is False
 
 

@@ -478,8 +478,8 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
 
 
 _NEW_ACCOUNT_429 = (
-    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/google/'
-    'gemini-3.8-flash. Rate limit reached: new accounts are limited to 20 requests '
+    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/vendor/reader-model. '
+    'Rate limit reached: new accounts are limited to 20 requests '
     'per minute for this model. Please retry shortly."}}'
 )
 
