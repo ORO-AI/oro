@@ -248,6 +248,9 @@ class SessionRegistry:
         self._closed = False
         self._finalized = False
         self.key_exhausted = threading.Event()
+        # Set with key_exhausted when the miner's account allows no provider for a
+        # model the run needs; the run then fails as the miner's, not scored.
+        self.no_allowed_providers = threading.Event()
 
     def _default_simulator(self, state: _SessionState) -> UserSim:
         session = state.session
@@ -263,6 +266,7 @@ class SessionRegistry:
             inference_stats_file=self._inference_stats_file,
             episode_id=state.session_id,
             key_exhausted_event=self.key_exhausted,
+            no_allowed_providers_event=self.no_allowed_providers,
         )
         state.completion = completion
         return UserSim(
@@ -541,7 +545,11 @@ class SessionRegistry:
         ):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
-            summary = "miner inference key exhausted"
+            summary = (
+                "miner inference account allows no provider"
+                if self.no_allowed_providers.is_set()
+                else "miner inference key exhausted"
+            )
         elif state.completion is not None and state.completion.account_rate_limited:
             # Only this episode is the miner's: the run continues and is scored.
             state.quarantined_outcome = "agent_error"

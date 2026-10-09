@@ -69,13 +69,21 @@ class InferenceProviderError(RuntimeError):
     def account_rate_limited(self) -> bool:
         """OpenRouter throttled the miner's new account (429 ``new-account-rpm``),
         not the provider: the miner's to fix, like a spent key."""
-        if self.status != 429:
-            return False
+        return self.status == 429 and "new-account-rpm/" in self._message
+
+    @property
+    def no_allowed_providers(self) -> bool:
+        """The miner's account allows no provider serving the model (OpenRouter 404).
+        A setting on the miner's account, so the run cannot proceed on it."""
+        return self.status == 404 and "no allowed providers are available" in self._message.lower()
+
+    @property
+    def _message(self) -> str:
         try:
             message = json.loads(self.body)["error"]["message"]
         except (TypeError, ValueError, KeyError):
-            return False
-        return isinstance(message, str) and "new-account-rpm/" in message
+            return ""
+        return message if isinstance(message, str) else ""
 
 
 class SimulatorCompletion:
@@ -91,11 +99,13 @@ class SimulatorCompletion:
         inference_stats_file: str | None = None,
         episode_id: str | None = None,
         key_exhausted_event: threading.Event | None = None,
+        no_allowed_providers_event: threading.Event | None = None,
     ) -> None:
         if not access_token:
             raise ValueError("inference access token is required")
         self._access_token = access_token
         self._key_exhausted_event = key_exhausted_event
+        self._no_allowed_providers_event = no_allowed_providers_event
         # Whether this session's latest call ended throttled by the miner's new
         # account. The runtime wraps Reader failures, so the registry reads it here.
         self.account_rate_limited = False
@@ -201,10 +211,8 @@ class SimulatorCompletion:
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
             self.account_rate_limited = provider_error.account_rate_limited
-            if provider_error.key_exhausted:
-                if self._key_exhausted_event is not None:
-                    self._key_exhausted_event.set()
-                logger.warning("inference key budget exhausted during user simulation")
+            if provider_error.key_exhausted or provider_error.no_allowed_providers:
+                self._stop_run(provider_error)
                 raise provider_error
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
@@ -258,9 +266,20 @@ class SimulatorCompletion:
         if error.get("kind") == "network":
             raise ConnectionError(body or "no response")
         provider_error = InferenceProviderError(error.get("status"), body)
-        if provider_error.key_exhausted and self._key_exhausted_event is not None:
-            self._key_exhausted_event.set()
+        if provider_error.key_exhausted or provider_error.no_allowed_providers:
+            self._stop_run(provider_error)
         raise provider_error
+
+    def _stop_run(self, provider_error: InferenceProviderError) -> None:
+        """Stop the run: the miner's key is spent or its account allows no provider."""
+        if provider_error.no_allowed_providers:
+            if self._no_allowed_providers_event is not None:
+                self._no_allowed_providers_event.set()
+            logger.warning("miner inference account allows no provider during user simulation")
+        else:
+            logger.warning("inference key budget exhausted during user simulation")
+        if self._key_exhausted_event is not None:
+            self._key_exhausted_event.set()
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

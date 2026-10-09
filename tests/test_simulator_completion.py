@@ -288,6 +288,53 @@ def test_a_recovered_call_clears_the_account_throttle() -> None:
     assert completion.account_rate_limited is False
 
 
+_NO_PROVIDERS_404 = (
+    '{"error":{"code":404,"message":"No allowed providers are available for the '
+    'selected model. Providers serving vendor/reader-model: provider-a"}}'
+)
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+def test_no_allowed_providers_stops_the_run_without_retry(decisions: bool) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(404, _NO_PROVIDERS_404)))
+    stopped, no_providers = threading.Event(), threading.Event()
+    completion = SimulatorCompletion(
+        "sk-or-miner",
+        client=client,
+        key_exhausted_event=stopped,
+        no_allowed_providers_event=no_providers,
+    )
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion.decide("m", {}, {}) if decisions else completion("m", []))
+
+    assert excinfo.value.no_allowed_providers
+    assert client.post_verbose_async.call_count == 1
+    assert stopped.is_set()
+    assert no_providers.is_set()
+
+
+def test_another_404_is_retried_and_does_not_stop_the_run() -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(
+        return_value=_err(404, '{"error":{"code":404,"message":"Model not found"}}')
+    ))
+    stopped, no_providers = threading.Event(), threading.Event()
+    completion = SimulatorCompletion(
+        "sk-or-miner",
+        client=client,
+        key_exhausted_event=stopped,
+        no_allowed_providers_event=no_providers,
+    )
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("m", []))
+
+    assert not excinfo.value.no_allowed_providers
+    assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
+    assert not stopped.is_set()
+    assert not no_providers.is_set()
+
+
 @pytest.mark.parametrize("decisions", [False, True])
 def test_provider_error_redacts_the_miner_credential(decisions, caplog) -> None:
     token = "sk-or-test-miner"

@@ -521,6 +521,42 @@ def test_new_account_throttle_fails_only_its_episode(
     assert result["error_detail"] == "user simulator failed: miner inference account rate limited"
 
 
+_NO_PROVIDERS_404 = (
+    '{"error":{"code":404,"message":"No allowed providers are available for the '
+    'selected model."}}'
+)
+
+
+def test_no_allowed_providers_stops_the_run_as_the_miners(loaded_pack: LoadedPack) -> None:
+    from src.agent.proxy_client import PostResult
+
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose_async = AsyncMock(
+            return_value=PostResult(
+                data=None,
+                error={"kind": "upstream", "status": 404, "body": _NO_PROVIDERS_404},
+            )
+        )
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call",
+            json=_call_envelope(
+                registry, action={"name": "message", "args": {"content": "Any preference?"}}
+            ),
+        )
+        result = registry.finalized_results()[0]
+        assert registry.no_allowed_providers.is_set()
+        assert registry.key_exhausted.is_set()
+
+    assert response.status_code == 402
+    assert result["outcome"] == "agent_error"
+    assert result["error_detail"] == "user simulator failed: miner inference account allows no provider"
+
+
 def test_wrapped_reader_failure_reads_the_throttle_off_the_completion(
     loaded_pack: LoadedPack,
 ) -> None:

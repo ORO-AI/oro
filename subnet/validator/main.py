@@ -1379,6 +1379,16 @@ class Validator:
             reporter.stop()
             self.session_runtime.clear(registry)
 
+        if registry.no_allowed_providers.is_set():
+            # A setting on the miner's inference account, not an outage: fail the
+            # run as the miner's so it counts toward auto-discard, not re-queued.
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "Inference account allows no provider for a model the evaluation needs (HTTP 404)",
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
         key_exhausted = registry.key_exhausted.is_set()
         if key_exhausted:
             # Miner ran out of inference budget mid-run. Instead of failing
