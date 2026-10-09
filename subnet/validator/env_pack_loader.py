@@ -44,7 +44,7 @@ from oro_env_runtime.delivery import (
     check_epoch,
     validate_delivery_binding,
 )
-from oro_env_runtime.pack import sha256_file
+from oro_env_runtime.pack import read_task_rows, sha256_file
 from oro_env_runtime.runtime import (
     TaskSession,
     cache_validated_epoch,
@@ -451,13 +451,7 @@ def _load_validated_contents(
     with _record_timing(timings, "pack_contents_load"):
         try:
             manifest = json.loads((pack_dir / "manifest.json").read_text())
-            rows = [
-                json.loads(line)
-                for line in (pack_dir / "data" / "tasks" / "private_tasks.jsonl")
-                .read_text()
-                .splitlines()
-                if line.strip()
-            ]
+            rows = read_task_rows(pack_dir)
             task_specs = [TaskSpec.model_validate(row["task"]) for row in rows]
             task_ids = [str(row["task_id"]) for row in rows]
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -520,13 +514,7 @@ def load_local_pack(
             raise PackValidationError(f"epoch check failed: {'; '.join(errors)}")
 
         manifest = json.loads((pack_dir / "manifest.json").read_text())
-        rows = [
-            json.loads(line)
-            for line in (pack_dir / "data" / "tasks" / "private_tasks.jsonl")
-            .read_text()
-            .splitlines()
-            if line.strip()
-        ]
+        rows = read_task_rows(pack_dir)
         task_specs = [TaskSpec.model_validate(row["task"]) for row in rows]
         task_ids = [str(row["task_id"]) for row in rows]
         family_counts = Counter(task.family for task in task_specs)
