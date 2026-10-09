@@ -29,3 +29,9 @@ All shopper simulation, including configured disclosure Readers and typed decisi
 With runtime 3.5, configured Reader tasks require OpenRouter’s Jev decisions endpoint and cannot run through Chutes. Ordinary legacy qualifying tasks without a configured Reader are unaffected.
 
 Any environment or verifier failure on a selected configured Reader task fails the run through the infrastructure failure path. Failures on ordinary tasks retain the existing infrastructure threshold, including in mixed rosters. Completed low-reward episodes and ordinary agent errors continue to count normally.
+
+
+The validator supports v7 and v8 compiled task packs with runtime 3.6. V8 stores
+shared grading dictionaries inside the sealed task file; the runtime validates
+and expands them before loading tasks. Task execution and delivery bindings use
+the same semantic task data in both formats. Existing v7 packs remain supported.
