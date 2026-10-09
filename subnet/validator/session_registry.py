@@ -10,6 +10,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 from uuid import uuid4
@@ -28,11 +29,7 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import (
-    SIMULATOR_DEADLINE,
-    InferenceProviderError,
-    SimulatorCompletion,
-)
+from .simulator_completion import InferenceProviderError, SimulatorCompletion
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
@@ -40,6 +37,7 @@ MAX_CALLS_PER_TURN = 16
 # per attempt, so a shorter budget would quarantine sessions the provider would
 # still answer.
 DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
+_SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
@@ -149,7 +147,6 @@ class _SessionState:
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
-    completion: SimulatorCompletion | None = None
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -266,7 +263,6 @@ class SessionRegistry:
             episode_id=state.session_id,
             key_exhausted_event=self.key_exhausted,
         )
-        state.completion = completion
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
@@ -298,7 +294,7 @@ class SessionRegistry:
 
     def _run_simulator(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         async def bounded() -> Any:
-            remaining = max(0.0, SIMULATOR_DEADLINE.get() - time.monotonic())
+            remaining = max(0.0, _SIMULATOR_DEADLINE.get() - time.monotonic())
             return await asyncio.wait_for(coroutine, timeout=remaining)
 
         return asyncio.run(bounded())
@@ -538,19 +534,18 @@ class SessionRegistry:
     def _simulator_error(
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
-        provider = exc if isinstance(exc, InferenceProviderError) else None
-        failure = provider.account_failure if provider else None
-        # The Reader wraps decisions failures, so a throttle is read off the completion.
-        throttle = state.completion.account_throttle if state.completion else None
-        if self.key_exhausted.is_set() or failure:
+        if self.key_exhausted.is_set() or (
+            isinstance(exc, InferenceProviderError) and exc.account_failure
+        ):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
-            summary = f"miner inference {failure or 'key exhausted'}"
-        elif throttle:
-            state.quarantined_outcome = "agent_error"
-            summary = f"miner inference {throttle}"
-        elif provider:
-            summary = f"upstream status={provider.status} body={provider.body!r}"
+            summary = (
+                "miner inference account blocked by provider terms of service"
+                if isinstance(exc, InferenceProviderError) and exc.provider_blocked
+                else "miner inference key exhausted"
+            )
+        elif isinstance(exc, InferenceProviderError):
+            summary = f"upstream status={exc.status} body={exc.body!r}"
         else:
             summary = type(exc).__name__
         error_type = (
@@ -659,11 +654,11 @@ class SessionRegistry:
 
         def bounded_work() -> Any:
             # All response/reword phases share the deadline, including queue time.
-            token = SIMULATOR_DEADLINE.set(deadline)
+            token = _SIMULATOR_DEADLINE.set(deadline)
             try:
                 return work(*args)
             finally:
-                SIMULATOR_DEADLINE.reset(token)
+                _SIMULATOR_DEADLINE.reset(token)
 
         future = self._executor.submit(bounded_work)
         try:

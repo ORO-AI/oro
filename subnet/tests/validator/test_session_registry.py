@@ -19,7 +19,6 @@ from oro_env_runtime.situation import Noul, ProbabilityRule, Reader
 from validator.env_pack_loader import LoadedPack
 from validator.episode_emitter import replay_ledger
 from validator.session_registry import (
-    AgentInferenceBudgetError,
     HarnessExecutionError,
     HarnessTimeoutError,
     InvalidSessionError,
@@ -433,7 +432,7 @@ def test_default_simulator_failure_is_an_environment_error(
         ),
     ],
 )
-def test_miner_account_failure_is_agent_error_and_stops_run(
+def test_miner_key_exhaustion_is_agent_error_and_stops_run(
     loaded_pack: LoadedPack, body: str, reason: str
 ) -> None:
     from src.agent.proxy_client import PostResult
@@ -479,69 +478,6 @@ def test_miner_account_failure_is_agent_error_and_stops_run(
     assert result["environment_error"] is False
     assert result["error_detail"] == f"user simulator failed: miner inference {reason}"
     assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
-
-
-def test_recurring_account_throttle_is_this_episodes_agent_error(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from src.agent.proxy_client import PostResult
-    from validator import simulator_completion
-
-    async def _instant(_seconds: float) -> None:
-        return None
-
-    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _instant)
-    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = AsyncMock(
-            return_value=PostResult(
-                data=None,
-                error={
-                    "kind": "upstream",
-                    "status": 429,
-                    "body": '{"error":{"message":"Rate limit exceeded: new-account-rpm/m"}}',
-                },
-            )
-        )
-        with pytest.raises(HarnessExecutionError, match="account rate limited as a new account"):
-            registry.call(
-                _call_envelope(
-                    registry,
-                    action={"name": "message", "args": {"content": "Any preference?"}},
-                )
-            )
-        result = registry.finalized_results()[0]
-        # Only this episode is the miner's; the run keeps going.
-        assert not registry.key_exhausted.is_set()
-
-    assert result["outcome"] == "agent_error"
-    assert result["environment_error"] is False
-    assert result["error_detail"] == (
-        "user simulator failed: miner inference account rate limited as a new account"
-    )
-
-
-def test_reader_failure_after_account_throttle_is_agent_error(
-    loaded_pack: LoadedPack,
-) -> None:
-    """The runtime wraps a Reader's decisions failure, so the throttle comes from the
-    session's completion rather than the exception."""
-    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        registry._default_simulator(state)
-        state.completion.account_throttle = "account has no credits for its in-flight requests"
-        error_type, reason = registry._simulator_error(
-            state, RuntimeError("configured reader failed")
-        )
-
-    assert error_type is AgentInferenceBudgetError
-    assert state.quarantined_outcome == "agent_error"
-    assert reason == (
-        "user simulator failed: miner inference account has no credits for its in-flight requests"
-    )
 
 
 def test_default_simulator_rejects_missing_miner_credentials(

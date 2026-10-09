@@ -1382,8 +1382,7 @@ class Validator:
 
         key_exhausted = registry.key_exhausted.is_set()
         if key_exhausted:
-            # The miner's inference account stopped funding the run (spent key
-            # or credits, provider block, persistent throttle). Instead of failing
+            # Miner ran out of inference budget mid-run. Instead of failing
             # the whole run and discarding all completed work, score the
             # tasks that already finished. Sessions that had not started yet
             # (or were mid-flight when the key hit its cap) are surfaced by
@@ -1395,7 +1394,7 @@ class Validator:
             # `sandbox_output` is expected on this path and is not a real
             # sandbox failure.
             logging.info(
-                "Miner inference account stopped funding the run; scoring completed episodes only"
+                "Miner inference key exhausted; scoring completed episodes only"
             )
             sandbox_metadata = dict(sandbox_metadata)
             sandbox_metadata["_miner_inference_key_exhausted"] = True
@@ -1902,11 +1901,10 @@ class Validator:
     ) -> tuple[bool, str]:
         """Smoke-test a minted inference token by making a 1-token completion.
 
-        Catches invalid tokens (401) and miner account failures (402 without
-        credits, 403 provider block; see ``InferenceProviderError``) against
-        any OpenAI-compatible chat/completions endpoint. On transient errors
-        (5xx, timeout, 429, a 402 for in-flight requests), returns (True, "")
-        to avoid failing runs unnecessarily.
+        Catches both invalid tokens (401) and zero-balance accounts (402)
+        against any OpenAI-compatible chat/completions endpoint. On
+        transient errors (5xx, timeout, 429), returns (True, "") to avoid
+        failing runs unnecessarily.
 
         A freshly-minted scoped token can return 401 briefly while the
         provider propagates the newly-created key. The token is valid, so a
@@ -1996,12 +1994,19 @@ class Validator:
                         f"giving up — body={body!r}"
                     )
                     return False, "Inference token invalid or expired (HTTP 401)"
-                if resp.status_code in (402, 403):
-                    failure = InferenceProviderError(
-                        resp.status_code, resp.text or ""
-                    ).account_failure
-                    if failure:
-                        return False, f"Inference {failure} (HTTP {resp.status_code})"
+                if resp.status_code == 402:
+                    detail = resp.json().get("detail", {})
+                    msg = (
+                        detail.get("message", str(detail))
+                        if isinstance(detail, dict)
+                        else str(detail)
+                    )
+                    return False, f"Inference account has no credits ({msg})"
+                if InferenceProviderError(resp.status_code, resp.text).provider_blocked:
+                    return (
+                        False,
+                        "Inference account blocked by provider terms of service (HTTP 403)",
+                    )
                 if resp.status_code == 429:
                     return True, ""
                 logging.warning(

@@ -182,26 +182,31 @@ class TestValidateInferenceToken:
             low, high = call.args
             assert 0.5 <= low < high <= 1.5
 
+    def test_402_returns_invalid_with_message(self):
+        json_body = {"detail": {"message": "insufficient balance"}}
+        with patch(
+            "validator.main.requests.post",
+            return_value=self._mock_resp(402, json_body),
+        ):
+            ok, reason = Validator._validate_inference_token(
+                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+            )
+        assert ok is False
+        assert "insufficient balance" in reason
+
     @pytest.mark.parametrize(
-        "status,body,reason",
+        "body,reason",
         [
-            (402, '{"error":{"code":402,"message":"Insufficient credits",'
-                  '"metadata":{"limit_source":"openrouter_credits"}}}',
-             "Inference account has no credits (HTTP 402)"),
-            (402, '{"error":{"code":402,"message":"This request would exceed your available '
-                  'credits given your current in-flight requests."}}', ""),
-            (403, '{"error":{"code":403,"message":"The request is prohibited due to a '
-                  'violation of provider Terms Of Service."}}',
-             "Inference account blocked by provider terms of service (HTTP 403)"),
-            (403, '{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
-            (402, '{"detail":{"message":"insufficient balance"}}',
-             "Inference account has no credits (HTTP 402)"),
-            (402, "<html>Payment Required</html>", ""),
-            (402, '{"error":{"code":402,"message":"Provider returned error"}}', ""),
+            (
+                '{"error":{"code":403,"message":"The request is prohibited due to a '
+                'violation of provider Terms Of Service."}}',
+                "Inference account blocked by provider terms of service (HTTP 403)",
+            ),
+            ('{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
         ],
     )
-    def test_openrouter_account_errors(self, status, body, reason):
-        resp = self._mock_resp(status)
+    def test_403_fails_only_a_provider_terms_of_service_block(self, body, reason):
+        resp = self._mock_resp(403)
         resp.text = body
         with patch("validator.main.requests.post", return_value=resp):
             ok, got = Validator._validate_inference_token(
