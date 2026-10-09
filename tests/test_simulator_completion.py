@@ -254,8 +254,10 @@ _NEW_ACCOUNT_429 = (
         (_NEW_ACCOUNT_429, True),
         # Other 429s stay provider outages.
         (
-            '{"error":{"code":429,"message":"Rate limit exceeded: '
-            'model_limit_rpm/vendor/reader-model."}}',
+            (
+                '{"error":{"code":429,"message":"Rate limit exceeded: '
+                'model_limit_rpm/vendor/reader-model."}}'
+            ),
             False,
         ),
         ('{"error":{"code":429,"message":"Provider returned error"}}', False),

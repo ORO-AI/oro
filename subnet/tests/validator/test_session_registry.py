@@ -488,12 +488,11 @@ def test_new_account_throttle_fails_only_its_episode(
     loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from src.agent.proxy_client import PostResult
-    from validator import simulator_completion
 
     async def _instant(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _instant)
+    monkeypatch.setattr("validator.simulator_completion.asyncio.sleep", _instant)
     with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
         _start(registry)
         state = registry._sessions["session-1"]
