@@ -147,6 +147,7 @@ class _SessionState:
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
+    completion: SimulatorCompletion | None = None
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -263,6 +264,7 @@ class SessionRegistry:
             episode_id=state.session_id,
             key_exhausted_event=self.key_exhausted,
         )
+        state.completion = completion
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
@@ -540,6 +542,10 @@ class SessionRegistry:
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
             summary = "miner inference key exhausted"
+        elif state.completion is not None and state.completion.account_rate_limited:
+            # Only this episode is the miner's: the run continues and is scored.
+            state.quarantined_outcome = "agent_error"
+            summary = "miner inference account rate limited"
         elif isinstance(exc, InferenceProviderError):
             summary = f"upstream status={exc.status} body={exc.body!r}"
         else:
@@ -562,7 +568,10 @@ class SessionRegistry:
         cause: concurrent.futures.TimeoutError,
     ) -> NoReturn:
         error_type = HarnessTimeoutError
-        if self.key_exhausted.is_set():
+        # A turn that ran out of time retrying a miner-account throttle is the miner's too.
+        if self.key_exhausted.is_set() or (
+            state.completion is not None and state.completion.account_rate_limited
+        ):
             error_type, reason = self._simulator_error(state, cause)
         state.quarantined_reason = reason
         trace.record(

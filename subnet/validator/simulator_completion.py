@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import threading
@@ -64,6 +65,18 @@ class InferenceProviderError(RuntimeError):
         """OpenRouter's per-run key budget is spent, not a transient outage."""
         return self.status == 403 and "key limit exceeded" in self.body.lower()
 
+    @property
+    def account_rate_limited(self) -> bool:
+        """OpenRouter throttled the miner's new account (429 ``new-account-rpm``),
+        not the provider: the miner's to fix, like a spent key."""
+        if self.status != 429:
+            return False
+        try:
+            message = json.loads(self.body)["error"]["message"]
+        except (TypeError, ValueError, KeyError):
+            return False
+        return isinstance(message, str) and "new-account-rpm/" in message
+
 
 class SimulatorCompletion:
     """Expose the validator proxy as an ``oro-env-runtime`` completion callable."""
@@ -83,6 +96,9 @@ class SimulatorCompletion:
             raise ValueError("inference access token is required")
         self._access_token = access_token
         self._key_exhausted_event = key_exhausted_event
+        # Whether this session's latest call ended throttled by the miner's new
+        # account. The runtime wraps Reader failures, so the registry reads it here.
+        self.account_rate_limited = False
         # Configured Readers require Jev's decisions endpoint, which only OpenRouter
         # provides; runtime setup rejects them when this callable is unavailable.
         if not access_token.startswith("sk-or-"):
@@ -153,6 +169,7 @@ class SimulatorCompletion:
                         attempt,
                         _MAX_ATTEMPTS,
                     )
+                self.account_rate_limited = False
                 return {
                     "text": (message.get("content") or "").replace(self._access_token, "[REDACTED]"),
                     "tool_calls": message.get("tool_calls") or [],
@@ -183,6 +200,7 @@ class SimulatorCompletion:
                 f"{failure_label} status={upstream_status} body={upstream_body!r}"
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
+            self.account_rate_limited = provider_error.account_rate_limited
             if provider_error.key_exhausted:
                 if self._key_exhausted_event is not None:
                     self._key_exhausted_event.set()

@@ -240,6 +240,52 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
     )
 
 
+_NEW_ACCOUNT_429 = (
+    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/google/'
+    'gemini-3.8-flash-20260902. Rate limit reached: new accounts are limited to 20 '
+    'requests per minute for this model. Please retry shortly.","metadata":{"headers":'
+    '{"X-RateLimit-Limit":"20","X-RateLimit-Remaining":"0"}}}}'
+)
+
+
+@pytest.mark.parametrize(
+    "body,rate_limited",
+    [
+        (_NEW_ACCOUNT_429, True),
+        # Other 429s stay provider outages.
+        (
+            '{"error":{"code":429,"message":"Rate limit exceeded: '
+            'model_limit_rpm/google/gemini-3.8-flash-20260902."}}',
+            False,
+        ),
+        ('{"error":{"code":429,"message":"Provider returned error"}}', False),
+        ("new-account-rpm/ rate limited", False),
+    ],
+)
+def test_only_a_new_account_limit_marks_the_miners_account(body: str, rate_limited: bool) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(429, body)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("google/gemini-3.8-flash", []))
+
+    # Retried like any 429, and the run is never stopped for it.
+    assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
+    assert excinfo.value.account_rate_limited is rate_limited
+    assert completion.account_rate_limited is rate_limited
+    assert not stopped.is_set()
+
+
+def test_a_recovered_call_clears_the_account_throttle() -> None:
+    ok = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+    client = MagicMock(post_verbose_async=AsyncMock(side_effect=[_err(429, _NEW_ACCOUNT_429), ok]))
+    completion = SimulatorCompletion("sk-or-miner", client=client)
+
+    assert asyncio.run(completion("google/gemini-3.8-flash", []))["text"] == "ok"
+    assert completion.account_rate_limited is False
+
+
 @pytest.mark.parametrize("decisions", [False, True])
 def test_provider_error_redacts_the_miner_credential(decisions, caplog) -> None:
     token = "sk-or-test-miner"

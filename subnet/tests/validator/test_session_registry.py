@@ -311,8 +311,12 @@ def test_real_reader_classifies_budget_and_infrastructure_failures(
         assert state.simulator._completion._client.post_verbose_async.call_count == 1
 
 
-@pytest.mark.parametrize("exhausted,http_status", [(True, 402), (False, 504)])
-def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhausted, http_status):
+@pytest.mark.parametrize(
+    "exhausted,throttled,http_status", [(True, False, 402), (False, False, 504), (False, True, 402)]
+)
+def test_reader_timeout_preserves_miner_budget_classification(
+    reader_pack, exhausted, throttled, http_status
+):
     from validator.generated_evaluation import aggregate_results
 
     with SessionRegistry(reader_pack, inference_access_token="sk-or-miner", simulator_timeout_s=0.25) as registry:
@@ -325,6 +329,8 @@ def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhau
             assert kwargs["json_data"]["model"] == JEV_MODEL
             if exhausted:
                 registry.key_exhausted.set()
+            # The turn runs out while retrying the miner's new-account throttle.
+            state.completion.account_rate_limited = throttled
             await asyncio.sleep(60)
 
         state.simulator._completion._client.post_verbose_async = stalled_reader
@@ -337,12 +343,14 @@ def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhau
         )
         assert response.status_code == http_status
         result = registry.finalized_results()[0]
-        assert result["environment_error"] is not exhausted
-        assert result["outcome"] == ("agent_error" if exhausted else "environment_error")
+        miner = exhausted or throttled
+        assert registry.key_exhausted.is_set() is exhausted
+        assert result["environment_error"] is not miner
+        assert result["outcome"] == ("agent_error" if miner else "environment_error")
         assert result["call_trace"][0]["error"]["type"] == (
-            "AgentInferenceBudgetError" if exhausted else "HarnessTimeoutError"
+            "AgentInferenceBudgetError" if miner else "HarnessTimeoutError"
         )
-        if exhausted:
+        if miner:
             assert aggregate_results([result], selected_reader_task_ids={result["task_id"]}) == 0.0
         else:
             with pytest.raises(ValueError, match="infrastructure failure"):
@@ -467,6 +475,69 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
     assert result["environment_error"] is False
     assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
     assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
+
+
+_NEW_ACCOUNT_429 = (
+    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/google/'
+    'gemini-3.8-flash. Rate limit reached: new accounts are limited to 20 requests '
+    'per minute for this model. Please retry shortly."}}'
+)
+
+
+def test_new_account_throttle_fails_only_its_episode(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.agent.proxy_client import PostResult
+    from validator import simulator_completion
+
+    async def _instant(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _instant)
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose_async = AsyncMock(
+            return_value=PostResult(
+                data=None,
+                error={"kind": "upstream", "status": 429, "body": _NEW_ACCOUNT_429},
+            )
+        )
+        runtime = SessionRuntime()
+        runtime.install(registry)
+        response = TestClient(create_session_app(runtime)).post(
+            "/v1/session/call",
+            json=_call_envelope(
+                registry, action={"name": "message", "args": {"content": "Any preference?"}}
+            ),
+        )
+        result = registry.finalized_results()[0]
+        # Only this episode is the miner's; the run is not stopped.
+        assert not registry.key_exhausted.is_set()
+
+    assert response.status_code == 402
+    assert response.json()["detail"]["environment_error"] is False
+    assert result["outcome"] == "agent_error"
+    assert result["error_detail"] == "user simulator failed: miner inference account rate limited"
+
+
+def test_wrapped_reader_failure_reads_the_throttle_off_the_completion(
+    loaded_pack: LoadedPack,
+) -> None:
+    """The runtime wraps a Reader's failed call in a bare RuntimeError."""
+    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        registry._default_simulator(state)
+        state.completion.account_rate_limited = True
+        error_type, reason = registry._simulator_error(
+            state, RuntimeError("configured reader failed")
+        )
+
+    assert error_type.__name__ == "AgentInferenceBudgetError"
+    assert state.quarantined_outcome == "agent_error"
+    assert reason == "user simulator failed: miner inference account rate limited"
 
 
 def test_default_simulator_rejects_missing_miner_credentials(
