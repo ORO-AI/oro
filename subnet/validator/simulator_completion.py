@@ -74,37 +74,44 @@ class InferenceProviderError(RuntimeError):
         message). The miner must fix these; an unrecognised 402 or 403 stays a
         retryable provider error.
         """
-        message, metadata = _openrouter_error(self.body)
+        message, metadata = _provider_error(self.body)
         if self.status == 403 and "key limit exceeded" in self.body.lower():
             return "key exhausted"
         if self.status == 403 and "terms of service" in message:
             return "account blocked by provider terms of service"
         if self.status == 402 and not self.account_throttled and (
-            metadata.get("limit_source") in _CREDIT_LIMIT_SOURCES or "credits" in message
+            metadata.get("limit_source") in _CREDIT_LIMIT_SOURCES
+            or "credits" in message
+            or "balance" in message
         ):
             return "account has no credits"
         return None
 
     @property
     def account_throttled(self) -> str | None:
-        """Credits held by in-flight requests clear as they finish, so retry first."""
-        message, metadata = _openrouter_error(self.body)
+        """An account limit that clears (in-flight credits, a new account's per-minute
+        requests): retried, and if it recurs, the miner's for that episode only."""
+        message, metadata = _provider_error(self.body)
         if self.status == 402 and (
             metadata.get("limit_source") == "openrouter_in_flight_budget"
             or "in-flight" in message
         ):
             return "account has no credits for its in-flight requests"
+        if self.status == 429 and "new-account-rpm" in message:
+            return "account rate limited as a new account"
         return None
 
 
 _CREDIT_LIMIT_SOURCES = frozenset({"openrouter_credits", "openrouter_key_limit"})
 
 
-def _openrouter_error(body: str) -> tuple[str, dict[str, Any]]:
-    """OpenRouter's lowercased ``error.message`` and ``error.metadata``, or empty."""
+def _provider_error(body: str) -> tuple[str, dict[str, Any]]:
+    """The lowercased error message and metadata of an OpenRouter ``error`` (or Chutes
+    ``detail``) body, or empty."""
     try:
-        error = json.loads(body).get("error")
-    except (ValueError, AttributeError):
+        parsed = json.loads(body)
+        error = parsed.get("error") or parsed.get("detail")
+    except (TypeError, ValueError, AttributeError):
         return "", {}
     if not isinstance(error, dict):
         return "", {}
@@ -130,6 +137,8 @@ class SimulatorCompletion:
             raise ValueError("inference access token is required")
         self._access_token = access_token
         self._key_exhausted_event = key_exhausted_event
+        # Why the latest failed call is the miner's alone, when a throttle recurred.
+        self.account_throttle: str | None = None
         # Configured Readers require Jev's decisions endpoint, which only OpenRouter
         # provides; runtime setup rejects them when this callable is unavailable.
         if not access_token.startswith("sk-or-"):
@@ -183,7 +192,8 @@ class SimulatorCompletion:
         # attribute (see ORO-2191 review): a single ProxyClient shared by
         # concurrent sessions would let session B's failure overwrite
         # session A's just before A reads it, corrupting A's ledger.
-        started = time.monotonic()
+        self.account_throttle = None
+        started, throttles = time.monotonic(), 0
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             result = await self._client.post_verbose_async(
                 "/inference/chat/completions",
@@ -230,12 +240,12 @@ class SimulatorCompletion:
                 f"{failure_label} status={upstream_status} body={upstream_body!r}"
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
+            throttles += provider_error.account_throttled is not None
             if not provider_error.account_failure and await self._retry_wait(
                 attempt, started, log_detail
             ):
                 continue
-            self._stop_on_account_failure(provider_error, attempt)
-            raise provider_error
+            raise self._give_up(provider_error, throttles)
 
     async def _retry_wait(self, attempt: int, started: float, log_detail: str) -> bool:
         """Sleep before the next attempt, or return False once retries are spent."""
@@ -273,21 +283,22 @@ class SimulatorCompletion:
         await asyncio.sleep(backoff_s)
         return True
 
-    def _stop_on_account_failure(
-        self, provider_error: InferenceProviderError, attempt: int
-    ) -> None:
-        """Stop the run when the miner's account, not the provider, failed the call.
+    def _give_up(
+        self, provider_error: InferenceProviderError, throttles: int
+    ) -> InferenceProviderError:
+        """Attribute a failed call before it is raised.
 
-        A throttle counts only once a retry has failed too.
+        An account failure stops the run. A throttle the account returned again after
+        a retry fails only this episode; a single throttle stays a provider error.
         """
-        reason = provider_error.account_failure or (
-            provider_error.account_throttled if attempt > 1 else None
-        )
-        if reason is None:
-            return
-        if self._key_exhausted_event is not None:
-            self._key_exhausted_event.set()
-        logger.warning("miner inference %s during user simulation", reason)
+        self.account_throttle = provider_error.account_throttled if throttles > 1 else None
+        if provider_error.account_failure:
+            if self._key_exhausted_event is not None:
+                self._key_exhausted_event.set()
+            logger.warning(
+                "miner inference %s during user simulation", provider_error.account_failure
+            )
+        return provider_error
 
     async def decide(
         self, model: str, state: dict[str, Any], questions: dict[str, Any]
@@ -297,7 +308,8 @@ class SimulatorCompletion:
         Only an account throttle is retried: any other failure fails a configured
         reader, so a retry would only spend the simulator's budget.
         """
-        started = time.monotonic()
+        self.account_throttle = None
+        started, throttles = time.monotonic(), 0
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             result = await self._client.post_verbose_async(
                 "/inference/alpha/decisions",
@@ -312,12 +324,12 @@ class SimulatorCompletion:
             if error.get("kind") == "network":
                 raise ConnectionError(body or "no response")
             provider_error = InferenceProviderError(error.get("status"), body)
+            throttles += provider_error.account_throttled is not None
             if provider_error.account_throttled and await self._retry_wait(
                 attempt, started, f"decisions status={provider_error.status} body={body!r}"
             ):
                 continue
-            self._stop_on_account_failure(provider_error, attempt)
-            raise provider_error
+            raise self._give_up(provider_error, throttles)
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

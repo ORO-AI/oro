@@ -149,6 +149,7 @@ class _SessionState:
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
+    completion: SimulatorCompletion | None = None
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -265,6 +266,7 @@ class SessionRegistry:
             episode_id=state.session_id,
             key_exhausted_event=self.key_exhausted,
         )
+        state.completion = completion
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
@@ -537,11 +539,16 @@ class SessionRegistry:
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
         provider = exc if isinstance(exc, InferenceProviderError) else None
-        if self.key_exhausted.is_set() or (provider and provider.account_failure):
+        failure = provider.account_failure if provider else None
+        # The Reader wraps decisions failures, so a throttle is read off the completion.
+        throttle = state.completion.account_throttle if state.completion else None
+        if self.key_exhausted.is_set() or failure:
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
-            account = provider and (provider.account_failure or provider.account_throttled)
-            summary = f"miner inference {account or 'key exhausted'}"
+            summary = f"miner inference {failure or 'key exhausted'}"
+        elif throttle:
+            state.quarantined_outcome = "agent_error"
+            summary = f"miner inference {throttle}"
         elif provider:
             summary = f"upstream status={provider.status} body={provider.body!r}"
         else:
