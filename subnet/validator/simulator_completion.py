@@ -60,9 +60,32 @@ class InferenceProviderError(RuntimeError):
         )
 
     @property
-    def key_exhausted(self) -> bool:
-        """OpenRouter's per-run key budget is spent, not a transient outage."""
-        return self.status == 403 and "key limit exceeded" in self.body.lower()
+    def account_failure(self) -> str | None:
+        """Why the miner's own inference account cannot fund this run, if it can't.
+
+        OpenRouter reports these in the error body: a spent per-run key (403 ``Key
+        limit exceeded``), an account without credits (402) or an account the
+        provider blocks (403 ``Terms Of Service``). The miner must fix them; a
+        retry would not.
+        """
+        body = self.body.lower()
+        if self.status == 403 and "key limit exceeded" in body:
+            return "key exhausted"
+        if self.status == 403 and "terms of service" in body:
+            return "account blocked by provider terms of service"
+        if self.status == 402 and not self.account_throttled:
+            return "account has no credits"
+        return None
+
+    @property
+    def account_throttled(self) -> str | None:
+        """An account limit that can clear, so it is retried before it fails the run."""
+        body = self.body.lower()
+        if self.status == 402 and "in_flight" in body.replace("-", "_"):
+            return "account has no credits for its in-flight requests"
+        if self.status == 429 and "new-account-rpm" in body:
+            return "account rate limited as a new account"
+        return None
 
 
 class SimulatorCompletion:
@@ -183,66 +206,85 @@ class SimulatorCompletion:
                 f"{failure_label} status={upstream_status} body={upstream_body!r}"
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
-            if provider_error.key_exhausted:
-                if self._key_exhausted_event is not None:
-                    self._key_exhausted_event.set()
-                logger.warning("inference key budget exhausted during user simulation")
-                raise provider_error
-            if attempt >= _MAX_ATTEMPTS:
-                logger.error(
-                    "user simulator inference failed after %d attempts (%s)",
-                    _MAX_ATTEMPTS,
-                    log_detail,
-                )
-                raise provider_error
-            backoff_s = _RETRY_BACKOFFS_S[attempt - 1]
-            projected_s = (
-                (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
-            )
-            if projected_s > _WALL_BUDGET_S:
-                logger.error(
-                    "user simulator inference wall budget exhausted "
-                    "after %d attempts (%s); projected=%.2fs budget=%.2fs",
-                    attempt,
-                    log_detail,
-                    projected_s,
-                    _WALL_BUDGET_S,
-                )
-                raise provider_error
-            logger.warning(
-                "user simulator inference failed on attempt %d/%d (%s); "
-                "retrying in %.2fs",
-                attempt,
+            if not provider_error.account_failure and await self._retry_wait(
+                attempt, started, log_detail
+            ):
+                continue
+            self._stop_on_account_failure(provider_error)
+            raise provider_error
+
+    async def _retry_wait(self, attempt: int, started: float, log_detail: str) -> bool:
+        """Sleep before the next attempt, or return False once retries are spent."""
+        if attempt >= _MAX_ATTEMPTS:
+            logger.error(
+                "user simulator inference failed after %d attempts (%s)",
                 _MAX_ATTEMPTS,
                 log_detail,
-                backoff_s,
             )
-            await asyncio.sleep(backoff_s)
+            return False
+        backoff_s = _RETRY_BACKOFFS_S[attempt - 1]
+        projected_s = (
+            (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
+        )
+        if projected_s > _WALL_BUDGET_S:
+            logger.error(
+                "user simulator inference wall budget exhausted "
+                "after %d attempts (%s); projected=%.2fs budget=%.2fs",
+                attempt,
+                log_detail,
+                projected_s,
+                _WALL_BUDGET_S,
+            )
+            return False
+        logger.warning(
+            "user simulator inference failed on attempt %d/%d (%s); "
+            "retrying in %.2fs",
+            attempt,
+            _MAX_ATTEMPTS,
+            log_detail,
+            backoff_s,
+        )
+        await asyncio.sleep(backoff_s)
+        return True
+
+    def _stop_on_account_failure(self, provider_error: InferenceProviderError) -> None:
+        """Stop the run when the miner's account, not the provider, failed the call."""
+        reason = provider_error.account_failure or provider_error.account_throttled
+        if reason is None:
+            return
+        if self._key_exhausted_event is not None:
+            self._key_exhausted_event.set()
+        logger.warning("miner inference %s during user simulation", reason)
 
     async def decide(
         self, model: str, state: dict[str, Any], questions: dict[str, Any]
     ) -> dict[str, Any]:
         """Typed answers from a decisions model, on the same run key.
 
-        One attempt: the disclosure reader falls back to the chat model when
-        this raises, so a retry here would only spend the simulator's budget.
+        Only an account throttle is retried: any other failure fails a configured
+        reader, so a retry would only spend the simulator's budget.
         """
-        result = await self._client.post_verbose_async(
-            "/inference/alpha/decisions",
-            json_data={"model": model, "state": state, "questions": questions},
-        )
-        if isinstance(result.data, dict):
-            return result.data
-        error = result.error or {}
-        body = (error.get("body") or "").strip().replace(self._access_token, "[REDACTED]")
-        # No response is the one failure the reader treats as an outage (the fallback
-        # reads); a status outside 429/502-504 or a malformed answer reads as unsure.
-        if error.get("kind") == "network":
-            raise ConnectionError(body or "no response")
-        provider_error = InferenceProviderError(error.get("status"), body)
-        if provider_error.key_exhausted and self._key_exhausted_event is not None:
-            self._key_exhausted_event.set()
-        raise provider_error
+        started = time.monotonic()
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            result = await self._client.post_verbose_async(
+                "/inference/alpha/decisions",
+                json_data={"model": model, "state": state, "questions": questions},
+            )
+            if isinstance(result.data, dict):
+                return result.data
+            error = result.error or {}
+            body = (error.get("body") or "").strip().replace(self._access_token, "[REDACTED]")
+            # No response is the one failure the reader treats as an outage (the fallback
+            # reads); a status outside 429/502-504 or a malformed answer reads as unsure.
+            if error.get("kind") == "network":
+                raise ConnectionError(body or "no response")
+            provider_error = InferenceProviderError(error.get("status"), body)
+            if provider_error.account_throttled and await self._retry_wait(
+                attempt, started, f"decisions status={provider_error.status} body={body!r}"
+            ):
+                continue
+            self._stop_on_account_failure(provider_error)
+            raise provider_error
 
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

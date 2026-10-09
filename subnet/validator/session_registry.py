@@ -534,14 +534,14 @@ class SessionRegistry:
     def _simulator_error(
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
-        if self.key_exhausted.is_set() or (
-            isinstance(exc, InferenceProviderError) and exc.key_exhausted
-        ):
+        provider = exc if isinstance(exc, InferenceProviderError) else None
+        if self.key_exhausted.is_set() or (provider and provider.account_failure):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
-            summary = "miner inference key exhausted"
-        elif isinstance(exc, InferenceProviderError):
-            summary = f"upstream status={exc.status} body={exc.body!r}"
+            account = provider and (provider.account_failure or provider.account_throttled)
+            summary = f"miner inference {account or 'key exhausted'}"
+        elif provider:
+            summary = f"upstream status={provider.status} body={provider.body!r}"
         else:
             summary = type(exc).__name__
         error_type = (

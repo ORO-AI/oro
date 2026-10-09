@@ -182,17 +182,28 @@ class TestValidateInferenceToken:
             low, high = call.args
             assert 0.5 <= low < high <= 1.5
 
-    def test_402_returns_invalid_with_message(self):
-        json_body = {"detail": {"message": "insufficient balance"}}
-        with patch(
-            "validator.main.requests.post",
-            return_value=self._mock_resp(402, json_body),
-        ):
-            ok, reason = Validator._validate_inference_token(
-                "tok", "https://llm.chutes.ai/v1", "Qwen/Qwen3-32B-TEE"
+    @pytest.mark.parametrize(
+        "status,body,reason",
+        [
+            (402, '{"error":{"code":402,"message":"Insufficient credits",'
+                  '"metadata":{"limit_source":"openrouter_credits"}}}',
+             "Inference account has no credits (HTTP 402)"),
+            (402, '{"error":{"code":402,"message":"This request would exceed your available '
+                  'credits given your current in-flight requests."}}', ""),
+            (403, '{"error":{"code":403,"message":"The request is prohibited due to a '
+                  'violation of provider Terms Of Service."}}',
+             "Inference account blocked by provider terms of service (HTTP 403)"),
+            (403, '{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
+        ],
+    )
+    def test_openrouter_account_errors(self, status, body, reason):
+        resp = self._mock_resp(status)
+        resp.text = body
+        with patch("validator.main.requests.post", return_value=resp):
+            ok, got = Validator._validate_inference_token(
+                "tok", "https://openrouter.ai/api/v1", "openai/gpt-oss-20b"
             )
-        assert ok is False
-        assert "insufficient balance" in reason
+        assert (ok, got) == (not reason, reason)
 
     def test_429_returns_valid(self):
         with patch("validator.main.requests.post", return_value=self._mock_resp(429)):

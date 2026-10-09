@@ -14,7 +14,7 @@ class HarnessExecutionError(HarnessError):
 
 
 class AgentInferenceBudgetError(HarnessExecutionError):
-    """The miner-funded per-run inference key has exhausted its credits."""
+    """The miner-funded inference account can no longer fund the run."""
 
 
 class InvalidSessionError(HarnessError):

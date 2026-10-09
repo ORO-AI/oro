@@ -216,28 +216,63 @@ def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
     assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
 
 
+_RETRIED = simulator_completion._MAX_ATTEMPTS
+_IN_FLIGHT = (
+    '{"error":{"code":402,"message":"This request would exceed your available credits '
+    'given your current in-flight requests.","metadata":{"limit_source":'
+    '"openrouter_in_flight_budget"}}}'
+)
+
+
 @pytest.mark.parametrize(
-    "status,body,exhausted",
+    "status,body,calls,stops_run",
     [
-        (403, '{"error":{"message":"Key limit exceeded (total limit)"}}', True),
-        (403, "rate limit exceeded", False),
-        (429, "Key limit exceeded (total limit)", False),
+        # The miner's account cannot fund the run: fail at once and stop the run.
+        (403, '{"error":{"message":"Key limit exceeded (total limit)"}}', 1, True),
+        (403, '{"error":{"code":403,"message":"The request is prohibited due to a '
+              'violation of provider Terms Of Service."}}', 1, True),
+        (402, '{"error":{"code":402,"message":"This request requires more credits, or '
+              'fewer max_tokens.","metadata":{"limit_source":"openrouter_credits"}}}', 1, True),
+        # Account throttles can clear: retried, and only then stop the run.
+        (402, _IN_FLIGHT, _RETRIED, True),
+        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
+              'new-account-rpm/qwen/qwen3.5"}}', _RETRIED, True),
+        # Provider-side limits stay retryable outages.
+        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
+              'model_limit_rpm/google/gemini"}}', _RETRIED, False),
+        (403, "rate limit exceeded", _RETRIED, False),
+        (429, "Key limit exceeded (total limit)", _RETRIED, False),
     ],
 )
-def test_key_exhaustion_is_narrowly_detected_and_not_retried(
-    status: int, body: str, exhausted: bool
+def test_miner_account_failures_are_narrowly_detected(
+    status: int, body: str, calls: int, stops_run: bool
 ) -> None:
     client = MagicMock(post_verbose_async=AsyncMock())
     client.post_verbose_async.return_value = _err(status, body)
-    completion = SimulatorCompletion("miner-token", client=client)
+    stopped = threading.Event()
+    completion = SimulatorCompletion("miner-token", client=client, key_exhausted_event=stopped)
 
-    with pytest.raises(InferenceProviderError) as excinfo:
+    with pytest.raises(InferenceProviderError):
         asyncio.run(completion("model", []))
 
-    assert excinfo.value.key_exhausted is exhausted
-    assert client.post_verbose_async.call_count == (
-        1 if exhausted else simulator_completion._MAX_ATTEMPTS
-    )
+    assert client.post_verbose_async.call_count == calls
+    assert stopped.is_set() is stops_run
+
+
+def test_decide_retries_only_an_account_throttle() -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(402, _IN_FLIGHT)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+
+    with pytest.raises(InferenceProviderError):
+        asyncio.run(completion.decide("typesafe/jev-1.13", {}, {}))
+    assert client.post_verbose_async.call_count == _RETRIED
+    assert stopped.is_set()
+
+    client.post_verbose_async.reset_mock()
+    client.post_verbose_async.side_effect = [_err(402, _IN_FLIGHT), _ok({"answers": {}})]
+    assert asyncio.run(completion.decide("typesafe/jev-1.13", {}, {})) == {"answers": {}}
+    assert client.post_verbose_async.call_count == 2
 
 
 @pytest.mark.parametrize("decisions", [False, True])
