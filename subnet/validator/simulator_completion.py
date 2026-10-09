@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import threading
 import time
+from contextvars import ContextVar
 from typing import Any
 
 from src.agent.proxy_client import ProxyClient
+
+# Monotonic deadline of the current simulator turn, shared by all of its calls.
+SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 
 # Marks the validator's own proxy calls (the disclosure reader's decisions), which the
 # agent sandbox may not make. Minted per process and never given to the sandbox: the
@@ -63,29 +68,48 @@ class InferenceProviderError(RuntimeError):
     def account_failure(self) -> str | None:
         """Why the miner's own inference account cannot fund this run, if it can't.
 
-        OpenRouter reports these in the error body: a spent per-run key (403 ``Key
-        limit exceeded``), an account without credits (402) or an account the
-        provider blocks (403 ``Terms Of Service``). The miner must fix them; a
-        retry would not.
+        Only an OpenRouter body that names the cause counts: a spent per-run key
+        (403 ``Key limit exceeded``), an account without credits (402 with a credits
+        ``limit_source`` or message) or a provider block (403 ``Terms Of Service``
+        message). The miner must fix these; an unrecognised 402 or 403 stays a
+        retryable provider error.
         """
-        body = self.body.lower()
-        if self.status == 403 and "key limit exceeded" in body:
+        message, metadata = _openrouter_error(self.body)
+        if self.status == 403 and "key limit exceeded" in self.body.lower():
             return "key exhausted"
-        if self.status == 403 and "terms of service" in body:
+        if self.status == 403 and "terms of service" in message:
             return "account blocked by provider terms of service"
-        if self.status == 402 and not self.account_throttled:
+        if self.status == 402 and not self.account_throttled and (
+            metadata.get("limit_source") in _CREDIT_LIMIT_SOURCES or "credits" in message
+        ):
             return "account has no credits"
         return None
 
     @property
     def account_throttled(self) -> str | None:
-        """An account limit that can clear, so it is retried before it fails the run."""
-        body = self.body.lower()
-        if self.status == 402 and "in_flight" in body.replace("-", "_"):
+        """Credits held by in-flight requests clear as they finish, so retry first."""
+        message, metadata = _openrouter_error(self.body)
+        if self.status == 402 and (
+            metadata.get("limit_source") == "openrouter_in_flight_budget"
+            or "in-flight" in message
+        ):
             return "account has no credits for its in-flight requests"
-        if self.status == 429 and "new-account-rpm" in body:
-            return "account rate limited as a new account"
         return None
+
+
+_CREDIT_LIMIT_SOURCES = frozenset({"openrouter_credits", "openrouter_key_limit"})
+
+
+def _openrouter_error(body: str) -> tuple[str, dict[str, Any]]:
+    """OpenRouter's lowercased ``error.message`` and ``error.metadata``, or empty."""
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return "", {}
+    if not isinstance(error, dict):
+        return "", {}
+    metadata = error.get("metadata")
+    return str(error.get("message") or "").lower(), metadata if isinstance(metadata, dict) else {}
 
 
 class SimulatorCompletion:
@@ -210,7 +234,7 @@ class SimulatorCompletion:
                 attempt, started, log_detail
             ):
                 continue
-            self._stop_on_account_failure(provider_error)
+            self._stop_on_account_failure(provider_error, attempt)
             raise provider_error
 
     async def _retry_wait(self, attempt: int, started: float, log_detail: str) -> bool:
@@ -226,14 +250,16 @@ class SimulatorCompletion:
         projected_s = (
             (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
         )
-        if projected_s > _WALL_BUDGET_S:
+        # The turn's other calls share its deadline, so it can end first.
+        budget_s = min(_WALL_BUDGET_S, SIMULATOR_DEADLINE.get(float("inf")) - started)
+        if projected_s > budget_s:
             logger.error(
                 "user simulator inference wall budget exhausted "
                 "after %d attempts (%s); projected=%.2fs budget=%.2fs",
                 attempt,
                 log_detail,
                 projected_s,
-                _WALL_BUDGET_S,
+                budget_s,
             )
             return False
         logger.warning(
@@ -247,9 +273,16 @@ class SimulatorCompletion:
         await asyncio.sleep(backoff_s)
         return True
 
-    def _stop_on_account_failure(self, provider_error: InferenceProviderError) -> None:
-        """Stop the run when the miner's account, not the provider, failed the call."""
-        reason = provider_error.account_failure or provider_error.account_throttled
+    def _stop_on_account_failure(
+        self, provider_error: InferenceProviderError, attempt: int
+    ) -> None:
+        """Stop the run when the miner's account, not the provider, failed the call.
+
+        A throttle counts only once a retry has failed too.
+        """
+        reason = provider_error.account_failure or (
+            provider_error.account_throttled if attempt > 1 else None
+        )
         if reason is None:
             return
         if self._key_exhausted_event is not None:
@@ -283,7 +316,7 @@ class SimulatorCompletion:
                 attempt, started, f"decisions status={provider_error.status} body={body!r}"
             ):
                 continue
-            self._stop_on_account_failure(provider_error)
+            self._stop_on_account_failure(provider_error, attempt)
             raise provider_error
 
 

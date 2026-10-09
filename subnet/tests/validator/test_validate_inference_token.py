@@ -194,6 +194,8 @@ class TestValidateInferenceToken:
                   'violation of provider Terms Of Service."}}',
              "Inference account blocked by provider terms of service (HTTP 403)"),
             (403, '{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
+            (402, "<html>Payment Required</html>", ""),
+            (402, '{"error":{"code":402,"message":"Provider returned error"}}', ""),
         ],
     )
     def test_openrouter_account_errors(self, status, body, reason):

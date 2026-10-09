@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -233,15 +234,22 @@ _IN_FLIGHT = (
               'violation of provider Terms Of Service."}}', 1, True),
         (402, '{"error":{"code":402,"message":"This request requires more credits, or '
               'fewer max_tokens.","metadata":{"limit_source":"openrouter_credits"}}}', 1, True),
-        # Account throttles can clear: retried, and only then stop the run.
+        (402, '{"error":{"code":402,"message":"This request\'s maximum cost exceeds your '
+              'available credits. Add credits, or lower max_tokens or prompt size."}}', 1, True),
+        # Credits held by in-flight requests clear: retried, and only then stop the run.
         (402, _IN_FLIGHT, _RETRIED, True),
-        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
-              'new-account-rpm/qwen/qwen3.5"}}', _RETRIED, True),
-        # Provider-side limits stay retryable outages.
-        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
-              'model_limit_rpm/google/gemini"}}', _RETRIED, False),
+        # A body that does not name an account cause stays a retryable outage.
+        (402, "", _RETRIED, False),
+        (402, "<html>Payment Required</html>", _RETRIED, False),
+        (402, '{"error":{"code":402,"message":"Provider returned error"}}', _RETRIED, False),
+        (403, '{"error":{"code":403,"message":"Input flagged","metadata":'
+              '{"flagged_input":"ignore the terms of service"}}}', _RETRIED, False),
         (403, "rate limit exceeded", _RETRIED, False),
         (429, "Key limit exceeded (total limit)", _RETRIED, False),
+        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
+              'new-account-rpm/qwen/qwen3.5"}}', _RETRIED, False),
+        (429, '{"error":{"code":429,"message":"Rate limit exceeded: '
+              'model_limit_rpm/google/gemini"}}', _RETRIED, False),
     ],
 )
 def test_miner_account_failures_are_narrowly_detected(
@@ -270,9 +278,30 @@ def test_decide_retries_only_an_account_throttle() -> None:
     assert stopped.is_set()
 
     client.post_verbose_async.reset_mock()
+    stopped.clear()
     client.post_verbose_async.side_effect = [_err(402, _IN_FLIGHT), _ok({"answers": {}})]
     assert asyncio.run(completion.decide("typesafe/jev-1.13", {}, {})) == {"answers": {}}
     assert client.post_verbose_async.call_count == 2
+    assert not stopped.is_set()
+
+
+@pytest.mark.parametrize("turn_left_s,calls,stops_run", [(4.0, 1, False), (10.0, 2, True)])
+def test_throttle_retries_end_at_the_turn_deadline(
+    turn_left_s: float, calls: int, stops_run: bool
+) -> None:
+    """Retries stop before the turn's shared deadline; a throttle stops the run only
+    once a retry has failed too, so a turn with no time left stays an outage."""
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(402, _IN_FLIGHT)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+    token = simulator_completion.SIMULATOR_DEADLINE.set(time.monotonic() + turn_left_s)
+    try:
+        with pytest.raises(InferenceProviderError):
+            asyncio.run(completion.decide("typesafe/jev-1.13", {}, {}))
+    finally:
+        simulator_completion.SIMULATOR_DEADLINE.reset(token)
+    assert client.post_verbose_async.call_count == calls
+    assert stopped.is_set() is stops_run
 
 
 @pytest.mark.parametrize("decisions", [False, True])
