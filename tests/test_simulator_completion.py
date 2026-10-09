@@ -240,21 +240,23 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
     )
 
 
+_TOS_403 = (
+    '{"error":{"code":403,"message":"The request is prohibited due to a '
+    'violation of provider Terms Of Service."}}'
+)
+_FLAGGED_403 = (
+    '{"error":{"code":403,"message":"Input flagged","metadata":'
+    '{"flagged_input":"the terms of service"}}}'
+)
+
+
 @pytest.mark.parametrize("decisions", [False, True])
 @pytest.mark.parametrize(
     "body,blocked",
     [
-        (
-            '{"error":{"code":403,"message":"The request is prohibited due to a '
-            'violation of provider Terms Of Service."}}',
-            True,
-        ),
+        (_TOS_403, True),
         # The phrase only in echoed input, or a body that is not OpenRouter's, is no block.
-        (
-            '{"error":{"code":403,"message":"Input flagged","metadata":'
-            '{"flagged_input":"the terms of service"}}}',
-            False,
-        ),
+        (_FLAGGED_403, False),
         ("Terms Of Service", False),
     ],
 )

@@ -421,15 +421,17 @@ def test_default_simulator_failure_is_an_environment_error(
     assert private_detail not in json.dumps(result)
 
 
+_TOS_403 = (
+    '{"error":{"message":"The request is prohibited due to a violation of '
+    'provider Terms Of Service."}}'
+)
+
+
 @pytest.mark.parametrize(
     "body,reason",
     [
         ('{"error":{"message":"Key limit exceeded (total limit)"}}', "key exhausted"),
-        (
-            '{"error":{"message":"The request is prohibited due to a violation of '
-            'provider Terms Of Service."}}',
-            "account blocked by provider terms of service",
-        ),
+        (_TOS_403, "account blocked by provider terms of service"),
     ],
 )
 def test_miner_key_exhaustion_is_agent_error_and_stops_run(

@@ -37,6 +37,12 @@ class TestValidationModelFor:
             Validator._validation_model_for("unknown_provider")
 
 
+_TOS_403 = (
+    '{"error":{"code":403,"message":"The request is prohibited due to a '
+    'violation of provider Terms Of Service."}}'
+)
+
+
 class TestValidateInferenceToken:
     def _mock_resp(self, status_code: int, json_body: dict | None = None):
         mock = MagicMock()
@@ -197,11 +203,7 @@ class TestValidateInferenceToken:
     @pytest.mark.parametrize(
         "body,reason",
         [
-            (
-                '{"error":{"code":403,"message":"The request is prohibited due to a '
-                'violation of provider Terms Of Service."}}',
-                "Inference account blocked by provider terms of service (HTTP 403)",
-            ),
+            (_TOS_403, "Inference account blocked by provider terms of service (HTTP 403)"),
             ('{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
         ],
     )
