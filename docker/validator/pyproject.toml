@@ -24,8 +24,8 @@ dependencies = [
 ]
 
 [dependency-groups]
-validator = ["oro-env-runtime==3.5.0"]
-local-test = ["oro-env-runtime==3.5.0"]
+validator = ["oro-env-runtime==3.6.0"]
+local-test = ["oro-env-runtime==3.6.0"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"

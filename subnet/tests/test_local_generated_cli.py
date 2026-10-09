@@ -117,7 +117,7 @@ def test_bundled_pack_matches_released_runtime_contracts(tmp_path: Path) -> None
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "3.5.0"
+    assert version("oro-env-runtime") == "3.6.0"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         archive.extractall(tmp_path, filter="data")

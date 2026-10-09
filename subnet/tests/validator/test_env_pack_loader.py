@@ -15,6 +15,7 @@ from typing import Any, Callable
 import httpx
 import pytest
 from oro_env_runtime.contracts import RUNTIME_CONTRACT
+from oro_env_runtime.task_codec import V8_PACK_VERSION, encode_task_rows
 
 from tests.compat_fixture import delivery_archive
 from validator import env_pack_loader
@@ -63,11 +64,17 @@ def _task_row() -> dict:
     }
 
 
-def _archive_bytes(delivery: dict | None = None) -> bytes:
+def _archive_bytes(
+    delivery: dict | None = None, *, pack_version: str = "oro_compiled_epoch_v7"
+) -> bytes:
+    task_lines = "".join(
+        json.dumps(row, sort_keys=True) + "\n"
+        for row in encode_task_rows([_task_row()], pack_version)
+    )
     files = {
         "epoch/manifest.json": json.dumps(
             {
-                "pack_version": "test",
+                "pack_version": pack_version,
                 "catalog_fingerprint": "1" * 64,
                 "search": {"index_sha256": "2" * 64},
                 "delivery": (
@@ -75,9 +82,7 @@ def _archive_bytes(delivery: dict | None = None) -> bytes:
                 ),
             }
         ).encode(),
-        "epoch/data/tasks/private_tasks.jsonl": (
-            json.dumps(_task_row(), sort_keys=True) + "\n"
-        ).encode(),
+        "epoch/data/tasks/private_tasks.jsonl": task_lines.encode(),
     }
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
@@ -105,6 +110,19 @@ def test_loads_local_pack_and_derives_digest_when_not_supplied(tmp_path: Path) -
         assert loaded.metadata["catalog_sha256"] == "1" * 64
         assert loaded.metadata["search_index_epoch"] is None
         assert loaded.metadata["search_index_sha256"] == "2" * 64
+    finally:
+        loaded.close()
+
+
+def test_loads_local_v8_pack(tmp_path: Path) -> None:
+    artifact = _archive_bytes(pack_version=V8_PACK_VERSION)
+    archive_path = tmp_path / "pack-v8.tar.gz"
+    archive_path.write_bytes(artifact)
+
+    loaded = load_local_pack(archive_path, scratch_root=tmp_path / "scratch")
+    try:
+        assert loaded.manifest["pack_version"] == V8_PACK_VERSION
+        assert loaded.task_ids == ["TF2-retrieval_recall-1"]
     finally:
         loaded.close()
 
@@ -274,7 +292,7 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    artifact = _archive_bytes()
+    artifact = _archive_bytes(pack_version=V8_PACK_VERSION)
     pack_sha256 = hashlib.sha256(artifact).hexdigest()
     requests: list[httpx.Request] = []
     evicted: list[Path] = []
@@ -295,7 +313,7 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
     assert loaded is not None
     assert loaded.pack_sha256 == pack_sha256
     assert loaded.pack_dir.name == "epoch"
-    assert loaded.manifest["pack_version"] == "test"
+    assert loaded.manifest["pack_version"] == V8_PACK_VERSION
     assert loaded.task_ids == ["TF2-retrieval_recall-1"]
     assert loaded.task_specs[0].family == "retrieval_recall"
     assert requests[0].headers["X-Hotkey"] == "test-hotkey"
