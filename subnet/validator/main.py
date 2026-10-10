@@ -69,6 +69,7 @@ from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
 from .session_registry import SessionRegistry
 from .session_service import SessionRuntime, SessionServer
+from .simulator_completion import InferenceProviderError
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
@@ -1379,6 +1380,16 @@ class Validator:
             reporter.stop()
             self.session_runtime.clear(registry)
 
+        if registry.no_allowed_providers.is_set():
+            # A setting on the miner's inference account, not an outage: fail the
+            # run as the miner's so it counts toward auto-discard, not re-queued.
+            self._complete_with_failure(
+                eval_run_id,
+                TerminalStatus.FAILED,
+                "Inference account allows no provider for a model the evaluation needs (HTTP 404)",
+                sandbox_metadata=sandbox_metadata,
+            )
+            return None
         key_exhausted = registry.key_exhausted.is_set()
         if key_exhausted:
             # Miner ran out of inference budget mid-run. Instead of failing
@@ -2001,6 +2012,11 @@ class Validator:
                         else str(detail)
                     )
                     return False, f"Inference account has no credits ({msg})"
+                if InferenceProviderError(resp.status_code, resp.text).provider_blocked:
+                    return (
+                        False,
+                        "Inference account blocked by provider terms of service (HTTP 403)",
+                    )
                 if resp.status_code == 429:
                     return True, ""
                 logging.warning(

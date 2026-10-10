@@ -240,6 +240,139 @@ def test_key_exhaustion_is_narrowly_detected_and_not_retried(
     )
 
 
+_NEW_ACCOUNT_429 = (
+    '{"error":{"code":429,"message":"Rate limit exceeded: new-account-rpm/vendor/reader-model. '
+    'Rate limit reached: new accounts are limited to 20 '
+    'requests per minute for this model. Please retry shortly.","metadata":{"headers":'
+    '{"X-RateLimit-Limit":"20","X-RateLimit-Remaining":"0"}}}}'
+)
+
+
+@pytest.mark.parametrize(
+    "body,rate_limited",
+    [
+        (_NEW_ACCOUNT_429, True),
+        # Other 429s stay provider outages.
+        (
+            (
+                '{"error":{"code":429,"message":"Rate limit exceeded: '
+                'model_limit_rpm/vendor/reader-model."}}'
+            ),
+            False,
+        ),
+        ('{"error":{"code":429,"message":"Provider returned error"}}', False),
+        ("new-account-rpm/ rate limited", False),
+    ],
+)
+def test_only_a_new_account_limit_marks_the_miners_account(body: str, rate_limited: bool) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(429, body)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("vendor/reader-model", []))
+
+    # Retried like any 429, and the run is never stopped for it.
+    assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
+    assert excinfo.value.account_rate_limited is rate_limited
+    assert completion.account_rate_limited is rate_limited
+    assert not stopped.is_set()
+
+
+def test_a_recovered_call_clears_the_account_throttle() -> None:
+    ok = _ok({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+    client = MagicMock(post_verbose_async=AsyncMock(side_effect=[_err(429, _NEW_ACCOUNT_429), ok]))
+    completion = SimulatorCompletion("sk-or-miner", client=client)
+
+    assert asyncio.run(completion("vendor/reader-model", []))["text"] == "ok"
+    assert completion.account_rate_limited is False
+
+
+_NO_PROVIDERS_404 = (
+    '{"error":{"code":404,"message":"No allowed providers are available for the '
+    'selected model. Providers serving vendor/reader-model: provider-a"}}'
+)
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+def test_no_allowed_providers_stops_the_run_without_retry(decisions: bool) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(404, _NO_PROVIDERS_404)))
+    stopped, no_providers = threading.Event(), threading.Event()
+    completion = SimulatorCompletion(
+        "sk-or-miner",
+        client=client,
+        key_exhausted_event=stopped,
+        no_allowed_providers_event=no_providers,
+    )
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion.decide("m", {}, {}) if decisions else completion("m", []))
+
+    assert excinfo.value.no_allowed_providers
+    assert client.post_verbose_async.call_count == 1
+    assert stopped.is_set()
+    assert no_providers.is_set()
+
+
+def test_another_404_is_retried_and_does_not_stop_the_run() -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(
+        return_value=_err(404, '{"error":{"code":404,"message":"Model not found"}}')
+    ))
+    stopped, no_providers = threading.Event(), threading.Event()
+    completion = SimulatorCompletion(
+        "sk-or-miner",
+        client=client,
+        key_exhausted_event=stopped,
+        no_allowed_providers_event=no_providers,
+    )
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion("m", []))
+
+    assert not excinfo.value.no_allowed_providers
+    assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
+    assert not stopped.is_set()
+    assert not no_providers.is_set()
+
+
+_TOS_403 = (
+    '{"error":{"code":403,"message":"The request is prohibited due to a '
+    'violation of provider Terms Of Service."}}'
+)
+_FLAGGED_403 = (
+    '{"error":{"code":403,"message":"Input flagged","metadata":'
+    '{"flagged_input":"the terms of service"}}}'
+)
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+@pytest.mark.parametrize(
+    "body,blocked",
+    [
+        (_TOS_403, True),
+        # The phrase only in echoed input, or a body that is not OpenRouter's, is no block.
+        (_FLAGGED_403, False),
+        ("Terms Of Service", False),
+    ],
+)
+def test_provider_terms_of_service_block_stops_the_run(
+    body: str, blocked: bool, decisions: bool
+) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(403, body)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion.decide("m", {}, {}) if decisions else completion("m", []))
+
+    assert excinfo.value.provider_blocked is blocked
+    assert stopped.is_set() is blocked
+    retried = not (blocked or decisions)
+    assert client.post_verbose_async.call_count == (
+        simulator_completion._MAX_ATTEMPTS if retried else 1
+    )
+
+
 @pytest.mark.parametrize("decisions", [False, True])
 def test_provider_error_redacts_the_miner_credential(decisions, caplog) -> None:
     token = "sk-or-test-miner"

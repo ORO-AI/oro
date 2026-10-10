@@ -316,6 +316,7 @@ def test_generated_runner_delivers_failed_completion(
     }
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
+    registry.no_allowed_providers = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
     if flush_failure:
@@ -366,6 +367,7 @@ def test_generated_reader_failure_policy_uses_selected_roster(
                 "pack_sha256": "a" * 64} for task in roster]
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
+    registry.no_allowed_providers = threading.Event()
     registry.finalized_results.return_value = results
     registry.loaded_pack.task_ids = [*roster, "hidden"]
     registry.loaded_pack.task_specs = [
@@ -419,6 +421,7 @@ def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monke
     ]
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
+    registry.no_allowed_providers = threading.Event()
     registry.key_exhausted.set()
     registry.finalized_results.return_value = results
     reporter = MagicMock()
@@ -448,6 +451,43 @@ def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monke
     assert completion.score == pytest.approx(0.25)
     assert completion.sandbox_metadata["_miner_inference_key_exhausted"] is True
     validator.backend_client.complete_run.assert_not_called()
+
+
+def test_generated_runner_fails_run_when_account_allows_no_provider(tmp_path, monkeypatch):
+    """A miner account that allows no provider for a model the run needs fails the
+    run with a miner-attributable reason instead of scoring or re-queueing it."""
+    registry = MagicMock()
+    registry.key_exhausted = threading.Event()
+    registry.no_allowed_providers = threading.Event()
+    registry.key_exhausted.set()
+    registry.no_allowed_providers.set()
+    registry.finalized_results.return_value = [
+        {**_result("t1", correct=False, outcome="agent_error"), "family": "right",
+         "evaluation_run_id": "run", "agent_version_id": "agent", "pack_sha256": "a" * 64},
+    ]
+    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=MagicMock()))
+    validator = Validator.__new__(Validator)
+    validator._create_environment_sessions = MagicMock(return_value=(
+        registry, [{"session_id": "session", "policy_view": {"query": "query"}}], {"t1": "right"},
+    ))
+    validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator._simulator_inference_stats_file = MagicMock(return_value=tmp_path / "sim.jsonl")
+    validator.run_sandbox = MagicMock(return_value=(None, {}))
+    validator.session_runtime = MagicMock()
+    validator.backend_client = MagicMock()
+    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
+
+    completion = validator._run_generated_evaluation(
+        work, tmp_path / "agent.py", inference_access_token="synthetic",
+        inference_provider="openrouter", inference_base_url="https://example.test/v1",
+    )
+
+    assert completion is None
+    kwargs = validator.backend_client.complete_run.call_args.kwargs
+    assert kwargs["status"] == validator_main.TerminalStatus.FAILED
+    assert kwargs["failure_reason"] == (
+        "Inference account allows no provider for a model the evaluation needs (HTTP 404)"
+    )
 
 
 @pytest.mark.parametrize(
@@ -737,6 +777,7 @@ def test_generated_runner_retains_agent_inference_summary(
     }
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
+    registry.no_allowed_providers = threading.Event()
     registry.finalized_results.return_value = [result]
     reporter = MagicMock()
     reporter_type = MagicMock(return_value=reporter)
