@@ -429,8 +429,21 @@ def test_default_simulator_failure_is_an_environment_error(
     assert private_detail not in json.dumps(result)
 
 
+_TOS_403 = (
+    '{"error":{"message":"The request is prohibited due to a violation of '
+    'provider Terms Of Service."}}'
+)
+
+
+@pytest.mark.parametrize(
+    "body,reason",
+    [
+        ('{"error":{"message":"Key limit exceeded (total limit)"}}', "key exhausted"),
+        (_TOS_403, "account blocked by provider terms of service"),
+    ],
+)
 def test_miner_key_exhaustion_is_agent_error_and_stops_run(
-    loaded_pack: LoadedPack,
+    loaded_pack: LoadedPack, body: str, reason: str
 ) -> None:
     from src.agent.proxy_client import PostResult
 
@@ -444,12 +457,12 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
                 error={
                     "kind": "upstream",
                     "status": 403,
-                    "body": '{"error":{"message":"Key limit exceeded (total limit)"}}',
+                    "body": body,
                 },
             )
         )
         state.simulator._completion._client.post_verbose_async = post
-        with pytest.raises(HarnessExecutionError, match="miner inference key exhausted"):
+        with pytest.raises(HarnessExecutionError, match=f"miner inference {reason}"):
             registry.call(
                 _call_envelope(
                     registry,
@@ -473,7 +486,7 @@ def test_miner_key_exhaustion_is_agent_error_and_stops_run(
     assert post.call_count == 2
     assert result["outcome"] == "agent_error"
     assert result["environment_error"] is False
-    assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
+    assert result["error_detail"] == f"user simulator failed: miner inference {reason}"
     assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
 
 

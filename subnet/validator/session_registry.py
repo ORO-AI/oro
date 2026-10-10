@@ -541,13 +541,15 @@ class SessionRegistry:
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
         if self.key_exhausted.is_set() or (
-            isinstance(exc, InferenceProviderError) and exc.key_exhausted
+            isinstance(exc, InferenceProviderError) and (exc.key_exhausted or exc.provider_blocked)
         ):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
             summary = (
                 "miner inference account allows no provider"
                 if self.no_allowed_providers.is_set()
+                else "miner inference account blocked by provider terms of service"
+                if isinstance(exc, InferenceProviderError) and exc.provider_blocked
                 else "miner inference key exhausted"
             )
         elif state.completion is not None and state.completion.account_rate_limited:

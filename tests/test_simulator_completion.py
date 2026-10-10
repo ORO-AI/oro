@@ -335,6 +335,44 @@ def test_another_404_is_retried_and_does_not_stop_the_run() -> None:
     assert not no_providers.is_set()
 
 
+_TOS_403 = (
+    '{"error":{"code":403,"message":"The request is prohibited due to a '
+    'violation of provider Terms Of Service."}}'
+)
+_FLAGGED_403 = (
+    '{"error":{"code":403,"message":"Input flagged","metadata":'
+    '{"flagged_input":"the terms of service"}}}'
+)
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+@pytest.mark.parametrize(
+    "body,blocked",
+    [
+        (_TOS_403, True),
+        # The phrase only in echoed input, or a body that is not OpenRouter's, is no block.
+        (_FLAGGED_403, False),
+        ("Terms Of Service", False),
+    ],
+)
+def test_provider_terms_of_service_block_stops_the_run(
+    body: str, blocked: bool, decisions: bool
+) -> None:
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(403, body)))
+    stopped = threading.Event()
+    completion = SimulatorCompletion("sk-or-miner", client=client, key_exhausted_event=stopped)
+
+    with pytest.raises(InferenceProviderError) as excinfo:
+        asyncio.run(completion.decide("m", {}, {}) if decisions else completion("m", []))
+
+    assert excinfo.value.provider_blocked is blocked
+    assert stopped.is_set() is blocked
+    retried = not (blocked or decisions)
+    assert client.post_verbose_async.call_count == (
+        simulator_completion._MAX_ATTEMPTS if retried else 1
+    )
+
+
 @pytest.mark.parametrize("decisions", [False, True])
 def test_provider_error_redacts_the_miner_credential(decisions, caplog) -> None:
     token = "sk-or-test-miner"

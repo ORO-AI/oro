@@ -69,6 +69,7 @@ from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
 from .session_registry import SessionRegistry
 from .session_service import SessionRuntime, SessionServer
+from .simulator_completion import InferenceProviderError
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
@@ -2011,6 +2012,11 @@ class Validator:
                         else str(detail)
                     )
                     return False, f"Inference account has no credits ({msg})"
+                if InferenceProviderError(resp.status_code, resp.text).provider_blocked:
+                    return (
+                        False,
+                        "Inference account blocked by provider terms of service (HTTP 403)",
+                    )
                 if resp.status_code == 429:
                     return True, ""
                 logging.warning(

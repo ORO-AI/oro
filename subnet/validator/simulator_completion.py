@@ -78,6 +78,17 @@ class InferenceProviderError(RuntimeError):
         return self.status == 404 and "no allowed providers are available" in self._message.lower()
 
     @property
+    def provider_blocked(self) -> bool:
+        """The provider refuses the miner's account (an OpenRouter 403 whose message
+        cites its Terms Of Service). Like a spent key, it is the miner's to fix."""
+        return self.status == 403 and "terms of service" in self._message.lower()
+
+    @property
+    def stops_run(self) -> bool:
+        """The miner's account cannot serve the run: stop it rather than retry."""
+        return self.key_exhausted or self.provider_blocked or self.no_allowed_providers
+
+    @property
     def _message(self) -> str:
         try:
             message = json.loads(self.body)["error"]["message"]
@@ -211,7 +222,7 @@ class SimulatorCompletion:
             )
             provider_error = InferenceProviderError(upstream_status, upstream_body)
             self.account_rate_limited = provider_error.account_rate_limited
-            if provider_error.key_exhausted or provider_error.no_allowed_providers:
+            if provider_error.stops_run:
                 self._stop_run(provider_error)
                 raise provider_error
             if attempt >= _MAX_ATTEMPTS:
@@ -266,18 +277,19 @@ class SimulatorCompletion:
         if error.get("kind") == "network":
             raise ConnectionError(body or "no response")
         provider_error = InferenceProviderError(error.get("status"), body)
-        if provider_error.key_exhausted or provider_error.no_allowed_providers:
+        if provider_error.stops_run:
             self._stop_run(provider_error)
         raise provider_error
 
     def _stop_run(self, provider_error: InferenceProviderError) -> None:
-        """Stop the run: the miner's key is spent or its account allows no provider."""
+        """Stop the run: the miner's key is spent, or its account is blocked by the
+        provider or allows no provider."""
         if provider_error.no_allowed_providers:
             if self._no_allowed_providers_event is not None:
                 self._no_allowed_providers_event.set()
             logger.warning("miner inference account allows no provider during user simulation")
         else:
-            logger.warning("inference key budget exhausted during user simulation")
+            logger.warning("inference key budget exhausted or account blocked during user simulation")
         if self._key_exhausted_event is not None:
             self._key_exhausted_event.set()
 
