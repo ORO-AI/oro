@@ -321,15 +321,21 @@ function _validatedRequest(r) {
   // threat model does not apply. The scalar `parsed.model` stays Mistral, so the
   // allowlist check below still validates the primary. The fallback entry is
   // intentionally NOT allowlist-validated (proxy-authored exception). OpenRouter
-  // only. TODO(ORO): replay-parity + record served model before relying on this
-  // for scoring — cross-validator fallback timing adds score variance.
-  var fallbackInjected = false;
-  if (provider === "openrouter" && parsed.model === "mistralai/mistral-small-2603") {
-    parsed.models = [
-      "mistralai/mistral-small-2603",
-      "qwen/qwen3-30b-a3b-instruct-2507",
-    ];
-    fallbackInjected = true;
+  // only. The model that answered is logged as `served=` in the access log details.
+  //
+  // The validator's configured Reader falls back to Gemini 3.8 Flash, which hits
+  // OpenRouter's per-model rate limits on miner accounts, and some accounts exclude
+  // Google providers. Gemini 3.7 Flash (its own rate limit) then GPT-6 Sol (not
+  // served by Google) take over. Agents' own Gemini calls are left alone.
+  var fallbackModels =
+    parsed.model === "mistralai/mistral-small-2603"
+      ? ["mistralai/mistral-small-2603", "qwen/qwen3-30b-a3b-instruct-2507"]
+      : r._oroCaller === "validator" && parsed.model === "google/gemini-3.8-flash"
+        ? ["google/gemini-3.8-flash", "google/gemini-3.7-flash", "openai/gpt-6-sol"]
+        : null;
+  var fallbackInjected = provider === "openrouter" && fallbackModels !== null;
+  if (fallbackInjected) {
+    parsed.models = fallbackModels;
   }
 
   getAllowlist(r, provider, function (allowed, aliases) {
@@ -370,6 +376,14 @@ function _validatedRequest(r) {
       { method: "POST", body: forwardBody },
       function (reply) {
         _tag(r, _upstreamLabel(reply.status));
+        if (fallbackInjected && reply.status === 200) {
+          try {
+            var served = String(JSON.parse(reply.responseText).model);
+            r._oroDetails += " served=" + served.slice(0, 80).replace(/[^A-Za-z0-9_.:\/-]/g, "_");
+          } catch (e) {
+            r._oroDetails += " served=unknown";
+          }
+        }
         // Belt-and-suspenders forensic trail for ORO-2191. The Python side
         // (SimulatorCompletion / ProxyClient.last_error) also captures the
         // body, but a message posted here survives even for callers that

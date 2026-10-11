@@ -30,7 +30,11 @@ function request(model, provider, catalogs, modelHeaders = {}, uri = "/inference
       calls.push({ uri, options });
       if (uri === "/_inference_grant") callback({ status: 204, headersOut: { "X-ORO-Run-ID": "test", ...(caller ? { "X-ORO-Caller": caller } : {}) } });
       else if (uri === "/_backend_models") callback({ status: 200, responseText: JSON.stringify(catalogs[options.args.split("=")[1]]), headersOut: modelHeaders });
-      else callback({ status: 200, responseText: "{}", headersOut: {} });
+      else {
+        // Upstream answers as if the first proxy-authored fallback took over.
+        const sent = JSON.parse(options.body || "{}");
+        callback({ status: 200, responseText: JSON.stringify({ model: sent.models ? sent.models[1] : sent.model }), headersOut: {} });
+      }
     },
   };
   proxy.validate(r);
@@ -127,5 +131,24 @@ test("strict schema routing is authored only for validator OpenRouter requests",
     assert.deepEqual(forwarded.provider, expected);
     assert.deepEqual(forwarded.response_format, format);
     assert.deepEqual(forwarded.reasoning, { effort: "medium" });
+  }
+});
+
+test("the validator's Reader fallback fails over across models; agents' Gemini calls do not", () => {
+  const gemini = "google/gemini-3.8-flash";
+  const small = "mistralai/mistral-small-2603";
+  const catalogs = { openrouter: { models: [gemini, small], aliases: {} } };
+  for (const [model, caller, expected] of [
+    [gemini, "validator", [gemini, "google/gemini-3.7-flash", "openai/gpt-6-sol"]],
+    [gemini, undefined, undefined],
+    [small, undefined, [small, "qwen/qwen3-30b-a3b-instruct-2507"]],
+  ]) {
+    shared.clear();
+    const { r, calls } = request(model, "openrouter", catalogs, {}, undefined, caller, { models: ["attacker/model"] });
+    assert.equal(r.status, 200);
+    const forwarded = JSON.parse(calls.at(-1).options.body);
+    assert.equal(forwarded.model, model);
+    assert.deepEqual(forwarded.models, expected);
+    assert.equal(proxy.details(r).includes(`served=${expected?.[1]}`), expected !== undefined);
   }
 });
