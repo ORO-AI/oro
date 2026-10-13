@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -452,3 +453,32 @@ def test_finalize_failure_cannot_change_legacy_evaluation(
 
     validator.finalize_environment_sessions(work, registry)
     validator.session_runtime.clear.assert_called_once_with(registry)
+
+
+def test_select_reference_case_reads_v8_task_rows(loaded_pack: LoadedPack) -> None:
+    """The preflight reads delivered rows through the shared reader, so a v8 pack (whose
+    task file opens with an encoding record) selects the same case as its v7 original."""
+    from oro_env_runtime.task_codec import V8_PACK_VERSION, encode_task_rows
+
+    v7 = environment_preflight._select_reference_case(loaded_pack)
+    tasks = loaded_pack.pack_dir / "data/tasks/private_tasks.jsonl"
+    rows = [json.loads(line) for line in tasks.read_text(encoding="utf-8").splitlines()]
+    tasks.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in encode_task_rows(rows, V8_PACK_VERSION)),
+        encoding="utf-8",
+    )
+    manifest_path = loaded_pack.pack_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pack_version"] = V8_PACK_VERSION
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    checksums = loaded_pack.pack_dir / "checksums.sha256"
+    changed = {"data/tasks/private_tasks.jsonl": tasks, "manifest.json": manifest_path}
+    checksums.write_text(
+        "".join(
+            f"{hashlib.sha256(changed[rel].read_bytes()).hexdigest() if rel in changed else digest}  {rel}\n"
+            for digest, rel in (line.split("  ", 1) for line in checksums.read_text().splitlines())
+        )
+    )
+
+    v8 = environment_preflight._select_reference_case(loaded_pack)
+    assert v8[0] == v7[0] and v8[2] == v7[2]

@@ -16,6 +16,7 @@ import httpx
 import pytest
 from oro_env_runtime.contracts import RUNTIME_CONTRACT
 from oro_env_runtime.task_codec import V8_PACK_VERSION, encode_task_rows
+from oro_env_runtime.schema import TaskSpec
 
 from tests.compat_fixture import delivery_archive
 from validator import env_pack_loader
@@ -119,12 +120,19 @@ def test_loads_local_v8_pack(tmp_path: Path) -> None:
     archive_path = tmp_path / "pack-v8.tar.gz"
     archive_path.write_bytes(artifact)
 
+    v7_path = tmp_path / "pack-v7.tar.gz"
+    v7_path.write_bytes(_archive_bytes())
+
     loaded = load_local_pack(archive_path, scratch_root=tmp_path / "scratch")
+    v7 = load_local_pack(v7_path, scratch_root=tmp_path / "scratch-v7")
     try:
         assert loaded.manifest["pack_version"] == V8_PACK_VERSION
-        assert loaded.task_ids == ["TF2-retrieval_recall-1"]
+        assert loaded.task_ids == v7.task_ids == ["TF2-retrieval_recall-1"]
+        # The shared grading records expand to the same task, gold set and grading.
+        assert [t.model_dump() for t in loaded.task_specs] == [t.model_dump() for t in v7.task_specs]
     finally:
         loaded.close()
+        v7.close()
 
 
 def test_local_pack_rejects_wrong_optional_digest(tmp_path: Path) -> None:
@@ -315,7 +323,7 @@ async def test_fetches_validates_and_loads_pack_without_leaking_auth(
     assert loaded.pack_dir.name == "epoch"
     assert loaded.manifest["pack_version"] == V8_PACK_VERSION
     assert loaded.task_ids == ["TF2-retrieval_recall-1"]
-    assert loaded.task_specs[0].family == "retrieval_recall"
+    assert loaded.task_specs[0].model_dump() == TaskSpec.model_validate(_task_row()["task"]).model_dump()
     assert requests[0].headers["X-Hotkey"] == "test-hotkey"
     assert requests[0].headers["Accept-Encoding"] == "identity"
     assert "X-Hotkey" not in requests[1].headers

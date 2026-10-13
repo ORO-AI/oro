@@ -15,7 +15,7 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from oro_env_runtime import loop
-from oro_env_runtime.pack import TASKS_PATH, read_jsonl
+from oro_env_runtime.pack import read_task_rows
 from oro_env_runtime.schema import CandidateRef
 
 from . import environment_preflight_agent
@@ -153,10 +153,11 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
     tasks = list(zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True))
     ordered = sorted(tasks, key=lambda t: bool(t[1].situation and t[1].situation.timeline))
     # The qualifying delivery's rows carry ``acceptance.acceptable_keys``; the
-    # runtime's task model does not, so read them from the delivered rows.
+    # runtime's task model does not, so read them from the delivered rows (v7 or v8,
+    # through the shared reader that expands v8's shared grading records).
     acceptable_keys = {
         row["task_id"]: (row["task"].get("acceptance") or {}).get("acceptable_keys")
-        for row in read_jsonl(loaded_pack.pack_dir / TASKS_PATH)
+        for row in read_task_rows(loaded_pack.pack_dir)
     }
     for task_id, task in ordered:
         probe = loaded_pack.open_session(task_id)
