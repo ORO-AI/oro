@@ -168,7 +168,7 @@ jobs:
         run: |
           digest=$(ls /tmp/digests/validator | head -1)
           docker run --rm --entrypoint .venv/bin/python ${{ env.IMAGE_PREFIX }}/validator@sha256:$digest \
-            -c "from importlib.metadata import version; import subnet.validator.main; assert version('oro-env-runtime') == '3.5.0'; from oro_env_runtime.contracts import RUNTIME_CONTRACT; assert RUNTIME_CONTRACT == 4; print('Validator module OK: oro-env-runtime 3.5.0, contract 4')"
+            -c "from importlib.metadata import version; import subnet.validator.main; assert version('oro-env-runtime') == '3.7.0'; from oro_env_runtime.contracts import RUNTIME_CONTRACT; assert RUNTIME_CONTRACT == 5; print('Validator module OK: oro-env-runtime 3.7.0, contract 5')"
 
       - name: Smoke test sandbox image
         run: |

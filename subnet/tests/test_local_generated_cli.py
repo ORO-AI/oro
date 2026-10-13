@@ -21,7 +21,7 @@ from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "6172495eaf14a2f0bff3b1f67b77133e1d059c49b62d2ffcdc24c7e9418f28bb"
+    "919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379"
 )
 
 
@@ -117,7 +117,7 @@ def test_bundled_pack_matches_released_runtime_contracts(tmp_path: Path) -> None
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "3.6.0"
+    assert version("oro-env-runtime") == "3.7.0"
 
     with tarfile.open(pack_path, "r:gz") as archive:
         archive.extractall(tmp_path, filter="data")
