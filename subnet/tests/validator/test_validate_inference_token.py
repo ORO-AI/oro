@@ -37,6 +37,12 @@ class TestValidationModelFor:
             Validator._validation_model_for("unknown_provider")
 
 
+_TOS_403 = (
+    '{"error":{"code":403,"message":"The request is prohibited due to a '
+    'violation of provider Terms Of Service."}}'
+)
+
+
 class TestValidateInferenceToken:
     def _mock_resp(self, status_code: int, json_body: dict | None = None):
         mock = MagicMock()
@@ -193,6 +199,22 @@ class TestValidateInferenceToken:
             )
         assert ok is False
         assert "insufficient balance" in reason
+
+    @pytest.mark.parametrize(
+        "body,reason",
+        [
+            (_TOS_403, "Inference account blocked by provider terms of service (HTTP 403)"),
+            ('{"error":{"code":403,"message":"Flagged by moderation"}}', ""),
+        ],
+    )
+    def test_403_fails_only_a_provider_terms_of_service_block(self, body, reason):
+        resp = self._mock_resp(403)
+        resp.text = body
+        with patch("validator.main.requests.post", return_value=resp):
+            ok, got = Validator._validate_inference_token(
+                "tok", "https://openrouter.ai/api/v1", "openai/gpt-oss-20b"
+            )
+        assert (ok, got) == (not reason, reason)
 
     def test_429_returns_valid(self):
         with patch("validator.main.requests.post", return_value=self._mock_resp(429)):

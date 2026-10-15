@@ -147,6 +147,7 @@ class _SessionState:
     terminal_reason: str | None = None
     quarantined_reason: str | None = None
     quarantined_outcome: str = "environment_error"
+    completion: SimulatorCompletion | None = None
     final_result: dict[str, Any] | None = None
     responses: dict[str, _CachedResponse] = field(default_factory=dict)
     call_ids: dict[str, str] = field(default_factory=dict)
@@ -247,6 +248,9 @@ class SessionRegistry:
         self._closed = False
         self._finalized = False
         self.key_exhausted = threading.Event()
+        # Set with key_exhausted when the miner's account allows no provider for a
+        # model the run needs; the run then fails as the miner's, not scored.
+        self.no_allowed_providers = threading.Event()
 
     def _default_simulator(self, state: _SessionState) -> UserSim:
         session = state.session
@@ -262,7 +266,9 @@ class SessionRegistry:
             inference_stats_file=self._inference_stats_file,
             episode_id=state.session_id,
             key_exhausted_event=self.key_exhausted,
+            no_allowed_providers_event=self.no_allowed_providers,
         )
+        state.completion = completion
         return UserSim(
             session.task,
             model=session.model_roles["user_simulator"],
@@ -535,11 +541,21 @@ class SessionRegistry:
         self, state: _SessionState, exc: Exception
     ) -> tuple[type[HarnessExecutionError], str]:
         if self.key_exhausted.is_set() or (
-            isinstance(exc, InferenceProviderError) and exc.key_exhausted
+            isinstance(exc, InferenceProviderError) and (exc.key_exhausted or exc.provider_blocked)
         ):
             self.key_exhausted.set()
             state.quarantined_outcome = "agent_error"
-            summary = "miner inference key exhausted"
+            summary = (
+                "miner inference account allows no provider"
+                if self.no_allowed_providers.is_set()
+                else "miner inference account blocked by provider terms of service"
+                if isinstance(exc, InferenceProviderError) and exc.provider_blocked
+                else "miner inference key exhausted"
+            )
+        elif state.completion is not None and state.completion.account_rate_limited:
+            # Only this episode is the miner's: the run continues and is scored.
+            state.quarantined_outcome = "agent_error"
+            summary = "miner inference account rate limited"
         elif isinstance(exc, InferenceProviderError):
             summary = f"upstream status={exc.status} body={exc.body!r}"
         else:
@@ -562,7 +578,10 @@ class SessionRegistry:
         cause: concurrent.futures.TimeoutError,
     ) -> NoReturn:
         error_type = HarnessTimeoutError
-        if self.key_exhausted.is_set():
+        # A turn that ran out of time retrying a miner-account throttle is the miner's too.
+        if self.key_exhausted.is_set() or (
+            state.completion is not None and state.completion.account_rate_limited
+        ):
             error_type, reason = self._simulator_error(state, cause)
         state.quarantined_reason = reason
         trace.record(
