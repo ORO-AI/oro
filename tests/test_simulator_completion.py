@@ -222,6 +222,10 @@ def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
         (403, '{"error":{"message":"Key limit exceeded (total limit)"}}', True),
         (403, "rate limit exceeded", False),
         (429, "Key limit exceeded (total limit)", False),
+        (402, '{"error":{"message":"Insufficient credits. Add more"}}', True),
+        (402, '{"error":{"message":"This request requires more credits, or fewer max_tokens."}}', True),
+        (402, '{"error":{"message":"This request would exceed your available credits given '
+              'your current in-flight requests."}}', False),
     ],
 )
 def test_key_exhaustion_is_narrowly_detected_and_not_retried(

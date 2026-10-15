@@ -61,8 +61,16 @@ class InferenceProviderError(RuntimeError):
 
     @property
     def key_exhausted(self) -> bool:
-        """OpenRouter's per-run key budget is spent, not a transient outage."""
-        return self.status == 403 and "key limit exceeded" in self.body.lower()
+        """The run key's limit (403) or the miner account's credit (402) is spent.
+
+        The in-flight reservation 402 clears as other calls finish, so it doesn't count.
+        """
+        body = self.body.lower()
+        if self.status == 403:
+            return "key limit exceeded" in body
+        return self.status == 402 and (
+            "insufficient credits" in body or "requires more credits" in body
+        )
 
 
 class SimulatorCompletion:

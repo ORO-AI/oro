@@ -279,7 +279,12 @@ def test_reader_requires_bound_decisions_client_for_chutes(reader_pack: LoadedPa
 
 
 @pytest.mark.parametrize("status,body,http_status", [
-    (403, "Key limit exceeded", 402), (400, "provider failure", 500),
+    (403, "Key limit exceeded", 402),
+    (402, '{"error":{"message":"Insufficient credits. Add more","code":402}}', 402),
+    (402, '{"error":{"message":"This request requires more credits, or fewer max_tokens."}}', 402),
+    (402, '{"error":{"message":"This request would exceed your available credits given '
+          'your current in-flight requests.","metadata":{"reason":"in_flight_budget_exhausted"}}}', 500),
+    (400, "provider failure", 500),
 ])
 def test_real_reader_classifies_budget_and_infrastructure_failures(
     reader_pack, monkeypatch, status, body, http_status,
