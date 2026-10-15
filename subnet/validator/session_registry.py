@@ -10,7 +10,6 @@ import json
 import threading
 import time
 from collections.abc import Callable, Coroutine
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 from uuid import uuid4
@@ -29,7 +28,11 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import InferenceProviderError, SimulatorCompletion
+from .simulator_completion import (
+    SIMULATOR_DEADLINE,
+    InferenceProviderError,
+    SimulatorCompletion,
+)
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
@@ -37,7 +40,6 @@ MAX_CALLS_PER_TURN = 16
 # per attempt, so a shorter budget would quarantine sessions the provider would
 # still answer.
 DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
-_SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
@@ -294,7 +296,7 @@ class SessionRegistry:
 
     def _run_simulator(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         async def bounded() -> Any:
-            remaining = max(0.0, _SIMULATOR_DEADLINE.get() - time.monotonic())
+            remaining = max(0.0, SIMULATOR_DEADLINE.get() - time.monotonic())
             return await asyncio.wait_for(coroutine, timeout=remaining)
 
         return asyncio.run(bounded())
@@ -650,11 +652,11 @@ class SessionRegistry:
 
         def bounded_work() -> Any:
             # All response/reword phases share the deadline, including queue time.
-            token = _SIMULATOR_DEADLINE.set(deadline)
+            token = SIMULATOR_DEADLINE.set(deadline)
             try:
                 return work(*args)
             finally:
-                _SIMULATOR_DEADLINE.reset(token)
+                SIMULATOR_DEADLINE.reset(token)
 
         future = self._executor.submit(bounded_work)
         try:

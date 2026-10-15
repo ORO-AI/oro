@@ -316,6 +316,48 @@ def test_real_reader_classifies_budget_and_infrastructure_failures(
         assert state.simulator._completion._client.post_verbose_async.call_count == 1
 
 
+def test_real_reader_retries_an_in_flight_credit_402(reader_pack, monkeypatch) -> None:
+    from src.agent.proxy_client import PostResult
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("validator.simulator_completion.asyncio.sleep", no_sleep)
+    in_flight = PostResult(data=None, error={"kind": "http", "status": 402, "body": (
+        '{"error":{"message":"This request would exceed your available credits given '
+        'your current in-flight requests."}}'
+    )})
+    decisions: list[str] = []
+
+    async def post(path, json_data):
+        if path == "/inference/alpha/decisions":
+            decisions.append(path)
+            if len(decisions) == 1:
+                return in_flight
+            answers = {key: {"noul": 0.1} for key in json_data["questions"]}
+            return PostResult(data={"model": JEV_MODEL, "answers": answers}, error=None)
+        return PostResult(data={"choices": [{
+            "message": {"content": '{"action":"clarify","content":"which size?"}'},
+            "finish_reason": "stop",
+        }]}, error=None)
+
+    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.session.task = reader_pack.task_specs[0]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose_async = post
+        response = registry.call(_call_envelope(
+            registry, action={"name": "message", "args": {"content": "A test question?"}},
+        ))
+        trace = registry.finalized_results()[0]["call_trace"][0]
+
+    assert len(decisions) >= 2
+    assert response["user_message"]["content"]
+    assert trace["error"] is None
+    assert not registry.key_exhausted.is_set()
+
+
 @pytest.mark.parametrize("exhausted,http_status", [(True, 402), (False, 504)])
 def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhausted, http_status):
     from validator.generated_evaluation import aggregate_results
