@@ -1327,6 +1327,57 @@ def test_timeout_quarantines_session_and_blocks_verdict(
         assert result["call_trace"][0]["latency_ms"] == timing["total"]
 
 
+def _group_envelope(registry: SessionRegistry, size: int) -> dict:
+    envelope = {
+        **_call_envelope(registry),
+        "calls": [
+            {"call_id": f"tool-{i}", "action": {"name": "inspect_cart", "args": {}}}
+            for i in range(size)
+        ],
+    }
+    envelope.pop("action")
+    return envelope
+
+
+def _slow_group(monkeypatch: pytest.MonkeyPatch, session, seconds: float) -> None:
+    original = session.step_parallel
+
+    def slow(actions):
+        time.sleep(seconds)
+        return original(actions)
+
+    monkeypatch.setattr(session, "step_parallel", slow)
+
+
+def test_grouped_call_gets_the_tool_timeout_per_action(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grouped actions run one after another: 4 actions get 4 per-action budgets."""
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
+        _start(registry)
+        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.25)
+
+        response = registry.call(_group_envelope(registry, 4))
+
+    assert len(response["calls"]) == 4
+
+
+def test_grouped_call_budget_is_capped(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("validator.session_registry.MAX_TOOL_CALL_TIMEOUT_S", 0.15)
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
+        _start(registry)
+        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.4)
+
+        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
+            registry.call(_group_envelope(registry, 16))
+        result = registry.finalized_results()[0]
+
+    assert result["outcome"] == "environment_error"
+    assert result["error_detail"] == "tool call exceeded 0.150s"
+
+
 def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) -> None:
     _start(registry)
     session = registry._sessions["session-1"].session
