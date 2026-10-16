@@ -10,7 +10,6 @@ Error Handling:
 """
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -173,12 +172,6 @@ class BackendError(Exception):
 # parallel uploader in _upload_logs cache-warm.
 _S3_SESSION = requests.Session()
 
-# Upper bound on the total supplementary-assignment share accepted from the
-# Backend. Real assignments reserve a small slice; a larger total signals a bad
-# payload, so the whole overlay is rejected (fail safe to the base vector).
-_MAX_OVERLAY_SHARE = 0.5
-
-
 @dataclass(frozen=True)
 class WeightSalt:
     """One epoch's weight guidance from the Backend, fetched in a single call.
@@ -187,7 +180,6 @@ class WeightSalt:
     None means the response itself was unavailable or malformed.
     """
 
-    overlay: dict[int, float]
     epoch_standings: EpochStandings | None
     eligible: bool | None = None
 
@@ -570,19 +562,15 @@ class BackendClient:
         )
 
     def fetch_weight_salt(self) -> WeightSalt:
-        """Fetch this epoch's overlay + epoch-pinned standings in ONE call.
+        """Fetch this epoch's epoch-pinned standings in ONE call.
 
-        Participation-gated (signed client). One request so both fields come
-        from the same epoch. On ANY fetch/parse error → empty overlay + None
-        standings, i.e. a miss: the caller retains its last-good on-chain weights
-        during the grace period, then tries the post-embargo public top. A
-        malformed payload must never raise past here or it would break Yuma
-        consensus.
+        Participation-gated (signed client). One request so the standings come
+        from the current epoch. On ANY fetch/parse error → None standings, i.e.
+        a miss: the caller retains its last-good on-chain weights during the
+        grace period, then tries the post-embargo public top. A malformed
+        payload must never raise past here or it would break Yuma consensus.
 
-        The overlay is the trust boundary: every share must be finite and in
-        [0, 1] and the total <= MAX_OVERLAY_SHARE, else the *whole* overlay is
-        rejected (keeps every honest validator on the same miss handling). The
-        pinned standings feed ``build_metagraph_weight_vector``, which already
+        The pinned standings feed ``build_metagraph_weight_vector``, which
         tolerates arbitrary finisher input; an unusable value degrades to None
         (a miss).
         """
@@ -594,9 +582,8 @@ class BackendClient:
             )
         except (BackendError, ValueError, TypeError, AttributeError) as e:
             logging.warning(f"Weight salt unavailable (miss; retaining last-good weights): {e}")
-            return WeightSalt(overlay={}, epoch_standings=None)
+            return WeightSalt(epoch_standings=None)
 
-        overlay = self._parse_overlay(resp)
         standings = getattr(resp, "epoch_standings", None)
         if standings is UNSET:
             standings = None
@@ -604,35 +591,9 @@ class BackendClient:
         if not isinstance(eligible, bool):
             eligible = None
         return WeightSalt(
-            overlay=overlay,
             epoch_standings=standings,
             eligible=eligible,
         )
-
-    @staticmethod
-    def _parse_overlay(resp: Any) -> dict[int, float]:
-        """Validate + parse the response's ``weight_overlay`` → uid→share, or {}."""
-        try:
-            overlay = getattr(resp, "weight_overlay", None)
-            if overlay is None or overlay is UNSET:
-                return {}
-            parsed = {
-                int(uid): float(share) for uid, share in overlay.to_dict().items()
-            }
-        except (ValueError, TypeError, AttributeError) as e:
-            logging.warning(f"Weight overlay unparseable, using base vector: {e}")
-            return {}
-
-        if not all(
-            math.isfinite(s) and 0.0 <= s <= 1.0 for s in parsed.values()
-        ) or sum(parsed.values()) > _MAX_OVERLAY_SHARE:
-            logging.warning(
-                "Weight overlay had out-of-range shares (total=%s); using base "
-                "vector",
-                sum(parsed.values()),
-            )
-            return {}
-        return parsed
 
     def upload_to_s3(self, presign: PresignUploadResponse, data: bytes) -> None:
         """Upload data to S3 using presigned URL.
