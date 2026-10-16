@@ -295,6 +295,41 @@ class TestBackendClientFetchWeightSalt:
     def _client(self, mock_wallet):
         return BackendClient("https://api.example.com", mock_wallet)
 
+    def _resp(self, *, eligible=True, standings):
+        from oro_sdk.models.weight_salt_response import WeightSaltResponse
+
+        parsed = WeightSaltResponse.from_dict(
+            {
+                "active": True,
+                "eligible": eligible,
+                "epoch_index": 1,
+                "epoch_standings": standings,
+            }
+        )
+        return _create_response(200, parsed)
+
+    def test_fetch_returns_standings_and_eligible(self, mock_wallet):
+        # The success path: a well-formed SDK response flows through to the
+        # WeightSalt with its epoch-pinned standings and the eligibility flag.
+        client = self._client(mock_wallet)
+        with patch(
+            "validator.backend_client.get_weight_salt.sync_detailed",
+            return_value=self._resp(
+                eligible=True,
+                standings={
+                    "top_hotkey": "5HK1",
+                    "t_burn": 0.75,
+                    "finishers": [],
+                },
+            ),
+        ):
+            salt = client.fetch_weight_salt()
+
+        assert salt.eligible is True
+        assert salt.epoch_standings is not None
+        assert salt.epoch_standings.top_hotkey == "5HK1"
+        assert salt.epoch_standings.t_burn == 0.75
+
     def test_backend_error_returns_empty_not_raises(self, mock_wallet):
         # Fetch failure must fail safe (never raise → the caller retains
         # its last-good on-chain weights rather than skipping the tick).
