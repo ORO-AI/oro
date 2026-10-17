@@ -110,6 +110,18 @@ class TestOutputWatcher:
         assert records[0].status is SandboxProblemStatus.SUCCESS
 
 
+def test_watcher_waits_for_a_partly_written_line(tmp_path, output_path):
+    _write(tmp_path / "full.jsonl", problem_id="p1")
+    line = (tmp_path / "full.jsonl").read_text()
+    watcher = OutputWatcher(output_path)
+
+    output_path.write_text(line[:20])
+    assert list(watcher.read_new()) == []
+    with open(output_path, "a") as f:
+        f.write(line[20:])
+    assert [r.problem_id for r in watcher.read_new()] == ["p1"]
+
+
 def test_watcher_skips_a_non_regular_output(tmp_path):
     target = tmp_path / "elsewhere.jsonl"
     _write(target, problem_id="p1")

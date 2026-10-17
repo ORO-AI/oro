@@ -70,15 +70,15 @@ class OutputWatcher:
             return
 
         try:
-            with open_regular_file(self.output_file) as f:
+            with open_regular_file(self.output_file, MAX_SANDBOX_OUTPUT_BYTES) as f:
                 file_size = os.fstat(f.fileno()).st_size
-                if file_size > MAX_SANDBOX_OUTPUT_BYTES:
-                    raise ValueError("output exceeds size limit")
                 if file_size < self._file_position:
                     logging.info("OutputWatcher: file truncated, resetting position")
                     self._file_position = 0
                 f.seek(self._file_position)
                 new_bytes = f.read(file_size - self._file_position)
+                # Leave a partly written last line for the next poll.
+                new_bytes = new_bytes[: new_bytes.rfind(b"\n") + 1]
                 self._file_position += len(new_bytes)
         except (OSError, ValueError) as e:
             logging.warning(f"OutputWatcher: read failed, retry next poll: {e}")

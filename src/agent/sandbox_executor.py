@@ -2,7 +2,6 @@
 
 import importlib.util
 import hashlib
-import io
 import json
 import logging
 import math
@@ -237,8 +236,8 @@ def _merge_model_inference_counters(total: dict, entry: dict) -> None:
 MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024
 
 
-def open_regular_file(path: str | os.PathLike) -> BinaryIO:
-    """Open a sandbox output file as a plain regular file, without blocking."""
+def open_regular_file(path: str | os.PathLike, max_bytes: int) -> BinaryIO:
+    """Open a sandbox output file of at most ``max_bytes`` without blocking."""
     parent_fd = os.open(
         os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     )
@@ -255,14 +254,15 @@ def open_regular_file(path: str | os.PathLike) -> BinaryIO:
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         source.close()
         raise ValueError(f"{path} must be a regular file with one link")
+    if metadata.st_size > max_bytes:
+        source.close()
+        raise ValueError(f"{path} exceeds {max_bytes} bytes")
     return source
 
 
 def read_regular_file(path: str | os.PathLike, max_bytes: int) -> bytes:
     """Read a sandbox output file, bounded to ``max_bytes``."""
-    with open_regular_file(path) as source:
-        if os.fstat(source.fileno()).st_size > max_bytes:
-            raise ValueError(f"{path} exceeds {max_bytes} bytes")
+    with open_regular_file(path, max_bytes) as source:
         content = source.read(max_bytes + 1)
     if len(content) > max_bytes:
         raise ValueError(f"{path} exceeds {max_bytes} bytes")
@@ -282,8 +282,7 @@ def read_inference_stats(
     paths = [path] if isinstance(path, str) else path
     for source, stats_path in enumerate(paths):
         try:
-            content = read_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES)
-            with io.BytesIO(content) as f:
+            with open_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
