@@ -10,7 +10,6 @@ while still reading the source to EOF, so the child never blocks on a full pipe.
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 import threading
 import time
@@ -31,56 +30,39 @@ class SandboxResourceExceeded(RunStoppedEarly):
     """The sandbox wrote past its per-evaluation disk budget and was killed."""
 
 
-def dir_usage_for_uid(path: Path, uid: int) -> tuple[int, int]:
-    """Return (allocated bytes, file count) of *uid*-owned files under *path*.
-
-    Counts allocated blocks (``st_blocks``), so a sparse file contributes only
-    the disk it actually uses. Only files owned by the sandbox uid are counted,
-    so validator-written inputs and capture logs don't inflate the total. A
-    directory that disappears mid-walk (cleanup) is skipped, not raised.
-    """
-    total_bytes = 0
-    count = 0
-    stack = [path]
-    while stack:
-        current = stack.pop()
-        try:
-            entries = list(os.scandir(current))
-        except OSError:
-            continue
-        for entry in entries:
-            try:
-                info = entry.stat(follow_symlinks=False)
-            except OSError:
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                stack.append(Path(entry.path))
-            elif info.st_uid == uid and stat.S_ISREG(info.st_mode):
-                total_bytes += info.st_blocks * 512
-                count += 1
-    return total_bytes, count
+def fs_free(path: Path) -> tuple[int, int]:
+    """Return (free bytes, free inodes) of the filesystem holding *path*."""
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize, st.f_favail
 
 
-def make_eval_dir_guard(
-    path: Path, *, uid: int, max_bytes: int, max_files: int, interval: float = 1.0
+def make_fs_usage_guard(
+    path: Path, *, max_bytes: int, max_inodes: int
 ) -> Callable[[], str | None]:
-    """Build a guard that reports a reason once *uid* writes past the budget.
+    """Build a guard that reports a reason once the run consumes too much disk.
 
-    The walk runs at most once per *interval* seconds, so polling the guard
-    frequently stays cheap on a normal run.
+    It compares the free space and free inodes of the filesystem under *path*
+    against a baseline taken now (before the sandbox starts), so it catches disk
+    used through any path the sandbox writes — including files it unlinks while
+    still writing to them, directory floods, and special files, none of which a
+    name-based directory walk would see. ``statvfs`` is a single syscall, so the
+    caller can poll this every loop. The measure is filesystem-wide, so other
+    writers to the same filesystem during the run (notably the validator's own
+    capped capture logs) count toward the budget; the budget leaves room for
+    them and still sits far below a host's free space.
     """
-    state = {"next_check": 0.0}
+    base_bytes, base_inodes = fs_free(path)
 
     def guard() -> str | None:
-        now = time.monotonic()
-        if now < state["next_check"]:
-            return None
-        state["next_check"] = now + interval
-        used_bytes, files = dir_usage_for_uid(path, uid)
+        free_bytes, free_inodes = fs_free(path)
+        used_bytes = base_bytes - free_bytes
+        used_inodes = base_inodes - free_inodes
         if used_bytes > max_bytes:
-            return f"sandbox wrote {used_bytes} bytes, over the {max_bytes} limit"
-        if files > max_files:
-            return f"sandbox created {files} files, over the {max_files} limit"
+            return (
+                f"run consumed {used_bytes} bytes of disk, over the {max_bytes} limit"
+            )
+        if used_inodes > max_inodes:
+            return f"run consumed {used_inodes} inodes, over the {max_inodes} limit"
         return None
 
     return guard
@@ -140,6 +122,7 @@ def read_text_lossy(path: Path, max_bytes: int) -> str:
 def _open_capture(path: str, flags: int) -> int:
     # Capture only into a plain file that only the validator can read or write.
     return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+
 
 
 def run_capped(
@@ -232,4 +215,8 @@ def run_capped(
         proc.kill()
         proc.wait()
         raise
+    if size_guard is not None:
+        reason = size_guard()
+        if reason is not None:
+            raise SandboxResourceExceeded(reason)
     return proc.returncode

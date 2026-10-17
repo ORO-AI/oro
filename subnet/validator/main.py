@@ -35,7 +35,7 @@ from .backend_client import BackendClient, BackendError
 from .bounded_io import (
     RunStoppedEarly,
     SandboxResourceExceeded,
-    make_eval_dir_guard,
+    make_fs_usage_guard,
     read_text_lossy,
     run_capped,
 )
@@ -76,7 +76,7 @@ from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
 from .session_registry import SessionRegistry
 from .session_service import SessionRuntime, SessionServer
-from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE, SANDBOX_UID
+from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
 # Auto-update configuration
 WATCHTOWER_URL = os.environ.get("ORO_WATCHTOWER_URL", "http://watchtower:8080")
@@ -205,12 +205,14 @@ def _claim_environment_binding(
     return pack_sha256
 
 
-# Per-evaluation disk budget for files the sandbox (uid 1000) writes. Far above a
-# normal run (output.jsonl + small sidecars) and far below a validator host's free
-# space; exceeding either fails that one evaluation. Sparse files count only their
-# allocated blocks, so they trip nothing until they consume real disk.
-SANDBOX_EVAL_DIR_MAX_BYTES = 1024 * 1024 * 1024
-SANDBOX_EVAL_DIR_MAX_FILES = 10_000
+# Per-evaluation disk budget. While the sandbox runs, the validator watches the free
+# space and free inodes of the evaluation filesystem; if the run consumes more than
+# this much of either, the run is killed and that evaluation fails. The byte budget
+# leaves room for the validator's own capped capture logs written during the run, and
+# both sit far below a validator host's free space. Sparse files consume no real
+# blocks, so they count toward nothing.
+SANDBOX_RUN_MAX_DISK_BYTES = 2 * 1024 * 1024 * 1024
+SANDBOX_RUN_MAX_INODES = 100_000
 
 
 class Validator:
@@ -581,11 +583,10 @@ class Validator:
         SANDBOX_ACTIVE.inc()
         start_time = time.time()
         try:
-            size_guard = make_eval_dir_guard(
+            size_guard = make_fs_usage_guard(
                 eval_dir,
-                uid=SANDBOX_UID,
-                max_bytes=SANDBOX_EVAL_DIR_MAX_BYTES,
-                max_files=SANDBOX_EVAL_DIR_MAX_FILES,
+                max_bytes=SANDBOX_RUN_MAX_DISK_BYTES,
+                max_inodes=SANDBOX_RUN_MAX_INODES,
             )
             return self._run_sandbox_inner(
                 cmd=cmd,

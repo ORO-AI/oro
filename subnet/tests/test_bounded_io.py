@@ -20,7 +20,12 @@ import time
 
 import pytest
 
-from validator.bounded_io import RunStoppedEarly, drain_capped, read_text_lossy, run_capped
+from validator.bounded_io import (
+    RunStoppedEarly,
+    drain_capped,
+    read_text_lossy,
+    run_capped,
+)
 
 
 def test_under_cap_writes_everything_verbatim():
@@ -53,7 +58,11 @@ def test_run_capped_bounds_a_runaway_stdout_to_disk(tmp_path):
     out_path = tmp_path / "stdout.log"
     err_path = tmp_path / "stderr.log"
     # Agent that spews ~5 MB of stdout; cap at 4 KB.
-    cmd = [sys.executable, "-c", "import sys; sys.stdout.write('A' * (5 * 1024 * 1024))"]
+    cmd = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write('A' * (5 * 1024 * 1024))",
+    ]
 
     returncode = run_capped(
         cmd,
@@ -195,79 +204,43 @@ def test_run_capped_creates_validator_only_capture_files(tmp_path):
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
 
 
-def _write_owned(path, name, size, uid):
-    import os as _os
+def test_fs_usage_guard_trips_on_consumed_space(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
 
-    f = path / name
-    f.write_bytes(b"\0" * size)
-    # chown may require privilege; skip the test when it isn't available.
-    try:
-        _os.chown(f, uid, -1)
-    except (PermissionError, OSError):
-        pass
-    return f
-
-
-def test_dir_usage_counts_only_the_sandbox_uid(tmp_path):
-    from validator.bounded_io import dir_usage_for_uid
-
-    me = os.getuid()
-    (tmp_path / "mine.jsonl").write_bytes(b"x" * 8192)
-    other = tmp_path / "root_owned.log"
-    other.write_bytes(b"y" * 8192)
-    # Count for a uid that owns nothing here: zero.
-    assert dir_usage_for_uid(tmp_path, me + 12345) == (0, 0)
-    used, count = dir_usage_for_uid(tmp_path, me)
-    assert count == 2  # both files are owned by the test uid
-    assert used >= 16384
-
-
-def test_dir_usage_ignores_sparse_holes(tmp_path):
-    from validator.bounded_io import dir_usage_for_uid
-
-    sparse = tmp_path / "sparse.bin"
-    with open(sparse, "wb") as f:
-        f.truncate(1 << 30)  # 1 GiB logical, ~0 allocated blocks
-    used, count = dir_usage_for_uid(tmp_path, os.getuid())
-    assert count == 1
-    assert used < 1 << 20  # allocated blocks, not the 1 GiB logical size
-
-
-def test_guard_trips_on_bytes_then_file_count(tmp_path):
-    from validator.bounded_io import make_eval_dir_guard
-
-    uid = os.getuid()
-    guard = make_eval_dir_guard(
-        tmp_path, uid=uid, max_bytes=10_000, max_files=3, interval=0.0
-    )
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 20, max_inodes=1 << 30)
     assert guard() is None
-    (tmp_path / "big").write_bytes(b"x" * 20_000)
+    # Consume more than the byte budget on this filesystem.
+    with open(tmp_path / "big", "wb") as f:
+        f.write(b"x" * (3 << 20))
+        f.flush()
+        os.fsync(f.fileno())
     assert "bytes" in (guard() or "")
 
-    import shutil
 
-    shutil.rmtree(tmp_path)
-    tmp_path.mkdir()
-    guard = make_eval_dir_guard(
-        tmp_path, uid=uid, max_bytes=1 << 30, max_files=2, interval=0.0
-    )
-    for i in range(4):
-        (tmp_path / f"f{i}").write_bytes(b"x")
-    assert "files" in (guard() or "")
+def test_fs_usage_guard_trips_on_consumed_inodes(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 40, max_inodes=50)
+    for i in range(200):
+        (tmp_path / f"f{i}").write_bytes(b"")
+    assert "inodes" in (guard() or "")
 
 
-def test_guard_rate_limits_its_walk(tmp_path):
-    from validator.bounded_io import make_eval_dir_guard
+def test_fs_usage_guard_ignores_space_freed_again(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
 
-    guard = make_eval_dir_guard(
-        tmp_path, uid=os.getuid(), max_bytes=1, max_files=1, interval=3600.0
-    )
-    (tmp_path / "over").write_bytes(b"xx")
-    first = guard()  # first call walks and trips
-    assert first is not None
-    (tmp_path / "over").unlink()
-    # within the interval, the guard doesn't walk again, so no new verdict
-    assert guard() is None
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 20, max_inodes=1 << 30)
+    f = tmp_path / "temp"
+    with open(f, "wb") as fh:
+        fh.write(b"x" * (3 << 20))
+        fh.flush()
+        os.fsync(fh.fileno())
+    assert guard() is not None
+    f.unlink()
+    import time as _t
+
+    _t.sleep(0.1)
+    assert guard() is None  # space recovered, no longer over budget
 
 
 def test_run_capped_kills_a_sandbox_over_its_disk_budget(tmp_path):
