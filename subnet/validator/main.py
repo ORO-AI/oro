@@ -306,7 +306,10 @@ class Validator:
             "--session-tool-timeout",
             type=float,
             default=float(os.environ.get("ORO_SESSION_TOOL_TIMEOUT", "10")),
-            help="Per-action timeout before quarantine (env: ORO_SESSION_TOOL_TIMEOUT).",
+            help=(
+                "Per-action timeout before quarantine; a grouped call gets it per action, "
+                "up to 30s (env: ORO_SESSION_TOOL_TIMEOUT)."
+            ),
         )
         parser.add_argument(
             "--session-simulator-timeout",

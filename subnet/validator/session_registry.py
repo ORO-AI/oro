@@ -36,6 +36,9 @@ from .simulator_completion import (
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
+# The tool timeout is per action. A grouped call runs its actions one after
+# another, so its budget scales with the group, up to this cap.
+MAX_TOOL_CALL_TIMEOUT_S = 30.0
 # The simulator is a provider call, not a local tool. env.openrouter allows 60s
 # per attempt, so a shorter budget would quarantine sessions the provider would
 # still answer.
@@ -608,9 +611,13 @@ class SessionRegistry:
                 trace.search_retries = retries
                 return step(step_arg)
 
+        timeout_s = min(
+            self.tool_timeout_s * len(actions),
+            max(self.tool_timeout_s, MAX_TOOL_CALL_TIMEOUT_S),
+        )
         future = self._executor.submit(execute)
         try:
-            result = future.result(timeout=self.tool_timeout_s)
+            result = future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError as exc:
             trace.tool_latency_ms = _elapsed_ms(started)
             future.cancel()
@@ -618,7 +625,7 @@ class SessionRegistry:
                 session_id,
                 state,
                 trace,
-                reason=f"tool call exceeded {self.tool_timeout_s:.3f}s",
+                reason=f"tool call exceeded {timeout_s:.3f}s",
                 snapshot=snapshot,
                 cause=exc,
             )
