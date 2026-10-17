@@ -11,6 +11,8 @@ stdlib and must not pull in the validator conftest's heavy import chain.
 from __future__ import annotations
 
 import io
+import os
+import stat
 import subprocess
 import sys
 import threading
@@ -174,3 +176,20 @@ def test_run_capped_requires_plain_capture_files(tmp_path):
         )
 
     assert target.read_text() == "keep"
+
+
+def test_run_capped_creates_validator_only_capture_files(tmp_path):
+    previous = os.umask(0)
+    try:
+        run_capped(
+            [sys.executable, "-c", "print('x')"],
+            stdout_path=tmp_path / "o.log",
+            stderr_path=tmp_path / "e.log",
+            max_bytes=4096,
+            timeout=30,
+        )
+    finally:
+        os.umask(previous)
+
+    for name in ("o.log", "e.log"):
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600

@@ -78,8 +78,8 @@ def read_text_lossy(path: Path, max_bytes: int) -> str:
 
 
 def _open_capture(path: str, flags: int) -> int:
-    # Capture only into a plain new or existing file.
-    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+    # Capture only into a plain file that only the validator can read or write.
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
 
 
 def run_capped(

@@ -264,7 +264,10 @@ def _write_sandbox_inputs(
 def _read_sandbox_results(output_path: Path | None) -> list[dict[str, Any]]:
     if output_path is None or not output_path.exists():
         return []
-    content = read_regular_file(output_path, MAX_SANDBOX_OUTPUT_BYTES)
+    try:
+        content = read_regular_file(output_path, MAX_SANDBOX_OUTPUT_BYTES)
+    except (OSError, ValueError):
+        return []
     return [
         json.loads(line)
         for line in content.decode("utf-8").splitlines()

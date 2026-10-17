@@ -323,3 +323,10 @@ def test_read_inference_stats_skips_a_non_regular_stats_file(tmp_path):
     stats = tmp_path / "inference_stats.jsonl"
     stats.symlink_to(target)
     assert read_inference_stats(str(stats)) == {}
+
+
+def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
+    stats = tmp_path / "inference_stats.jsonl"
+    good = json.dumps({"problem_id": "p1", "inference_total": 2}).encode()
+    stats.write_bytes(b"\xff\xfe broken\n" + good + b"\n")
+    assert read_inference_stats(str(stats))["p1"]["inference_total"] == 2

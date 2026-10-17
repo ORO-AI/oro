@@ -289,7 +289,7 @@ def read_inference_stats(
                         continue
                     try:
                         entry = json.loads(line)
-                    except json.JSONDecodeError:
+                    except ValueError:  # malformed JSON or invalid UTF-8
                         continue
                     if not isinstance(entry, dict):
                         continue
