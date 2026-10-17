@@ -13,7 +13,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from uuid import UUID
 
 import requests
@@ -32,7 +32,13 @@ from src.agent.sandbox_executor import (
 )
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
-from .bounded_io import RunStoppedEarly, read_text_lossy, run_capped
+from .bounded_io import (
+    RunStoppedEarly,
+    SandboxResourceExceeded,
+    make_eval_dir_guard,
+    read_text_lossy,
+    run_capped,
+)
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -70,7 +76,7 @@ from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
 from .session_registry import SessionRegistry
 from .session_service import SessionRuntime, SessionServer
-from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
+from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE, SANDBOX_UID
 
 # Auto-update configuration
 WATCHTOWER_URL = os.environ.get("ORO_WATCHTOWER_URL", "http://watchtower:8080")
@@ -197,6 +203,14 @@ def _claim_environment_binding(
     ):
         raise ValueError("claim field env_pack_sha256 must be 64 lowercase hex chars")
     return pack_sha256
+
+
+# Per-evaluation disk budget for files the sandbox (uid 1000) writes. Far above a
+# normal run (output.jsonl + small sidecars) and far below a validator host's free
+# space; exceeding either fails that one evaluation. Sparse files count only their
+# allocated blocks, so they trip nothing until they consume real disk.
+SANDBOX_EVAL_DIR_MAX_BYTES = 1024 * 1024 * 1024
+SANDBOX_EVAL_DIR_MAX_FILES = 10_000
 
 
 class Validator:
@@ -567,6 +581,12 @@ class Validator:
         SANDBOX_ACTIVE.inc()
         start_time = time.time()
         try:
+            size_guard = make_eval_dir_guard(
+                eval_dir,
+                uid=SANDBOX_UID,
+                max_bytes=SANDBOX_EVAL_DIR_MAX_BYTES,
+                max_files=SANDBOX_EVAL_DIR_MAX_FILES,
+            )
             return self._run_sandbox_inner(
                 cmd=cmd,
                 stdout_log=stdout_log,
@@ -575,6 +595,7 @@ class Validator:
                 eval_run_id=eval_run_id,
                 metadata=metadata,
                 stop_event=stop_event,
+                size_guard=size_guard,
             )
         finally:
             duration = time.time() - start_time
@@ -592,6 +613,7 @@ class Validator:
         eval_run_id: str,
         metadata: SandboxMetadata,
         stop_event: threading.Event | None = None,
+        size_guard: Callable[[], str | None] | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
             # Capture through a byte cap so a runaway agent's stdout/stderr can't
@@ -604,6 +626,7 @@ class Validator:
                 max_bytes=self.config.sandbox_log_max_bytes,
                 timeout=self.config.sandbox_timeout,
                 stop_event=stop_event,
+                size_guard=size_guard,
             )
             metadata["exit_code"] = returncode
 
@@ -660,6 +683,14 @@ class Validator:
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
 
+        except SandboxResourceExceeded as e:
+            metadata["exit_code"] = -1
+            metadata["stderr_tail"] = str(e)[-500:]
+            logging.error(
+                f"Sandbox exceeded its disk budget for eval_run {eval_run_id}: {e}"
+            )
+            self._kill_sandbox_container(eval_run_id)
+            return None, metadata
         except RunStoppedEarly:
             metadata["exit_code"] = -1
             self._kill_sandbox_container(eval_run_id)

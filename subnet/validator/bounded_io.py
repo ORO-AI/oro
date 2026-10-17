@@ -10,11 +10,12 @@ while still reading the source to EOF, so the child never blocks on a full pipe.
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Callable
 
 from src.agent.sandbox_executor import read_regular_file
 
@@ -24,6 +25,65 @@ _MARKER_ROOM = 1024  # drain_capped's truncation marker follows the capped bytes
 
 class RunStoppedEarly(RuntimeError):
     """The caller cancelled a running sandbox after a terminal run condition."""
+
+
+class SandboxResourceExceeded(RunStoppedEarly):
+    """The sandbox wrote past its per-evaluation disk budget and was killed."""
+
+
+def dir_usage_for_uid(path: Path, uid: int) -> tuple[int, int]:
+    """Return (allocated bytes, file count) of *uid*-owned files under *path*.
+
+    Counts allocated blocks (``st_blocks``), so a sparse file contributes only
+    the disk it actually uses. Only files owned by the sandbox uid are counted,
+    so validator-written inputs and capture logs don't inflate the total. A
+    directory that disappears mid-walk (cleanup) is skipped, not raised.
+    """
+    total_bytes = 0
+    count = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                stack.append(Path(entry.path))
+            elif info.st_uid == uid and stat.S_ISREG(info.st_mode):
+                total_bytes += info.st_blocks * 512
+                count += 1
+    return total_bytes, count
+
+
+def make_eval_dir_guard(
+    path: Path, *, uid: int, max_bytes: int, max_files: int, interval: float = 1.0
+) -> Callable[[], str | None]:
+    """Build a guard that reports a reason once *uid* writes past the budget.
+
+    The walk runs at most once per *interval* seconds, so polling the guard
+    frequently stays cheap on a normal run.
+    """
+    state = {"next_check": 0.0}
+
+    def guard() -> str | None:
+        now = time.monotonic()
+        if now < state["next_check"]:
+            return None
+        state["next_check"] = now + interval
+        used_bytes, files = dir_usage_for_uid(path, uid)
+        if used_bytes > max_bytes:
+            return f"sandbox wrote {used_bytes} bytes, over the {max_bytes} limit"
+        if files > max_files:
+            return f"sandbox created {files} files, over the {max_files} limit"
+        return None
+
+    return guard
 
 
 def drain_capped(
@@ -91,6 +151,7 @@ def run_capped(
     timeout: float,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
     stop_event: threading.Event | None = None,
+    size_guard: Callable[[], str | None] | None = None,
 ) -> int:
     """Run ``cmd``, capturing stdout/stderr to files each capped at ``max_bytes``.
 
@@ -123,19 +184,33 @@ def run_capped(
             for t in readers:
                 t.start()
             try:
-                if stop_event is None:
+                if stop_event is None and size_guard is None:
                     proc.wait(timeout=timeout)
                 else:
+
+                    def _stop(exc: BaseException) -> None:
+                        proc.kill()
+                        proc.wait()
+                        raise exc
+
                     deadline = time.monotonic() + timeout
                     while proc.poll() is None:
-                        if stop_event.is_set():
-                            proc.kill()
-                            proc.wait()
-                            raise RunStoppedEarly("sandbox stopped after terminal run condition")
+                        if stop_event is not None and stop_event.is_set():
+                            _stop(
+                                RunStoppedEarly(
+                                    "sandbox stopped after terminal run condition"
+                                )
+                            )
+                        reason = size_guard() if size_guard is not None else None
+                        if reason is not None:
+                            _stop(SandboxResourceExceeded(reason))
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise subprocess.TimeoutExpired(cmd, timeout)
-                        stop_event.wait(min(0.25, remaining))
+                        if stop_event is not None:
+                            stop_event.wait(min(0.25, remaining))
+                        else:
+                            time.sleep(min(0.25, remaining))
             except subprocess.TimeoutExpired:
                 # Kill BEFORE joining: the readers only reach EOF once the child
                 # exits, so joining a live child would deadlock.

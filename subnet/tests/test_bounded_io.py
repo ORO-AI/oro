@@ -193,3 +193,102 @@ def test_run_capped_creates_validator_only_capture_files(tmp_path):
 
     for name in ("o.log", "e.log"):
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
+
+
+def _write_owned(path, name, size, uid):
+    import os as _os
+
+    f = path / name
+    f.write_bytes(b"\0" * size)
+    # chown may require privilege; skip the test when it isn't available.
+    try:
+        _os.chown(f, uid, -1)
+    except (PermissionError, OSError):
+        pass
+    return f
+
+
+def test_dir_usage_counts_only_the_sandbox_uid(tmp_path):
+    from validator.bounded_io import dir_usage_for_uid
+
+    me = os.getuid()
+    (tmp_path / "mine.jsonl").write_bytes(b"x" * 8192)
+    other = tmp_path / "root_owned.log"
+    other.write_bytes(b"y" * 8192)
+    # Count for a uid that owns nothing here: zero.
+    assert dir_usage_for_uid(tmp_path, me + 12345) == (0, 0)
+    used, count = dir_usage_for_uid(tmp_path, me)
+    assert count == 2  # both files are owned by the test uid
+    assert used >= 16384
+
+
+def test_dir_usage_ignores_sparse_holes(tmp_path):
+    from validator.bounded_io import dir_usage_for_uid
+
+    sparse = tmp_path / "sparse.bin"
+    with open(sparse, "wb") as f:
+        f.truncate(1 << 30)  # 1 GiB logical, ~0 allocated blocks
+    used, count = dir_usage_for_uid(tmp_path, os.getuid())
+    assert count == 1
+    assert used < 1 << 20  # allocated blocks, not the 1 GiB logical size
+
+
+def test_guard_trips_on_bytes_then_file_count(tmp_path):
+    from validator.bounded_io import make_eval_dir_guard
+
+    uid = os.getuid()
+    guard = make_eval_dir_guard(
+        tmp_path, uid=uid, max_bytes=10_000, max_files=3, interval=0.0
+    )
+    assert guard() is None
+    (tmp_path / "big").write_bytes(b"x" * 20_000)
+    assert "bytes" in (guard() or "")
+
+    import shutil
+
+    shutil.rmtree(tmp_path)
+    tmp_path.mkdir()
+    guard = make_eval_dir_guard(
+        tmp_path, uid=uid, max_bytes=1 << 30, max_files=2, interval=0.0
+    )
+    for i in range(4):
+        (tmp_path / f"f{i}").write_bytes(b"x")
+    assert "files" in (guard() or "")
+
+
+def test_guard_rate_limits_its_walk(tmp_path):
+    from validator.bounded_io import make_eval_dir_guard
+
+    guard = make_eval_dir_guard(
+        tmp_path, uid=os.getuid(), max_bytes=1, max_files=1, interval=3600.0
+    )
+    (tmp_path / "over").write_bytes(b"xx")
+    first = guard()  # first call walks and trips
+    assert first is not None
+    (tmp_path / "over").unlink()
+    # within the interval, the guard doesn't walk again, so no new verdict
+    assert guard() is None
+
+
+def test_run_capped_kills_a_sandbox_over_its_disk_budget(tmp_path):
+    from validator.bounded_io import SandboxResourceExceeded
+
+    target = tmp_path / "eval"
+    target.mkdir()
+    trip = {"n": 0}
+
+    def guard():
+        trip["n"] += 1
+        return "over budget" if trip["n"] >= 2 else None
+
+    started = time.monotonic()
+    with pytest.raises(SandboxResourceExceeded, match="over budget"):
+        run_capped(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout_path=tmp_path / "o.log",
+            stderr_path=tmp_path / "e.log",
+            max_bytes=4096,
+            timeout=30,
+            size_guard=guard,
+        )
+    assert time.monotonic() - started < 10  # killed promptly, not after the 30s timeout
