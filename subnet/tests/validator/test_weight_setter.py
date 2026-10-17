@@ -31,9 +31,8 @@ def _standings(finishers: list[dict], top_hotkey, t_burn=0.75):
     )
 
 
-def _salt(finishers, top_hotkey, overlay=None):
+def _salt(finishers, top_hotkey):
     return WeightSalt(
-        overlay=overlay or {},
         epoch_standings=_standings(finishers, top_hotkey),
     )
 
@@ -140,8 +139,8 @@ class TestWeightSetterThread:
         """A raise inside the tick is caught and the loop keeps ticking."""
         mock_backend_client.fetch_weight_salt.side_effect = [
             BackendError("Network error"),  # no status/sdk_error → transient
-            WeightSalt(overlay={}, epoch_standings=None),
-            WeightSalt(overlay={}, epoch_standings=None),
+            WeightSalt(epoch_standings=None),
+            WeightSalt(epoch_standings=None),
         ]
         setter = WeightSetterThread(
             backend_client=mock_backend_client,

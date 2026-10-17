@@ -321,10 +321,10 @@ class WeightSetterThread:
         """
         self.metagraph.sync()
 
-        # One participation-gated fetch → overlay + epoch-pinned standings for
-        # THIS epoch (ORO-1704), so they can't straddle an epoch boundary.
-        # fetch_weight_salt never raises: on any error it returns an empty
-        # overlay + None standings (i.e. a miss).
+        # One participation-gated fetch → epoch-pinned standings for THIS epoch
+        # (ORO-1704), so they can't straddle an epoch boundary.
+        # fetch_weight_salt never raises: on any error it returns None standings
+        # (i.e. a miss).
         salt: WeightSalt = self.backend_client.fetch_weight_salt()
         built = self._build_from_standings(salt.epoch_standings)
 

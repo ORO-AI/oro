@@ -124,7 +124,7 @@ def test_uses_pinned_standings_when_served(
     fins = _finishers(6)
     mg = _metagraph(fins)
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK1")
+        epoch_standings=_standings(fins, top_hotkey="5HK1")
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
@@ -140,7 +140,7 @@ def test_no_standings_retains_last_good(
     any public fallback. There is no live /top path anymore (ORO-1802)."""
     mg = _metagraph(_finishers(6))
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=None
+        epoch_standings=None
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
@@ -153,7 +153,6 @@ def test_empty_standings_retains(mock_backend_client, mock_subtensor, mock_walle
     miss ⇒ retain last-good, no submit."""
     mg = _metagraph(_finishers(6))
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={},
         epoch_standings=EpochStandings(top_hotkey="5HK1", t_burn=0.75, finishers=[]),
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
@@ -168,7 +167,7 @@ def test_malformed_standings_retains(mock_backend_client, mock_subtensor, mock_w
     fins = _finishers(6)
     mg = _metagraph(fins)
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK1", t_burn=1.5)
+        epoch_standings=_standings(fins, top_hotkey="5HK1", t_burn=1.5)
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     _run_tick_once(setter)
@@ -185,7 +184,7 @@ def test_rejected_set_does_not_advance_private_success_anchor(
     fins = _finishers(6)
     mg = _metagraph(fins)
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=_standings(fins, top_hotkey="5HK0")
+        epoch_standings=_standings(fins, top_hotkey="5HK0")
     )
     # An object that is truthy under bool() but reports success=False — exactly
     # the ExtrinsicResponse trap.
@@ -205,7 +204,7 @@ def test_sustained_miss_submits_public_top(
     mg = _metagraph(_finishers(6))
     mg.block = 200  # epoch 2 with the conftest tempo of 100
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=None, eligible=False
+        epoch_standings=None, eligible=False
     )
     mock_backend_client.get_top_miner.return_value = SimpleNamespace(
         top_miner_hotkey="5HK0",
@@ -243,7 +242,7 @@ def test_unusable_public_top_retains_last_good(
     mg = _metagraph(_finishers(3))
     mg.block = 200
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=None
+        epoch_standings=None
     )
     mock_backend_client.get_top_miner.return_value = public_top
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
@@ -261,9 +260,8 @@ def test_private_standings_recovery_supersedes_public_top(
     mg = _metagraph(fins)
     mg.block = 200
     mock_backend_client.fetch_weight_salt.side_effect = [
-        WeightSalt(overlay={}, epoch_standings=None),
+        WeightSalt(epoch_standings=None),
         WeightSalt(
-            overlay={},
             epoch_standings=_standings(fins, top_hotkey="5HK1"),
         ),
     ]
@@ -292,7 +290,7 @@ def test_partial_epoch_miss_retains_before_public_fallback(
     mg = _metagraph(_finishers(6))
     mg.block = 100  # epoch 1 with the conftest tempo of 100
     mock_backend_client.fetch_weight_salt.return_value = WeightSalt(
-        overlay={}, epoch_standings=None
+        epoch_standings=None
     )
     setter = _setter(mg, mock_backend_client, mock_subtensor, mock_wallet)
     setter._last_success_epoch = 0  # set landed in epoch 0

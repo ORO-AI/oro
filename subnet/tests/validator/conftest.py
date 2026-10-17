@@ -71,9 +71,9 @@ def mock_backend_client():
     Test files can configure specific method return values as needed.
     """
     client = MagicMock(spec=BackendClient)
-    # Default: no overlay, no epoch-pinned standings (matches a dark Backend).
+    # Default: no epoch-pinned standings (matches a dark Backend).
     # Set explicitly so tests don't depend on MagicMock's default behaviour.
-    client.fetch_weight_salt.return_value = WeightSalt(overlay={}, epoch_standings=None)
+    client.fetch_weight_salt.return_value = WeightSalt(epoch_standings=None)
     return client
 
 
