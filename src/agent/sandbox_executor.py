@@ -303,8 +303,10 @@ def read_inference_stats(
                     # Each client writes cumulative totals; keep the latest per client.
                     key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
                     latest_by_source[key] = entry
-        except (OSError, ValueError):
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping inference stats %s: %s", stats_path, exc)
     totals: dict[str, dict] = {}
     for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)

@@ -17,6 +17,7 @@ from uuid import UUID, uuid5
 from oro_env_runtime import loop
 from oro_env_runtime.pack import read_task_rows
 from oro_env_runtime.schema import CandidateRef
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 
 from . import environment_preflight_agent
 from .env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
@@ -261,12 +262,11 @@ def _write_sandbox_inputs(
 
 
 def _read_sandbox_results(output_path: Path | None) -> list[dict[str, Any]]:
-    if output_path is None or not output_path.is_file():
+    if output_path is None or not output_path.exists():
         return []
+    content = read_regular_file(output_path, MAX_SANDBOX_OUTPUT_BYTES)
     return [
-        json.loads(line)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        json.loads(line) for line in content.decode("utf-8").splitlines() if line.strip()
     ]
 
 

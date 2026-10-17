@@ -129,3 +129,17 @@ def test_watcher_skips_a_non_regular_output(tmp_path):
     output.symlink_to(target)
 
     assert list(OutputWatcher(output).read_new()) == []
+
+
+def test_watcher_reads_at_most_the_cap(output_path, monkeypatch):
+    import validator.output_watcher as ow
+
+    _write(output_path, problem_id="p1")
+    _write(output_path, problem_id="p2")
+    first_line = len(output_path.read_text().splitlines()[0]) + 1
+    monkeypatch.setattr(ow, "MAX_SANDBOX_OUTPUT_BYTES", first_line + 5)
+    real_open = ow.open_regular_file
+    # Open passes the cap check; the file then grows past it before the read.
+    monkeypatch.setattr(ow, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30))
+
+    assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]
