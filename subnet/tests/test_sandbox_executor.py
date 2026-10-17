@@ -340,3 +340,19 @@ def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
         with pytest.raises((OSError, ValueError)):
             read_regular_file(path, max_bytes=1024)
     assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monkeypatch):
+    import src.agent.sandbox_executor as se
+
+    stats = tmp_path / "inference_stats.jsonl"
+    line = json.dumps({"problem_id": "p1", "inference_total": 1}) + "\n"
+    stats.write_text(line * 3)
+    monkeypatch.setattr(se, "MAX_SANDBOX_OUTPUT_BYTES", len(line) + 1)
+    real_open = se.open_regular_file
+    # Passes the size check at open, then holds more than the cap.
+    monkeypatch.setattr(
+        se, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
+    )
+
+    assert read_inference_stats(str(stats)) == {}

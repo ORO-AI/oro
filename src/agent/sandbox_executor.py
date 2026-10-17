@@ -294,8 +294,13 @@ def read_inference_stats(
     paths = [path] if isinstance(path, str) else path
     for source, stats_path in enumerate(paths):
         try:
+            found = {}
             with open_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES) as f:
+                read = 0
                 for line in f:
+                    read += len(line)  # the file can grow after the size check at open
+                    if read > MAX_SANDBOX_OUTPUT_BYTES:
+                        raise ValueError(f"{stats_path} exceeds the size limit")
                     line = line.strip()
                     if not line:
                         continue
@@ -314,7 +319,8 @@ def read_inference_stats(
                         continue
                     # Each client writes cumulative totals; keep the latest per client.
                     key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
-                    latest_by_source[key] = entry
+                    found[key] = entry
+            latest_by_source.update(found)
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
