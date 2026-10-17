@@ -263,3 +263,10 @@ def test_run_capped_kills_a_sandbox_over_its_disk_budget(tmp_path):
             size_guard=guard,
         )
     assert time.monotonic() - started < 10  # killed promptly, not after the 30s timeout
+
+
+def test_fs_usage_guard_never_raises_on_measurement_error(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path / "gone", max_bytes=1, max_inodes=1)
+    assert guard() is None  # no path to measure; guard stays quiet, never raises

@@ -51,10 +51,21 @@ def make_fs_usage_guard(
     capped capture logs) count toward the budget; the budget leaves room for
     them and still sits far below a host's free space.
     """
-    base_bytes, base_inodes = fs_free(path)
+    try:
+        base_bytes, base_inodes = fs_free(path)
+    except OSError:
+        base_bytes = base_inodes = None
 
     def guard() -> str | None:
-        free_bytes, free_inodes = fs_free(path)
+        # Never raise: run_capped calls this inside its poll loop, where an
+        # exception would skip killing the child and could wedge the reader join.
+        # A measurement error just means no verdict this round.
+        if base_bytes is None:
+            return None
+        try:
+            free_bytes, free_inodes = fs_free(path)
+        except OSError:
+            return None
         used_bytes = base_bytes - free_bytes
         used_inodes = base_inodes - free_inodes
         if used_bytes > max_bytes:
@@ -122,7 +133,6 @@ def read_text_lossy(path: Path, max_bytes: int) -> str:
 def _open_capture(path: str, flags: int) -> int:
     # Capture only into a plain file that only the validator can read or write.
     return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-
 
 
 def run_capped(
