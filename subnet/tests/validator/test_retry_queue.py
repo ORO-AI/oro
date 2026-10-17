@@ -85,6 +85,26 @@ class TestLocalRetryQueue:
         assert queue.get_pending_count() == 0
         mock_backend_client.complete_run.assert_called_once()
 
+    def test_retry_sends_sandbox_metadata(
+        self, temp_storage_path, mock_backend_client
+    ):
+        metadata = {"exit_code": 137, "duration_seconds": 12.5, "stderr_tail": "Killed"}
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add(
+            CompletionRequest(
+                eval_run_id=UUID("12345678-1234-1234-1234-123456789012"),
+                status=TerminalStatus.FAILED,
+                failure_reason="sandbox exited with 137",
+                sandbox_metadata=metadata,
+            )
+        )
+
+        queue.process_pending()
+
+        kwargs = mock_backend_client.complete_run.call_args.kwargs
+        assert kwargs["sandbox_metadata"] == metadata
+        assert kwargs["failure_reason"] == "sandbox exited with 137"
+
     def test_process_pending_keeps_on_failure(
         self, temp_storage_path, mock_backend_client, sample_completion
     ):
