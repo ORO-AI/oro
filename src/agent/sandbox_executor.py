@@ -2,12 +2,14 @@
 
 import importlib.util
 import hashlib
+import io
 import json
 import logging
 import math
 import multiprocessing
 import os
 import queue
+import stat
 import sys
 import time
 import uuid
@@ -16,7 +18,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, BinaryIO, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 
 from src.agent.sandbox_status import SandboxProblemStatus
@@ -231,6 +233,42 @@ def _merge_model_inference_counters(total: dict, entry: dict) -> None:
                 model_total[key] = model_total.get(key, 0) + value
 
 
+# Composed dialogues run ~1.4 MB per episode.
+MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024
+
+
+def open_regular_file(path: str | os.PathLike) -> BinaryIO:
+    """Open a sandbox output file as a plain regular file, without blocking."""
+    parent_fd = os.open(
+        os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        fd = os.open(
+            os.path.basename(path),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    finally:
+        os.close(parent_fd)
+    source = os.fdopen(fd, "rb")
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        source.close()
+        raise ValueError(f"{path} must be a regular file with one link")
+    return source
+
+
+def read_regular_file(path: str | os.PathLike, max_bytes: int) -> bytes:
+    """Read a sandbox output file, bounded to ``max_bytes``."""
+    with open_regular_file(path) as source:
+        if os.fstat(source.fileno()).st_size > max_bytes:
+            raise ValueError(f"{path} exceeds {max_bytes} bytes")
+        content = source.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(f"{path} exceeds {max_bytes} bytes")
+    return content
+
+
 def read_inference_stats(
     path: str | list[str], execution_id: str | None = None
 ) -> dict[str, dict]:
@@ -244,7 +282,8 @@ def read_inference_stats(
     paths = [path] if isinstance(path, str) else path
     for source, stats_path in enumerate(paths):
         try:
-            with open(stats_path) as f:
+            content = read_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES)
+            with io.BytesIO(content) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -265,7 +304,7 @@ def read_inference_stats(
                     # Each client writes cumulative totals; keep the latest per client.
                     key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
                     latest_by_source[key] = entry
-        except (FileNotFoundError, OSError):
+        except (OSError, ValueError):
             pass
     totals: dict[str, dict] = {}
     for (problem_id, _source, _instance), entry in latest_by_source.items():

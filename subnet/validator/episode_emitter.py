@@ -52,6 +52,7 @@ from oro_sdk.models.episode_artifact_presign_response import (
 from oro_sdk.models.submit_episode_results_request import SubmitEpisodeResultsRequest
 from oro_sdk.models.submit_episode_results_response import SubmitEpisodeResultsResponse
 from oro_sdk.retry import compute_delay, parse_retry_after
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 
 from .backend_client import BackendError
 from .env_backend import call_environment_api, environment_client
@@ -194,7 +195,8 @@ def load_inference_transcripts(
     path = Path(output_file)
     transcripts: dict[str, dict[str, Any]] = {}
     for line_number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), start=1
+        read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES).decode("utf-8").splitlines(),
+        start=1,
     ):
         if not line.strip():
             continue

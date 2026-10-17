@@ -74,7 +74,7 @@ def test_read_text_lossy_tolerates_non_utf8(tmp_path):
     path = tmp_path / "sandbox_stdout.log"
     path.write_bytes(b"before \xff\xfe\x80 after")
 
-    text = read_text_lossy(path)
+    text = read_text_lossy(path, max_bytes=4096)
 
     assert "before " in text
     assert "after" in text  # decode replaced the invalid bytes instead of raising
@@ -145,3 +145,32 @@ def test_run_capped_reaps_child_when_log_open_fails(tmp_path, monkeypatch):
     proc = captured["proc"]
     proc.wait(timeout=5)  # must not hang; the child was killed on the way out
     assert proc.poll() is not None
+
+
+def test_read_text_lossy_reports_a_non_regular_log(tmp_path):
+    other = tmp_path / "other.log"
+    other.write_text("other content")
+    log = tmp_path / "sandbox_stderr.log"
+    log.symlink_to(other)
+
+    text = read_text_lossy(log, max_bytes=4096)
+
+    assert "other content" not in text
+    assert "unreadable sandbox log" in text
+
+
+def test_run_capped_requires_plain_capture_files(tmp_path):
+    target = tmp_path / "target"
+    target.write_text("keep")
+    (tmp_path / "e.log").symlink_to(target)
+
+    with pytest.raises(OSError):
+        run_capped(
+            [sys.executable, "-c", "print('x')"],
+            stdout_path=tmp_path / "o.log",
+            stderr_path=tmp_path / "e.log",
+            max_bytes=4096,
+            timeout=30,
+        )
+
+    assert target.read_text() == "keep"

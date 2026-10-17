@@ -9,7 +9,6 @@ import math
 import os
 import random
 import re
-import stat
 import subprocess
 import sys
 import time
@@ -26,6 +25,7 @@ from oro_env_runtime.pack import TF_BY_FAMILY
 from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 from subnet.validator.env_pack_loader import (
     LoadedPack,
     PackValidationError,
@@ -43,7 +43,6 @@ GENERATED_FAMILIES = frozenset(TF_BY_FAMILY)
 QUALIFYING_TASKS_PER_FAMILY = 5
 LOCAL_SUMMARY_SCHEMA = "oro.local_generated_summary.v1"
 SANDBOX_RESULT_GRACE_SECONDS = 60.0
-MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024  # composed dialogues run ~1.4 MB per episode
 
 
 @dataclass(frozen=True)
@@ -186,24 +185,7 @@ def _sha256(path: Path) -> str:
 
 def _read_sandbox_rows(path: Path) -> list[dict[str, Any]]:
     try:
-        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fd = os.open(
-                path.name,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=parent_fd,
-            )
-        finally:
-            os.close(parent_fd)
-        with os.fdopen(fd, "rb") as source:
-            metadata = os.fstat(source.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                raise ValueError("sandbox output must be a regular file with one link")
-            if metadata.st_size > MAX_SANDBOX_OUTPUT_BYTES:
-                raise ValueError("sandbox output exceeds size limit")
-            content = source.read(MAX_SANDBOX_OUTPUT_BYTES + 1)
-        if len(content) > MAX_SANDBOX_OUTPUT_BYTES:
-            raise ValueError("sandbox output exceeds size limit")
+        content = read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES)
         rows = [
             json.loads(line)
             for line in content.decode("utf-8").splitlines()

@@ -9,13 +9,17 @@ while still reading the source to EOF, so the child never blocks on a full pipe.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import BinaryIO
 
+from src.agent.sandbox_executor import read_regular_file
+
 _DEFAULT_CHUNK_SIZE = 64 * 1024
+_MARKER_ROOM = 1024  # drain_capped's truncation marker follows the capped bytes
 
 
 class RunStoppedEarly(RuntimeError):
@@ -58,14 +62,24 @@ def drain_capped(
     return total
 
 
-def read_text_lossy(path: Path) -> str:
-    """Read a captured sandbox log as text, tolerating non-UTF-8 bytes.
+def read_text_lossy(path: Path, max_bytes: int) -> str:
+    """Read a log captured by ``run_capped`` with the same ``max_bytes``.
 
     An agent can emit arbitrary bytes, so a plain ``Path.read_text()`` can raise
     ``UnicodeDecodeError`` and lose the very stderr/stdout we want for debugging.
-    Invalid bytes are replaced instead of raising.
+    Invalid bytes are replaced instead of raising. A log that is not a plain
+    file within the cap is reported rather than read.
     """
-    return path.read_text(errors="replace")
+    try:
+        content = read_regular_file(path, max_bytes + _MARKER_ROOM)
+    except (OSError, ValueError) as exc:
+        return f"[unreadable sandbox log: {type(exc).__name__}]"
+    return content.decode(errors="replace")
+
+
+def _open_capture(path: str, flags: int) -> int:
+    # Capture only into a plain new or existing file.
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
 
 
 def run_capped(
@@ -93,8 +107,8 @@ def run_capped(
     # process whose pipe eventually fills and blocks.
     try:
         with (
-            open(stdout_path, "wb") as out_file,
-            open(stderr_path, "wb") as err_file,
+            open(stdout_path, "wb", opener=_open_capture) as out_file,
+            open(stderr_path, "wb", opener=_open_capture) as err_file,
         ):
             assert proc.stdout is not None and proc.stderr is not None
             readers = [

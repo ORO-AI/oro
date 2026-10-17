@@ -207,6 +207,9 @@ services:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     networks:
       - main
+    # Keep one large evaluation from exhausting host memory; Docker restarts
+    # the validator if the limit is hit.
+    mem_limit: ${VALIDATOR_MEM_LIMIT:-8g}
     restart: unless-stopped
 
   # Prometheus + nginx-prometheus-exporter. Default: local-only, 9090 bound

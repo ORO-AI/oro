@@ -108,3 +108,12 @@ class TestOutputWatcher:
         assert len(records) == 1
         # Status MUST be the typed enum so callers can use `is` comparisons.
         assert records[0].status is SandboxProblemStatus.SUCCESS
+
+
+def test_watcher_skips_a_non_regular_output(tmp_path):
+    target = tmp_path / "elsewhere.jsonl"
+    _write(target, problem_id="p1")
+    output = tmp_path / "output.jsonl"
+    output.symlink_to(target)
+
+    assert list(OutputWatcher(output).read_new()) == []

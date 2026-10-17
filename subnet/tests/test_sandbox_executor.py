@@ -7,12 +7,15 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from src.agent.sandbox_executor import (
     _read_inference_stats,
     _read_request_log,
     build_result_envelope,
     execute_single_problem,
     read_inference_stats,
+    read_regular_file,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -298,3 +301,25 @@ def test_execution_id_keeps_repeated_runs_of_one_problem_separate(tmp_path, monk
 
     assert read_inference_stats(path, "run-a")["p1"]["inference_total"] == 2
     assert read_inference_stats(path, "run-b")["p1"]["inference_total"] == 5
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "sparse"])
+def test_read_regular_file_rejects_non_regular_or_oversized_files(tmp_path, kind):
+    path = tmp_path / "output.jsonl"
+    if kind == "symlink":
+        path.symlink_to("/dev/zero")
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        with open(path, "wb") as f:
+            f.truncate(1 << 40)
+    with pytest.raises((OSError, ValueError)):
+        read_regular_file(path, max_bytes=1024)
+
+
+def test_read_inference_stats_skips_a_non_regular_stats_file(tmp_path):
+    target = tmp_path / "trusted.jsonl"
+    target.write_text(json.dumps({"problem_id": "p1", "inference_total": 9}) + "\n")
+    stats = tmp_path / "inference_stats.jsonl"
+    stats.symlink_to(target)
+    assert read_inference_stats(str(stats)) == {}
