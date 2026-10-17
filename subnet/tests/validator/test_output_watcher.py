@@ -140,6 +140,8 @@ def test_watcher_reads_at_most_the_cap(output_path, monkeypatch):
     monkeypatch.setattr(ow, "MAX_SANDBOX_OUTPUT_BYTES", first_line + 5)
     real_open = ow.open_regular_file
     # Open passes the cap check; the file then grows past it before the read.
-    monkeypatch.setattr(ow, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30))
+    monkeypatch.setattr(
+        ow, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
+    )
 
     assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]

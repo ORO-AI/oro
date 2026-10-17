@@ -606,7 +606,9 @@ class Validator:
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log, self.config.sandbox_log_max_bytes)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
                     log_fn = logging.error if returncode != 0 else logging.info
@@ -615,7 +617,9 @@ class Validator:
                     )
 
             if stdout_log.exists():
-                stdout_content = read_text_lossy(stdout_log, self.config.sandbox_log_max_bytes)
+                stdout_content = read_text_lossy(
+                    stdout_log, self.config.sandbox_log_max_bytes
+                )
                 if stdout_content.strip():
                     logging.info(
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
@@ -646,7 +650,9 @@ class Validator:
                     f"Output file not found after sandbox execution: {output_file}"
                 )
                 if stderr_log.exists():
-                    stderr_content = read_text_lossy(stderr_log, self.config.sandbox_log_max_bytes)
+                    stderr_content = read_text_lossy(
+                        stderr_log, self.config.sandbox_log_max_bytes
+                    )
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
@@ -663,7 +669,9 @@ class Validator:
             # own internal timeout. Kill the orphan by name (ORO-1414).
             self._kill_sandbox_container(eval_run_id)
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log, self.config.sandbox_log_max_bytes)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(

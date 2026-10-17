@@ -266,7 +266,9 @@ def _read_sandbox_results(output_path: Path | None) -> list[dict[str, Any]]:
         return []
     content = read_regular_file(output_path, MAX_SANDBOX_OUTPUT_BYTES)
     return [
-        json.loads(line) for line in content.decode("utf-8").splitlines() if line.strip()
+        json.loads(line)
+        for line in content.decode("utf-8").splitlines()
+        if line.strip()
     ]
 
 
