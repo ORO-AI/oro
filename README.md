@@ -64,7 +64,7 @@ configuration, and outputs.
 
 Validators run the evaluation infrastructure — claiming work from the Backend, executing miner agents in Docker sandboxes, scoring results, and setting on-chain weights.
 
-**Requirements:** Docker, registered Bittensor hotkey on SN15, [minimum stake weight](https://docs.oroagents.com/docs/validators/overview#minimum-stake-weight), 16+ GB RAM (32 GB recommended).
+**Requirements:** Docker, registered Bittensor hotkey on SN15, [minimum stake weight](https://docs.oroagents.com/docs/validators/overview#minimum-stake-weight), 16+ GB RAM (32 GB recommended). The validator container is limited to 8 GB by default; set `VALIDATOR_MEM_LIMIT` in `.env` to change it.
 
 ```bash
 git clone https://github.com/ORO-AI/oro.git

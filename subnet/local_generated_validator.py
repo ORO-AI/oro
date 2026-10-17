@@ -185,7 +185,7 @@ def _sha256(path: Path) -> str:
 
 def _read_sandbox_rows(path: Path) -> list[dict[str, Any]]:
     try:
-        content = read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES)
+        content = read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES, single_link=True)
         rows = [
             json.loads(line)
             for line in content.decode("utf-8").splitlines()

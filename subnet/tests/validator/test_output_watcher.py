@@ -1,6 +1,7 @@
 """OutputWatcher: tail envelope stream, yield ProblemRecord."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -143,5 +144,12 @@ def test_watcher_reads_at_most_the_cap(output_path, monkeypatch):
     monkeypatch.setattr(
         ow, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
     )
+
+    assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]
+
+
+def test_watcher_still_reads_a_hard_linked_output(tmp_path, output_path):
+    _write(output_path, problem_id="p1")
+    os.link(output_path, tmp_path / "extra-link")
 
     assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]

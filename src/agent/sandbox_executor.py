@@ -236,8 +236,15 @@ def _merge_model_inference_counters(total: dict, entry: dict) -> None:
 MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024
 
 
-def open_regular_file(path: str | os.PathLike, max_bytes: int) -> BinaryIO:
-    """Open a sandbox output file of at most ``max_bytes`` without blocking."""
+def open_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> BinaryIO:
+    """Open a sandbox output file of at most ``max_bytes`` without blocking.
+
+    ``single_link`` also rejects hard-linked files. Use it only where the agent
+    cannot create links itself; on agent-written output it would let one extra
+    link block every read.
+    """
     parent_fd = os.open(
         os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     )
@@ -251,8 +258,10 @@ def open_regular_file(path: str | os.PathLike, max_bytes: int) -> BinaryIO:
         os.close(parent_fd)
     try:
         metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            raise ValueError(f"{path} must be a regular file with one link")
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{path} must be a regular file")
+        if single_link and metadata.st_nlink != 1:
+            raise ValueError(f"{path} must have exactly one link")
         if metadata.st_size > max_bytes:
             raise ValueError(f"{path} exceeds {max_bytes} bytes")
         return os.fdopen(fd, "rb")
@@ -261,9 +270,11 @@ def open_regular_file(path: str | os.PathLike, max_bytes: int) -> BinaryIO:
         raise
 
 
-def read_regular_file(path: str | os.PathLike, max_bytes: int) -> bytes:
+def read_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> bytes:
     """Read a sandbox output file, bounded to ``max_bytes``."""
-    with open_regular_file(path, max_bytes) as source:
+    with open_regular_file(path, max_bytes, single_link=single_link) as source:
         content = source.read(max_bytes + 1)
     if len(content) > max_bytes:
         raise ValueError(f"{path} exceeds {max_bytes} bytes")
