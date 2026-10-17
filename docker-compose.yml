@@ -60,7 +60,7 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
       - SESSION_RUNTIME_HOST=${SESSION_RUNTIME_HOST:-validator}
       - SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
-      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-95s}
     # Loopback-only publish. Sandbox agents reach the proxy over the `main`
     # docker network (`SANDBOX_PROXY_URL=http://proxy:80`), so no host publish
     # is required for normal operation. Keeping a loopback publish preserves
@@ -342,7 +342,7 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
       - SESSION_RUNTIME_HOST=127.0.0.1
       - SESSION_RUNTIME_PORT=9101
-      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-95s}
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
       interval: 10s
