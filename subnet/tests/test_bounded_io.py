@@ -246,8 +246,6 @@ def test_fs_usage_guard_ignores_space_freed_again(tmp_path):
 def test_run_capped_kills_a_sandbox_over_its_disk_budget(tmp_path):
     from validator.bounded_io import SandboxResourceExceeded
 
-    target = tmp_path / "eval"
-    target.mkdir()
     trip = {"n": 0}
 
     def guard():

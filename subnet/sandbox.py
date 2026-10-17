@@ -7,15 +7,16 @@ Docker command construction so the call sites stay in sync.
 import os
 from pathlib import Path
 
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES
+
 # Docker configuration shared by local runs and the validator
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
-# Hard per-file write ceiling for the sandbox (SIGXFSZ past this), matching the
-# validator's 512 MiB output read cap. Bounds any single file a miner writes to
-# a mounted path; the validator caps aggregate eval-dir usage separately.
-SANDBOX_MAX_FILE_BYTES = 512 * 1024 * 1024
-# The sandbox container runs as this uid; the validator counts only files this
-# uid writes when enforcing the per-evaluation disk budget.
+# Hard per-file write ceiling for the sandbox (SIGXFSZ past this): the same cap the
+# validator rejects oversized reads at, so the container can't write a file every
+# reader then refuses. The validator bounds aggregate run disk use separately.
+SANDBOX_MAX_FILE_BYTES = MAX_SANDBOX_OUTPUT_BYTES
+# The sandbox container runs as this uid.
 SANDBOX_UID = 1000
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
 
