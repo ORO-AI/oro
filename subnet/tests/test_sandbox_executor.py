@@ -330,3 +330,13 @@ def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
     good = json.dumps({"problem_id": "p1", "inference_total": 2}).encode()
     stats.write_bytes(b"\xff\xfe broken\n" + good + b"\n")
     assert read_inference_stats(str(stats))["p1"]["inference_total"] == 2
+
+
+def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
+    path = tmp_path / "output.jsonl"
+    path.mkdir()
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(20):
+        with pytest.raises((OSError, ValueError)):
+            read_regular_file(path, max_bytes=1024)
+    assert len(os.listdir("/proc/self/fd")) == before

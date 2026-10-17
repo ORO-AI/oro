@@ -249,15 +249,16 @@ def open_regular_file(path: str | os.PathLike, max_bytes: int) -> BinaryIO:
         )
     finally:
         os.close(parent_fd)
-    source = os.fdopen(fd, "rb")
-    metadata = os.fstat(fd)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        source.close()
-        raise ValueError(f"{path} must be a regular file with one link")
-    if metadata.st_size > max_bytes:
-        source.close()
-        raise ValueError(f"{path} exceeds {max_bytes} bytes")
-    return source
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError(f"{path} must be a regular file with one link")
+        if metadata.st_size > max_bytes:
+            raise ValueError(f"{path} exceeds {max_bytes} bytes")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def read_regular_file(path: str | os.PathLike, max_bytes: int) -> bytes:
