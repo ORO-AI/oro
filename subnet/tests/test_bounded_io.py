@@ -20,7 +20,12 @@ import time
 
 import pytest
 
-from validator.bounded_io import RunStoppedEarly, drain_capped, read_text_lossy, run_capped
+from validator.bounded_io import (
+    RunStoppedEarly,
+    drain_capped,
+    read_text_lossy,
+    run_capped,
+)
 
 
 def test_under_cap_writes_everything_verbatim():
@@ -53,7 +58,11 @@ def test_run_capped_bounds_a_runaway_stdout_to_disk(tmp_path):
     out_path = tmp_path / "stdout.log"
     err_path = tmp_path / "stderr.log"
     # Agent that spews ~5 MB of stdout; cap at 4 KB.
-    cmd = [sys.executable, "-c", "import sys; sys.stdout.write('A' * (5 * 1024 * 1024))"]
+    cmd = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.write('A' * (5 * 1024 * 1024))",
+    ]
 
     returncode = run_capped(
         cmd,
@@ -193,3 +202,71 @@ def test_run_capped_creates_validator_only_capture_files(tmp_path):
 
     for name in ("o.log", "e.log"):
         assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
+
+
+def test_fs_usage_guard_trips_on_consumed_space(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 20, max_inodes=1 << 30)
+    assert guard() is None
+    # Consume more than the byte budget on this filesystem.
+    with open(tmp_path / "big", "wb") as f:
+        f.write(b"x" * (3 << 20))
+        f.flush()
+        os.fsync(f.fileno())
+    assert "bytes" in (guard() or "")
+
+
+def test_fs_usage_guard_trips_on_consumed_inodes(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 40, max_inodes=50)
+    for i in range(200):
+        (tmp_path / f"f{i}").write_bytes(b"")
+    assert "inodes" in (guard() or "")
+
+
+def test_fs_usage_guard_ignores_space_freed_again(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path, max_bytes=1 << 20, max_inodes=1 << 30)
+    f = tmp_path / "temp"
+    with open(f, "wb") as fh:
+        fh.write(b"x" * (3 << 20))
+        fh.flush()
+        os.fsync(fh.fileno())
+    assert guard() is not None
+    f.unlink()
+    import time as _t
+
+    _t.sleep(0.1)
+    assert guard() is None  # space recovered, no longer over budget
+
+
+def test_run_capped_kills_a_sandbox_over_its_disk_budget(tmp_path):
+    from validator.bounded_io import SandboxResourceExceeded
+
+    trip = {"n": 0}
+
+    def guard():
+        trip["n"] += 1
+        return "over budget" if trip["n"] >= 2 else None
+
+    started = time.monotonic()
+    with pytest.raises(SandboxResourceExceeded, match="over budget"):
+        run_capped(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout_path=tmp_path / "o.log",
+            stderr_path=tmp_path / "e.log",
+            max_bytes=4096,
+            timeout=30,
+            size_guard=guard,
+        )
+    assert time.monotonic() - started < 10  # killed promptly, not after the 30s timeout
+
+
+def test_fs_usage_guard_never_raises_on_measurement_error(tmp_path):
+    from validator.bounded_io import make_fs_usage_guard
+
+    guard = make_fs_usage_guard(tmp_path / "gone", max_bytes=1, max_inodes=1)
+    assert guard() is None  # no path to measure; guard stays quiet, never raises
