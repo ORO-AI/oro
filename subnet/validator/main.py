@@ -4,6 +4,7 @@ import gzip
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,7 +13,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from uuid import UUID
 
 import requests
@@ -31,7 +32,13 @@ from src.agent.sandbox_executor import (
 )
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
-from .bounded_io import RunStoppedEarly, read_text_lossy, run_capped
+from .bounded_io import (
+    RunStoppedEarly,
+    SandboxResourceExceeded,
+    make_fs_usage_guard,
+    read_text_lossy,
+    run_capped,
+)
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -198,6 +205,16 @@ def _claim_environment_binding(
     return pack_sha256
 
 
+# Per-evaluation disk budget. While the sandbox runs, the validator watches the free
+# space and free inodes of the evaluation filesystem; if the run consumes more than
+# this much of either, the run is killed and that evaluation fails. The byte budget
+# leaves room for the validator's own capped capture logs written during the run, and
+# both sit far below a validator host's free space. Sparse files consume no real
+# blocks, so they count toward nothing.
+SANDBOX_RUN_MAX_DISK_BYTES = 2 * 1024 * 1024 * 1024
+SANDBOX_RUN_MAX_INODES = 100_000
+
+
 class Validator:
     def __init__(self):
         self.config = self.get_config()
@@ -305,7 +322,10 @@ class Validator:
             "--session-tool-timeout",
             type=float,
             default=float(os.environ.get("ORO_SESSION_TOOL_TIMEOUT", "10")),
-            help="Per-action timeout before quarantine (env: ORO_SESSION_TOOL_TIMEOUT).",
+            help=(
+                "Per-action timeout before quarantine; a grouped call gets it per action, "
+                "up to 30s (env: ORO_SESSION_TOOL_TIMEOUT)."
+            ),
         )
         parser.add_argument(
             "--session-simulator-timeout",
@@ -454,8 +474,9 @@ class Validator:
         """
         d = Path(self.config.workspace_dir) / "logs" / f"eval_{eval_run_id_str}"
         d.mkdir(parents=True, exist_ok=True)
-        # Sandbox runs as --user 1000:1000, ensure it can write to this directory
-        os.chmod(d, 0o777)
+        # Sandbox runs as --user 1000:1000, ensure it can write to this directory.
+        # The sticky bit keeps the validator's own files (logs, inputs) in place.
+        os.chmod(d, 0o1777)
         return d
 
     @staticmethod
@@ -562,6 +583,11 @@ class Validator:
         SANDBOX_ACTIVE.inc()
         start_time = time.time()
         try:
+            size_guard = make_fs_usage_guard(
+                eval_dir,
+                max_bytes=SANDBOX_RUN_MAX_DISK_BYTES,
+                max_inodes=SANDBOX_RUN_MAX_INODES,
+            )
             return self._run_sandbox_inner(
                 cmd=cmd,
                 stdout_log=stdout_log,
@@ -570,6 +596,7 @@ class Validator:
                 eval_run_id=eval_run_id,
                 metadata=metadata,
                 stop_event=stop_event,
+                size_guard=size_guard,
             )
         finally:
             duration = time.time() - start_time
@@ -587,6 +614,7 @@ class Validator:
         eval_run_id: str,
         metadata: SandboxMetadata,
         stop_event: threading.Event | None = None,
+        size_guard: Callable[[], str | None] | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
             # Capture through a byte cap so a runaway agent's stdout/stderr can't
@@ -599,12 +627,15 @@ class Validator:
                 max_bytes=self.config.sandbox_log_max_bytes,
                 timeout=self.config.sandbox_timeout,
                 stop_event=stop_event,
+                size_guard=size_guard,
             )
             metadata["exit_code"] = returncode
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
                     log_fn = logging.error if returncode != 0 else logging.info
@@ -613,7 +644,9 @@ class Validator:
                     )
 
             if stdout_log.exists():
-                stdout_content = read_text_lossy(stdout_log)
+                stdout_content = read_text_lossy(
+                    stdout_log, self.config.sandbox_log_max_bytes
+                )
                 if stdout_content.strip():
                     logging.info(
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
@@ -644,11 +677,21 @@ class Validator:
                     f"Output file not found after sandbox execution: {output_file}"
                 )
                 if stderr_log.exists():
-                    stderr_content = read_text_lossy(stderr_log)
+                    stderr_content = read_text_lossy(
+                        stderr_log, self.config.sandbox_log_max_bytes
+                    )
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
 
+        except SandboxResourceExceeded as e:
+            metadata["exit_code"] = -1
+            metadata["stderr_tail"] = str(e)[-500:]
+            logging.error(
+                f"Sandbox exceeded its disk budget for eval_run {eval_run_id}: {e}"
+            )
+            self._kill_sandbox_container(eval_run_id)
+            return None, metadata
         except RunStoppedEarly:
             metadata["exit_code"] = -1
             self._kill_sandbox_container(eval_run_id)
@@ -661,7 +704,9 @@ class Validator:
             # own internal timeout. Kill the orphan by name (ORO-1414).
             self._kill_sandbox_container(eval_run_id)
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(
@@ -1651,6 +1696,8 @@ class Validator:
                 inference_access_token,
                 work.inference_token.expires_at.timestamp(),
             )
+            # Start from an empty directory, even after a crashed earlier attempt.
+            shutil.rmtree(self._eval_dir(eval_run_id_str))
             # Step 1: Download agent code
             agent_path = self.download_agent(work.code_download_url, eval_run_id_str)
             if not agent_path:
@@ -1698,8 +1745,6 @@ class Validator:
             eval_dir = self._eval_dir(eval_run_id_str)
             if eval_dir.exists():
                 try:
-                    import shutil
-
                     shutil.rmtree(eval_dir)
                 except OSError as e:
                     logging.debug(f"Cleanup failed for {eval_dir}: {e}")

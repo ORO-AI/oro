@@ -33,3 +33,10 @@ def test_download_agent_writes_raw_bytes(tmp_path, monkeypatch):
     assert agent_path.read_bytes() == SOURCE
     spec = importlib.util.spec_from_file_location("downloaded_agent", agent_path)
     spec.loader.exec_module(importlib.util.module_from_spec(spec))
+
+
+def test_eval_dir_is_world_writable_and_sticky(tmp_path):
+    validator = Validator.__new__(Validator)
+    validator.config = SimpleNamespace(workspace_dir=str(tmp_path))
+
+    assert validator._eval_dir("run-1").stat().st_mode & 0o7777 == 0o1777

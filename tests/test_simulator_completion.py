@@ -153,7 +153,7 @@ def test_forwards_strict_response_format_unchanged() -> None:
     assert client.post_verbose_async.call_args.kwargs["json_data"]["response_format"] == schema
 
 
-def test_decide_posts_to_decisions_endpoint_once() -> None:
+def test_decide_posts_to_decisions_endpoint() -> None:
     client = MagicMock(post_verbose_async=AsyncMock())
     answers = {"model": "typesafe/jev-1.13", "answers": {"all": {"noul": 0.1}}}
     client.post_verbose_async.return_value = _ok(answers)
@@ -181,7 +181,7 @@ def test_decide_posts_to_decisions_endpoint_once() -> None:
     with pytest.raises(InferenceProviderError) as exc:
         asyncio.run(completion.decide("typesafe/jev-1.13", {}, questions))
     assert (exc.value.status, exc.value.body) == (403, "model not allowed")
-    client.post_verbose_async.assert_called_once()
+    assert client.post_verbose_async.call_count == simulator_completion._MAX_ATTEMPTS
 
     # No response is a transport failure (an outage); a malformed answer carries no status.
     client.post_verbose_async.return_value = _err(None, "no response", kind="network")
@@ -191,6 +191,49 @@ def test_decide_posts_to_decisions_endpoint_once() -> None:
     with pytest.raises(InferenceProviderError) as exc:
         asyncio.run(completion.decide("typesafe/jev-1.13", {}, questions))
     assert exc.value.status is None
+
+
+def test_decide_retries_a_transient_failure_like_the_chat_call() -> None:
+    answers = {"model": "typesafe/jev-1.13", "answers": {"all": {"noul": 0.1}}}
+    client = MagicMock(post_verbose_async=AsyncMock(side_effect=[
+        _err(402, '{"error":{"message":"This request would exceed your available credits '
+                  'given your current in-flight requests."}}'),
+        _err(None, "no response", kind="network"),
+        _ok(answers),
+    ]))
+    completion = SimulatorCompletion("sk-or-miner-token", client=client)
+
+    assert asyncio.run(completion.decide("typesafe/jev-1.13", {}, {})) == answers
+    assert client.post_verbose_async.call_count == 3
+
+
+@pytest.mark.parametrize("decisions", [False, True])
+def test_retries_stop_at_the_simulator_turn_deadline(
+    monkeypatch: pytest.MonkeyPatch, decisions: bool
+) -> None:
+    """Earlier phases of the turn spent its shared deadline: no retry can land in time."""
+    slept: list[float] = []
+
+    async def _record(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(simulator_completion.asyncio, "sleep", _record)
+    monkeypatch.setattr(simulator_completion.time, "monotonic", lambda: 100.0)
+    client = MagicMock(post_verbose_async=AsyncMock(return_value=_err(503, "down")))
+    completion = SimulatorCompletion("sk-or-miner-token", client=client)
+
+    async def call() -> None:
+        simulator_completion.SIMULATOR_DEADLINE.set(107.0)
+        if decisions:
+            await completion.decide("typesafe/jev-1.13", {}, {})
+        else:
+            await completion("model", [])
+
+    with pytest.raises(InferenceProviderError):
+        asyncio.run(call())
+    # 7s left: the first 5s backoff plus 3s headroom would overrun it.
+    assert slept == []
+    assert client.post_verbose_async.call_count == 1
 
 
 def test_a_run_on_another_provider_offers_no_decisions() -> None:
@@ -222,17 +265,22 @@ def test_raises_after_bounded_retries_exhaust_on_upstream_403() -> None:
         (403, '{"error":{"message":"Key limit exceeded (total limit)"}}', True),
         (403, "rate limit exceeded", False),
         (429, "Key limit exceeded (total limit)", False),
+        (402, '{"error":{"message":"Insufficient credits. Add more"}}', True),
+        (402, '{"error":{"message":"This request requires more credits, or fewer max_tokens."}}', True),
+        (402, '{"error":{"message":"This request would exceed your available credits given '
+              'your current in-flight requests."}}', False),
     ],
 )
+@pytest.mark.parametrize("decisions", [False, True])
 def test_key_exhaustion_is_narrowly_detected_and_not_retried(
-    status: int, body: str, exhausted: bool
+    status: int, body: str, exhausted: bool, decisions: bool
 ) -> None:
     client = MagicMock(post_verbose_async=AsyncMock())
     client.post_verbose_async.return_value = _err(status, body)
-    completion = SimulatorCompletion("miner-token", client=client)
+    completion = SimulatorCompletion("sk-or-miner-token", client=client)
 
     with pytest.raises(InferenceProviderError) as excinfo:
-        asyncio.run(completion("model", []))
+        asyncio.run(completion.decide("test", {}, {}) if decisions else completion("model", []))
 
     assert excinfo.value.key_exhausted is exhausted
     assert client.post_verbose_async.call_count == (

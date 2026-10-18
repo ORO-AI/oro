@@ -10,7 +10,6 @@ import json
 import threading
 import time
 from collections.abc import Callable, Coroutine
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 from uuid import uuid4
@@ -29,15 +28,21 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import InferenceProviderError, SimulatorCompletion
+from .simulator_completion import (
+    SIMULATOR_DEADLINE,
+    InferenceProviderError,
+    SimulatorCompletion,
+)
 
 DEFAULT_TOOL_TIMEOUT_S = 10.0
 MAX_CALLS_PER_TURN = 16
+# The tool timeout is per action. A grouped call runs its actions one after
+# another, so its budget scales with the group, up to this cap.
+MAX_TOOL_CALL_TIMEOUT_S = 30.0
 # The simulator is a provider call, not a local tool. env.openrouter allows 60s
 # per attempt, so a shorter budget would quarantine sessions the provider would
 # still answer.
 DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
-_SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 _PACK_PROVENANCE_FIELDS = (
     "contract_version",
     "runtime_version",
@@ -294,7 +299,7 @@ class SessionRegistry:
 
     def _run_simulator(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
         async def bounded() -> Any:
-            remaining = max(0.0, _SIMULATOR_DEADLINE.get() - time.monotonic())
+            remaining = max(0.0, SIMULATOR_DEADLINE.get() - time.monotonic())
             return await asyncio.wait_for(coroutine, timeout=remaining)
 
         return asyncio.run(bounded())
@@ -606,9 +611,13 @@ class SessionRegistry:
                 trace.search_retries = retries
                 return step(step_arg)
 
+        timeout_s = min(
+            self.tool_timeout_s * len(actions),
+            max(self.tool_timeout_s, MAX_TOOL_CALL_TIMEOUT_S),
+        )
         future = self._executor.submit(execute)
         try:
-            result = future.result(timeout=self.tool_timeout_s)
+            result = future.result(timeout=timeout_s)
         except concurrent.futures.TimeoutError as exc:
             trace.tool_latency_ms = _elapsed_ms(started)
             future.cancel()
@@ -616,7 +625,7 @@ class SessionRegistry:
                 session_id,
                 state,
                 trace,
-                reason=f"tool call exceeded {self.tool_timeout_s:.3f}s",
+                reason=f"tool call exceeded {timeout_s:.3f}s",
                 snapshot=snapshot,
                 cause=exc,
             )
@@ -650,11 +659,11 @@ class SessionRegistry:
 
         def bounded_work() -> Any:
             # All response/reword phases share the deadline, including queue time.
-            token = _SIMULATOR_DEADLINE.set(deadline)
+            token = SIMULATOR_DEADLINE.set(deadline)
             try:
                 return work(*args)
             finally:
-                _SIMULATOR_DEADLINE.reset(token)
+                SIMULATOR_DEADLINE.reset(token)
 
         future = self._executor.submit(bounded_work)
         try:
