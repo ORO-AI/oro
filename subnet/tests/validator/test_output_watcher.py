@@ -1,6 +1,7 @@
 """OutputWatcher: tail envelope stream, yield ProblemRecord."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -108,3 +109,47 @@ class TestOutputWatcher:
         assert len(records) == 1
         # Status MUST be the typed enum so callers can use `is` comparisons.
         assert records[0].status is SandboxProblemStatus.SUCCESS
+
+
+def test_watcher_waits_for_a_partly_written_line(tmp_path, output_path):
+    _write(tmp_path / "full.jsonl", problem_id="p1")
+    line = (tmp_path / "full.jsonl").read_text()
+    watcher = OutputWatcher(output_path)
+
+    output_path.write_text(line[:20])
+    assert list(watcher.read_new()) == []
+    with open(output_path, "a") as f:
+        f.write(line[20:])
+    assert [r.problem_id for r in watcher.read_new()] == ["p1"]
+
+
+def test_watcher_skips_a_non_regular_output(tmp_path):
+    target = tmp_path / "elsewhere.jsonl"
+    _write(target, problem_id="p1")
+    output = tmp_path / "output.jsonl"
+    output.symlink_to(target)
+
+    assert list(OutputWatcher(output).read_new()) == []
+
+
+def test_watcher_reads_at_most_the_cap(output_path, monkeypatch):
+    import validator.output_watcher as ow
+
+    _write(output_path, problem_id="p1")
+    _write(output_path, problem_id="p2")
+    first_line = len(output_path.read_text().splitlines()[0]) + 1
+    monkeypatch.setattr(ow, "MAX_SANDBOX_OUTPUT_BYTES", first_line + 5)
+    real_open = ow.open_regular_file
+    # Open passes the cap check; the file then grows past it before the read.
+    monkeypatch.setattr(
+        ow, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
+    )
+
+    assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]
+
+
+def test_watcher_still_reads_a_hard_linked_output(tmp_path, output_path):
+    _write(output_path, problem_id="p1")
+    os.link(output_path, tmp_path / "extra-link")
+
+    assert [r.problem_id for r in OutputWatcher(output_path).read_new()] == ["p1"]

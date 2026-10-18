@@ -11,12 +11,14 @@ job. This class owns:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
 from bittensor.utils.btlogging import logging
 
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, open_regular_file
 from src.agent.sandbox_status import SandboxProblemStatus
 from src.agent.types import Dialogue
 
@@ -68,24 +70,23 @@ class OutputWatcher:
             return
 
         try:
-            file_size = self.output_file.stat().st_size
-        except OSError as e:
-            logging.warning(f"OutputWatcher: stat failed: {e}")
-            return
-
-        if file_size < self._file_position:
-            logging.info("OutputWatcher: file truncated, resetting position")
-            self._file_position = 0
-
-        try:
-            with open(self.output_file) as f:
+            with open_regular_file(self.output_file, MAX_SANDBOX_OUTPUT_BYTES) as f:
+                size = os.fstat(f.fileno()).st_size
+                if size < self._file_position:
+                    logging.info("OutputWatcher: file truncated, resetting position")
+                    self._file_position = 0
                 f.seek(self._file_position)
-                new_lines = f.readlines()
-                self._file_position = f.tell()
-        except OSError as e:
+                new_bytes = f.read(
+                    min(size, MAX_SANDBOX_OUTPUT_BYTES) - self._file_position
+                )
+                # Leave a partly written last line for the next poll.
+                new_bytes = new_bytes[: new_bytes.rfind(b"\n") + 1]
+                self._file_position += len(new_bytes)
+        except (OSError, ValueError) as e:
             logging.warning(f"OutputWatcher: read failed, retry next poll: {e}")
             return
 
+        new_lines = new_bytes.decode("utf-8", errors="replace").splitlines()
         for line in new_lines:
             line = line.strip()
             if not line:

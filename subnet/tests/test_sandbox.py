@@ -353,3 +353,22 @@ class TestAttachTitleEmbeddings:
         reward = "just-a-string"
         attach_title_embeddings(reward, [0.1, 0.2])
         # No crash, no mutation possible on a string
+
+
+class TestSandboxFileSizeLimit:
+    """The sandbox gets a hard per-file write ceiling."""
+
+    def test_fsize_ulimit_present(self):
+        from subnet.sandbox import SANDBOX_MAX_FILE_BYTES
+
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert f"fsize={SANDBOX_MAX_FILE_BYTES}:{SANDBOX_MAX_FILE_BYTES}" in cmd
+        # still runs as the sandbox uid the validator's disk guard counts.
+        from subnet.sandbox import SANDBOX_UID
+
+        assert f"{SANDBOX_UID}:{SANDBOX_UID}" in cmd

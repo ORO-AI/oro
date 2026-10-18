@@ -7,12 +7,15 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from src.agent.sandbox_executor import (
     _read_inference_stats,
     _read_request_log,
     build_result_envelope,
     execute_single_problem,
     read_inference_stats,
+    read_regular_file,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -298,3 +301,58 @@ def test_execution_id_keeps_repeated_runs_of_one_problem_separate(tmp_path, monk
 
     assert read_inference_stats(path, "run-a")["p1"]["inference_total"] == 2
     assert read_inference_stats(path, "run-b")["p1"]["inference_total"] == 5
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "sparse"])
+def test_read_regular_file_rejects_non_regular_or_oversized_files(tmp_path, kind):
+    path = tmp_path / "output.jsonl"
+    if kind == "symlink":
+        path.symlink_to("/dev/zero")
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        with open(path, "wb") as f:
+            f.truncate(1 << 40)
+    with pytest.raises((OSError, ValueError)):
+        read_regular_file(path, max_bytes=1024)
+
+
+def test_read_inference_stats_skips_a_non_regular_stats_file(tmp_path):
+    target = tmp_path / "trusted.jsonl"
+    target.write_text(json.dumps({"problem_id": "p1", "inference_total": 9}) + "\n")
+    stats = tmp_path / "inference_stats.jsonl"
+    stats.symlink_to(target)
+    assert read_inference_stats(str(stats)) == {}
+
+
+def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
+    stats = tmp_path / "inference_stats.jsonl"
+    good = json.dumps({"problem_id": "p1", "inference_total": 2}).encode()
+    stats.write_bytes(b"\xff\xfe broken\n" + good + b"\n")
+    assert read_inference_stats(str(stats))["p1"]["inference_total"] == 2
+
+
+def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
+    path = tmp_path / "output.jsonl"
+    path.mkdir()
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(20):
+        with pytest.raises((OSError, ValueError)):
+            read_regular_file(path, max_bytes=1024)
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monkeypatch):
+    import src.agent.sandbox_executor as se
+
+    stats = tmp_path / "inference_stats.jsonl"
+    line = json.dumps({"problem_id": "p1", "inference_total": 1}) + "\n"
+    stats.write_text(line * 3)
+    monkeypatch.setattr(se, "MAX_SANDBOX_OUTPUT_BYTES", len(line) + 1)
+    real_open = se.open_regular_file
+    # Passes the size check at open, then holds more than the cap.
+    monkeypatch.setattr(
+        se, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
+    )
+
+    assert read_inference_stats(str(stats)) == {}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Callable
 from decimal import Decimal
 from functools import wraps
@@ -671,3 +672,11 @@ def test_replay_forwards_render_budget_to_verifier(monkeypatch):
     )
     assert captured["render_budget"] == 17
     assert captured["reference_count"] == 4
+
+
+def test_load_inference_transcripts_rejects_a_fifo_without_blocking(tmp_path):
+    output = tmp_path / "output.jsonl"
+    os.mkfifo(output)
+
+    with pytest.raises(ValueError):
+        load_inference_transcripts(output)

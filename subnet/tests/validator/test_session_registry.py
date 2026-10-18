@@ -279,7 +279,12 @@ def test_reader_requires_bound_decisions_client_for_chutes(reader_pack: LoadedPa
 
 
 @pytest.mark.parametrize("status,body,http_status", [
-    (403, "Key limit exceeded", 402), (400, "provider failure", 500),
+    (403, "Key limit exceeded", 402),
+    (402, '{"error":{"message":"Insufficient credits. Add more","code":402}}', 402),
+    (402, '{"error":{"message":"This request requires more credits, or fewer max_tokens."}}', 402),
+    (402, '{"error":{"message":"This request would exceed your available credits given '
+          'your current in-flight requests.","metadata":{"reason":"in_flight_budget_exhausted"}}}', 500),
+    (400, "provider failure", 500),
 ])
 def test_real_reader_classifies_budget_and_infrastructure_failures(
     reader_pack, monkeypatch, status, body, http_status,
@@ -309,6 +314,48 @@ def test_real_reader_classifies_budget_and_infrastructure_failures(
             "agent_error" if http_status == 402 else "environment_error"
         )
         assert state.simulator._completion._client.post_verbose_async.call_count == 1
+
+
+def test_real_reader_retries_an_in_flight_credit_402(reader_pack, monkeypatch) -> None:
+    from src.agent.proxy_client import PostResult
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("validator.simulator_completion.asyncio.sleep", no_sleep)
+    in_flight = PostResult(data=None, error={"kind": "http", "status": 402, "body": (
+        '{"error":{"message":"This request would exceed your available credits given '
+        'your current in-flight requests."}}'
+    )})
+    decisions: list[str] = []
+
+    async def post(path, json_data):
+        if path == "/inference/alpha/decisions":
+            decisions.append(path)
+            if len(decisions) == 1:
+                return in_flight
+            answers = {key: {"noul": 0.1} for key in json_data["questions"]}
+            return PostResult(data={"model": JEV_MODEL, "answers": answers}, error=None)
+        return PostResult(data={"choices": [{
+            "message": {"content": '{"action":"clarify","content":"which size?"}'},
+            "finish_reason": "stop",
+        }]}, error=None)
+
+    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
+        _start(registry)
+        state = registry._sessions["session-1"]
+        state.session.task = reader_pack.task_specs[0]
+        state.simulator = registry._default_simulator(state)
+        state.simulator._completion._client.post_verbose_async = post
+        response = registry.call(_call_envelope(
+            registry, action={"name": "message", "args": {"content": "A test question?"}},
+        ))
+        trace = registry.finalized_results()[0]["call_trace"][0]
+
+    assert len(decisions) >= 2
+    assert response["user_message"]["content"]
+    assert trace["error"] is None
+    assert not registry.key_exhausted.is_set()
 
 
 @pytest.mark.parametrize("exhausted,http_status", [(True, 402), (False, 504)])
@@ -1278,6 +1325,57 @@ def test_timeout_quarantines_session_and_blocks_verdict(
         assert timing["tool"] >= 1
         assert timing["simulator"] is None
         assert result["call_trace"][0]["latency_ms"] == timing["total"]
+
+
+def _group_envelope(registry: SessionRegistry, size: int) -> dict:
+    envelope = {
+        **_call_envelope(registry),
+        "calls": [
+            {"call_id": f"tool-{i}", "action": {"name": "inspect_cart", "args": {}}}
+            for i in range(size)
+        ],
+    }
+    envelope.pop("action")
+    return envelope
+
+
+def _slow_group(monkeypatch: pytest.MonkeyPatch, session, seconds: float) -> None:
+    original = session.step_parallel
+
+    def slow(actions):
+        time.sleep(seconds)
+        return original(actions)
+
+    monkeypatch.setattr(session, "step_parallel", slow)
+
+
+def test_grouped_call_gets_the_tool_timeout_per_action(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grouped actions run one after another: 4 actions get 4 per-action budgets."""
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
+        _start(registry)
+        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.25)
+
+        response = registry.call(_group_envelope(registry, 4))
+
+    assert len(response["calls"]) == 4
+
+
+def test_grouped_call_budget_is_capped(
+    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("validator.session_registry.MAX_TOOL_CALL_TIMEOUT_S", 0.15)
+    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
+        _start(registry)
+        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.4)
+
+        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
+            registry.call(_group_envelope(registry, 16))
+        result = registry.finalized_results()[0]
+
+    assert result["outcome"] == "environment_error"
+    assert result["error_detail"] == "tool call exceeded 0.150s"
 
 
 def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) -> None:

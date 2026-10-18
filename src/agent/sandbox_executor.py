@@ -8,6 +8,7 @@ import math
 import multiprocessing
 import os
 import queue
+import stat
 import sys
 import time
 import uuid
@@ -16,7 +17,7 @@ from concurrent.futures import (
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, BinaryIO, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 
 from src.agent.sandbox_status import SandboxProblemStatus
@@ -231,6 +232,55 @@ def _merge_model_inference_counters(total: dict, entry: dict) -> None:
                 model_total[key] = model_total.get(key, 0) + value
 
 
+# Composed dialogues run ~1.4 MB per episode.
+MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024
+
+
+def open_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> BinaryIO:
+    """Open a sandbox output file of at most ``max_bytes`` without blocking.
+
+    ``single_link`` also rejects hard-linked files. Use it only where the agent
+    cannot create links itself; on agent-written output it would let one extra
+    link block every read.
+    """
+    parent_fd = os.open(
+        os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        fd = os.open(
+            os.path.basename(path),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    finally:
+        os.close(parent_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{path} must be a regular file")
+        if single_link and metadata.st_nlink != 1:
+            raise ValueError(f"{path} must have exactly one link")
+        if metadata.st_size > max_bytes:
+            raise ValueError(f"{path} exceeds {max_bytes} bytes")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> bytes:
+    """Read a sandbox output file, bounded to ``max_bytes``."""
+    with open_regular_file(path, max_bytes, single_link=single_link) as source:
+        content = source.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(f"{path} exceeds {max_bytes} bytes")
+    return content
+
+
 def read_inference_stats(
     path: str | list[str], execution_id: str | None = None
 ) -> dict[str, dict]:
@@ -244,14 +294,19 @@ def read_inference_stats(
     paths = [path] if isinstance(path, str) else path
     for source, stats_path in enumerate(paths):
         try:
-            with open(stats_path) as f:
+            found = {}
+            with open_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES) as f:
+                read = 0
                 for line in f:
+                    read += len(line)  # the file can grow after the size check at open
+                    if read > MAX_SANDBOX_OUTPUT_BYTES:
+                        raise ValueError(f"{stats_path} exceeds the size limit")
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         entry = json.loads(line)
-                    except json.JSONDecodeError:
+                    except ValueError:  # malformed JSON or invalid UTF-8
                         continue
                     if not isinstance(entry, dict):
                         continue
@@ -264,9 +319,12 @@ def read_inference_stats(
                         continue
                     # Each client writes cumulative totals; keep the latest per client.
                     key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
-                    latest_by_source[key] = entry
-        except (FileNotFoundError, OSError):
+                    found[key] = entry
+            latest_by_source.update(found)
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping inference stats %s: %s", stats_path, exc)
     totals: dict[str, dict] = {}
     for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)
