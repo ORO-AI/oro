@@ -101,10 +101,7 @@ def render_console_report(
         f"{paint('ORO Bench local run', _BOLD)}  {paint(str(summary['run_id']), _CYAN)}",
         f"  pack        {pack_sha256[:8]}…{pack_sha256[-4:]}",
         f"  problems    {_problem_line(summary, len(tasks))}",
-        (
-            f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}"
-            f"  verifier {PACK_VERSION_IDENTITIES['verifier_version']}"
-        ),
+        f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}",
         f"  inference   {provider}",
         f"  agent       {_agent_line(summary)}",
         (
@@ -139,6 +136,10 @@ def render_console_report(
                 classification = row.get("error_classification") or "error"
                 problem = f"{classification}: {row.get('error_detail') or outcome}"
                 detail = f"  {paint(problem, _RED)}"
+            failure = row.get("failure") or {}
+            if failure.get("primary"):
+                text = f"{failure['primary']} ({', '.join(failure['categories'])})"
+                detail += f"  {paint(text, _YELLOW)}"
             lines.append(
                 f"  {str(row.get('task_id')):<{width}}  {outcome:<18}"
                 f"{reward_paint(reward, outcome)}{detail}"

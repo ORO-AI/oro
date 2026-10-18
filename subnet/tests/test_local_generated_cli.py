@@ -13,15 +13,15 @@ from oro_env_runtime import (
     REPLAY_CONTRACT_VERSION,
     RESULT_SCHEMA_VERSION,
     RUNTIME_VERSION,
-    TOOL_CONTRACT_VERSION,
-    VERIFIER_VERSION,
+    check_epoch,
 )
+from oro_env_runtime.contracts import RUNTIME_CONTRACT
 
 from subnet import local_generated_validator as local
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_PACK_SHA256 = (
-    "f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5"
+    "919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379"
 )
 
 
@@ -113,16 +113,16 @@ def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> Non
     assert config.pack_path == ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
 
-def test_bundled_pack_matches_released_runtime_contracts() -> None:
+def test_bundled_pack_matches_released_runtime_contracts(tmp_path: Path) -> None:
     pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
 
     assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "1.0.6"
+    assert version("oro-env-runtime") == "3.7.1"
 
     with tarfile.open(pack_path, "r:gz") as archive:
-        manifest_file = archive.extractfile("epoch/manifest.json")
-        assert manifest_file is not None
-        manifest = json.load(manifest_file)
+        archive.extractall(tmp_path, filter="data")
+    manifest = json.loads((tmp_path / "epoch" / "manifest.json").read_text())
+    assert check_epoch(tmp_path / "epoch") == []
 
     assert manifest["contracts"] == {
         "environment": ENV_CONTRACT_VERSION,
@@ -130,9 +130,9 @@ def test_bundled_pack_matches_released_runtime_contracts() -> None:
         "replay": REPLAY_CONTRACT_VERSION,
         "result": RESULT_SCHEMA_VERSION,
         "runtime": RUNTIME_VERSION,
-        "tools": TOOL_CONTRACT_VERSION,
-        "verifier": VERIFIER_VERSION,
     }
+    # The validator refuses a delivery sealed for another runtime contract.
+    assert manifest["delivery"]["runtime_contract"] == RUNTIME_CONTRACT
     family_counts = manifest["epoch"]["family_counts"]
     # The bundled pack may ship a subset of the supported families (currently
     # six of seven — preference_reasoning is omitted); every present family

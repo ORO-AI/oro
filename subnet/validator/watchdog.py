@@ -26,7 +26,7 @@ from typing import Callable
 # sandbox_timeout 1800s + scoring/reasoning ~900s+) in the same pass,
 # ~3800-4100s; 5400s leaves margin so a healthy busy validator never trips it,
 # while a truly wedged loop is still recycled within ~90 min. Tighter recovery
-# would require beating from the heartbeat thread (fires every 30s during an
+# would require beating from the heartbeat thread (fires during an
 # eval) — see ORO-1414 follow-up.
 _DEFAULT_TIMEOUT_SECONDS = 5400.0
 _DEFAULT_CHECK_INTERVAL = 30.0

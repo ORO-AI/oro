@@ -48,8 +48,6 @@ def _operation(kind):
         "family_counts": {"test": 1},
         "contract_version": "v1",
         "runtime_version": "v1",
-        "tool_contract_version": "v1",
-        "verifier_version": "v1",
         "result_schema_version": "v1",
         "catalog_epoch": "test",
         "catalog_sha256": SHA,

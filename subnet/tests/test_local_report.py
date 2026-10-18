@@ -69,7 +69,7 @@ def test_console_report_names_run_models_and_versions() -> None:
     report = _report()
     assert "local-abc123" in report
     assert "9e5d11c6" in report
-    assert "runtime" in report and "verifier" in report
+    assert "runtime" in report
     assert "openrouter" in report
     assert "deepseek-ai/DeepSeek-V3.2-TEE" in report
     assert "mistralai/mistral-small-2603" in report
@@ -151,6 +151,19 @@ def test_console_report_groups_tasks_by_family_with_means() -> None:
         < report.index("retrieval_recall")
         < report.index("recovery")
     )
+
+
+def test_console_report_names_each_failure_category() -> None:
+    summary = _summary()
+    task = _task("TF8-composed-1", "composed", 0.0)
+    task["failure"] = {
+        "primary": "needs_not_found",
+        "categories": ["needs_not_found", "process_issue"],
+    }
+    summary["tasks"] = [task, _task("TF8-composed-2", "composed", 1.0)]
+    failed, passed = (line for line in _render(summary).splitlines() if "TF8-composed-" in line)
+    assert failed.endswith("0.00  needs_not_found (needs_not_found, process_issue)")
+    assert passed.endswith("1.00")
 
 
 def test_console_report_keeps_a_gap_after_a_long_family_name() -> None:

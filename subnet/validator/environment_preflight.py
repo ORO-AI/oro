@@ -14,11 +14,14 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
+from oro_env_runtime import loop
+from oro_env_runtime.pack import read_task_rows
 from oro_env_runtime.schema import CandidateRef
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 
 from . import environment_preflight_agent
 from .env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
-from .session_registry import SessionRegistry
+from .session_registry import SessionRegistry, _deliver
 from .session_service import SessionRuntime
 
 
@@ -43,6 +46,12 @@ class EnvironmentPreflightError(RuntimeError):
 
 
 class _DeterministicSimulator:
+    def __init__(self) -> None:
+        self._discloser = self  # loop.reword_utterances says each line through it
+
+    async def say(self, _tid: str, line: str) -> tuple[str, dict[str, Any]]:
+        return line, {}
+
     async def respond(
         self,
         _transcript: list[dict[str, Any]],
@@ -58,14 +67,16 @@ def _candidate_ref(key: str) -> CandidateRef | None:
     return CandidateRef(product_id=product_id, sku=sku)
 
 
-def _reference_targets(task: Any, probe: Any) -> tuple[list[CandidateRef], CandidateRef] | None:
+def _reference_targets(
+    task: Any, acceptable_keys: list[str], probe: Any
+) -> tuple[list[CandidateRef], CandidateRef] | None:
     """Build ``(positive_targets, negative)`` from the task's accepted keys and
     the first in-stock, in-budget, non-accepted catalog candidate; ``None`` if
     unusable."""
-    if task.acceptance is None or not task.acceptance.acceptable_keys:
+    if not acceptable_keys:
         return None
     accepted: list[CandidateRef] = []
-    for key in task.acceptance.acceptable_keys:
+    for key in acceptable_keys:
         ref = _candidate_ref(key)
         if ref is None:
             return None
@@ -77,7 +88,7 @@ def _reference_targets(task: Any, probe: Any) -> tuple[list[CandidateRef], Candi
     )
     if second is not None:
         positive_targets.append(second)
-    accepted_keys = set(task.acceptance.acceptable_keys)
+    accepted_keys = set(acceptable_keys)
     negative = next(
         (
             ref
@@ -99,19 +110,26 @@ def _drive_replay(
     task_id: str,
     groups: list[list[dict[str, Any]]],
 ) -> Any:
-    """Drive action groups through a fresh replay session, mirroring the
-    deterministic simulator fallback so it reproduces the real run's verdict."""
+    """Drive action groups through a fresh replay session and the session
+    boundary as ``SessionRegistry`` does with the deterministic simulator, so it
+    reproduces the real run's ledger and verdict: a sent message gets the reply
+    unless a timeline line speaks instead, then the next turn begins and its
+    lines are said."""
     replay = loaded_pack.open_session(task_id)
     for turn, actions in enumerate(groups, start=1):
-        observations = replay.step_parallel(actions)
-        if turn == 1 and not any(item.get("done") is True for item in observations):
-            replay.env.ledger.append(
-                turn=replay.env._turn,
-                kind="user_message",
-                actor="user_sim",
-                payload={"step": turn, **_SIMULATOR_REPLY, "fallback": False},
-                state_hash=replay.env.state_hash_now(),
-            )
+        replay.step_parallel(actions)
+        if replay.env.done():
+            break
+        message_sent = any(action.get("name") == "message" for action in actions)
+        reply = (
+            [(dict(_SIMULATOR_REPLY), None)]
+            if message_sent and not replay.env.utterances
+            else []
+        )
+        _deliver(replay, [], reply, step=turn)
+        if turn < replay.max_steps:
+            replay.env.begin_solver_turn(turn + 1)
+            loop.say_utterances(replay, [], step=turn + 1)
     return replay
 
 
@@ -129,17 +147,22 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
     """Select any task with a self-verified positive/negative case.
 
     Task-family-agnostic (the scripted policy still assumes the commerce tool
-    contract). Eventless tasks preferred so an event can't invalidate the
-    positive order mid-episode; each candidate is validated against the real
+    contract). Tasks without a timeline are preferred so a change can't invalidate
+    the positive order mid-episode; each candidate is validated against the real
     verifier so a case that would false-fail the preflight is never shipped.
     """
     tasks = list(zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True))
-    ordered = [t for t in tasks if t[1].event_rule is None] + [
-        t for t in tasks if t[1].event_rule is not None
-    ]
+    ordered = sorted(tasks, key=lambda t: bool(t[1].situation and t[1].situation.timeline))
+    # The qualifying delivery's rows carry ``acceptance.acceptable_keys``; the
+    # runtime's task model does not, so read them from the delivered rows (v7 or v8,
+    # through the shared reader that expands v8's shared grading records).
+    acceptable_keys = {
+        row["task_id"]: (row["task"].get("acceptance") or {}).get("acceptable_keys")
+        for row in read_task_rows(loaded_pack.pack_dir)
+    }
     for task_id, task in ordered:
         probe = loaded_pack.open_session(task_id)
-        targets = _reference_targets(task, probe)
+        targets = _reference_targets(task, acceptable_keys[task_id], probe)
         if targets is None:
             continue
         if _case_discriminates(loaded_pack, task_id, task, targets):
@@ -152,8 +175,7 @@ def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
 
 def _action_groups(task: Any, targets: Any) -> dict[str, list[list[dict[str, Any]]]]:
     positive_targets, negative = targets
-    theme = task.family_payload.get("theme") or []
-    query = " ".join(str(token) for token in theme) or task.goal_text
+    query = task.goal_text
     first_turn = [
         {"name": "search", "args": {"query": query, "k": 10, "in_stock": True}},
         {
@@ -188,13 +210,6 @@ def _action_groups(task: Any, targets: Any) -> dict[str, list[list[dict[str, Any
     }
 
 
-def _binding(started: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "session_id": started["session_id"],
-        "tool_contract_version": started["policy_view"]["tool_contract_version"],
-    }
-
-
 def _write_sandbox_inputs(
     run_dir: Path,
     *,
@@ -221,7 +236,7 @@ def _write_sandbox_inputs(
                     environment_preflight_agent.POLICY_PROTOCOL_VERSION
                 ),
                 "reference_policy_version": policy,
-                "binding": _binding(starts[policy]),
+                "binding": {"session_id": starts[policy]["session_id"]},
                 "policy_view": starts[policy]["policy_view"],
                 # This is validator-owned test input, never miner-supplied work.
                 "action_groups": groups[policy],
@@ -247,11 +262,15 @@ def _write_sandbox_inputs(
 
 
 def _read_sandbox_results(output_path: Path | None) -> list[dict[str, Any]]:
-    if output_path is None or not output_path.is_file():
+    if output_path is None or not output_path.exists():
+        return []
+    try:
+        content = read_regular_file(output_path, MAX_SANDBOX_OUTPUT_BYTES)
+    except (OSError, ValueError):
         return []
     return [
         json.loads(line)
-        for line in output_path.read_text(encoding="utf-8").splitlines()
+        for line in content.decode("utf-8").splitlines()
         if line.strip()
     ]
 
@@ -345,7 +364,7 @@ def run_environment_preflight(
 
         policies = []
         for policy in (POSITIVE_POLICY, NEGATIVE_POLICY):
-            result = registry.verdict(_binding(starts[policy]))
+            result = registry.verdict({"session_id": starts[policy]["session_id"]})
             policies.append(
                 {
                     "reference_policy_version": policy,

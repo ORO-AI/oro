@@ -32,6 +32,8 @@ _FORBIDDEN_PATHS = (
     "/mnt/host",
 )
 _PRIVATE_PROXY_REQUESTS = (
+    ("GET", "/internal/bm25?q=phone&k=100"),
+    ("GET", "/internal/catalog/search?q=phone&k=100"),
     ("POST", "/environment/start"),
     ("POST", "/environment/verdict"),
     ("POST", "/environment/call/../start"),
@@ -108,10 +110,7 @@ def agent_main(_problem_data: dict[str, Any]) -> list[dict[str, Any]]:
     )
     bootstrap = json.loads(sessions_path.read_text(encoding="utf-8"))
     session = bootstrap["sessions"][0]
-    binding = {
-        "session_id": session["session_id"],
-        "tool_contract_version": session["policy_view"]["tool_contract_version"],
-    }
+    binding = {"session_id": session["session_id"]}
     valid_envelope = {
         **binding,
         "call_id": "hostile-valid",

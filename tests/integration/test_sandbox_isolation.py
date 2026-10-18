@@ -3,16 +3,20 @@ Integration tests for sandbox network isolation.
 Tests that sandbox containers are properly isolated and can only communicate through the proxy.
 """
 
+import http.client
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
+import requests
 
 from subnet.sandbox import build_sandbox_command
 from tests.integration.conftest import (
     PROXY_CONTAINER,
+    PROXY_PORT,
     SEARCH_SERVER_CONTAINER,
     SESSION_RUNTIME_CONTAINER,
     exec_in_container,
@@ -104,6 +108,8 @@ class TestSandboxIsolation:
         "url",
         [
             "http://search-server:5632/health",
+            "http://search-server:5632/internal/bm25?q=phone&k=100",
+            "http://search-server:5632/internal/catalog/search?q=phone&k=100",
             "http://session-runtime:9101/health",
         ],
     )
@@ -151,8 +157,8 @@ class TestSandboxIsolation:
             f"Expected 410 for a legacy search route, got: {result.stdout[:200]}"
         )
 
-    def test_inference_route_is_live(self, sandbox_container):
-        """/inference/* is owned by the njs validator: a body without a model is rejected there, not by the default deny."""
+    def test_inference_requires_active_grant(self, sandbox_container):
+        """Direct inference HTTP calls cannot pass without an active run key."""
         result = exec_in_container(
             sandbox_container,
             [
@@ -173,10 +179,182 @@ class TestSandboxIsolation:
 
         assert result.returncode == 0, result.stderr
         body, status = result.stdout.rsplit("\n", 1)
-        assert status == "400", (
-            f"Expected the model validator to answer, got {status}: {body[:200]}"
+        assert status == "401", (
+            f"Expected the run-key guard to answer, got {status}: {body[:200]}"
         )
-        assert "model" in json.loads(body)["error"]
+        assert "active run" in json.loads(body)["error"]
+
+    @pytest.fixture
+    def active_inference_grant(self):
+        proxy = json.loads(
+            subprocess.run(
+                ["docker", "inspect", PROXY_CONTAINER],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout
+        )[0]
+        assert "ORO_INFERENCE_TEST_PROXY=1" in proxy["Config"]["Env"]
+        assert not any(
+            m["Destination"] == "/run/oro-inference-grants" for m in proxy["Mounts"]
+        )
+
+        def set_grant(grant):
+            response = requests.put(
+                "http://127.0.0.1:19101/_test/inference-grant", json=grant, timeout=5
+            )
+            response.raise_for_status()
+
+        grant = {
+            "run_id": "test-run",
+            "token": "sk-or-expected",
+            "expires_at": time.time() + 600,
+        }
+        set_grant(grant)
+        try:
+            yield set_grant, grant
+        finally:
+            set_grant({})
+
+    def test_inference_uses_active_run_key(self, active_inference_grant):
+        set_grant, grant = active_inference_grant
+        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions"
+        wrong = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-other"}, json={}, timeout=5
+        )
+        assert wrong.status_code == 401
+        valid = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert valid.status_code == 400
+        assert "model" in valid.json()["error"]
+        grant["expires_at"] = 0
+        set_grant(grant)
+        expired = requests.post(
+            url, headers={"Authorization": "Bearer sk-or-expected"}, json={}, timeout=5
+        )
+        assert expired.status_code == 401
+
+    def test_inference_field_telemetry(self, active_inference_grant):
+        url = f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions?private_query_marker=1"
+        response = requests.post(
+            url,
+            headers={
+                "User-Agent": "oro-field-probe",
+                "Authorization": "Bearer sk-or-expected",
+            },
+            json={
+                "messages": [{"role": "user", "content": "private_prompt_marker"}],
+                "stream": True,
+                "odd field": 1,
+                "tools": [
+                    {"type": "function"},
+                    {"type": "openrouter:advisor"},
+                    {"type": "unknown"},
+                ],
+                "chat_template_kwargs": {
+                    "bad key": "private_template_marker",
+                    **{f"k{i}": i for i in range(16)},
+                },
+            },
+            timeout=5,
+        )
+        assert response.status_code == 400
+        overflow = {f"f{i}": i for i in range(33)}
+        overflow.update({"model": "test/model", "stream": True})
+        overflow["tools"] = [{"type": "function"}] * 33
+        assert (
+            requests.post(
+                url,
+                headers={
+                    "User-Agent": "oro-overflow-probe",
+                    "Authorization": "Bearer sk-or-expected",
+                },
+                json=overflow,
+                timeout=5,
+            ).status_code
+            == 400
+        )
+        logs = subprocess.run(
+            ["docker", "logs", PROXY_CONTAINER],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        line = next(line for line in logs.splitlines() if '"oro-field-probe"' in line)
+        assert '"POST /inference/chat/completions HTTP/1.1"' in line
+        assert "fields=messages,stream,odd_field" in line
+        assert "tool_fn=1 tool_server=1 tool_other=1 tool_more=0" in line
+        assert "template_keys=bad_key,k0," in line
+        assert ",+more run=test-run" in line
+        assert "run=test-run" in line
+        assert all(
+            marker not in line
+            for marker in (
+                "private_query_marker",
+                "private_prompt_marker",
+                "private_template_marker",
+                "sk-or-expected",
+            )
+        )
+        overflow_line = next(
+            line for line in logs.splitlines() if '"oro-overflow-probe"' in line
+        )
+        assert ",+more" in overflow_line
+        assert "tool_fn=32 tool_server=0 tool_other=0 tool_more=1" in overflow_line
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            # The validator's decisions route, as the agent, and every spelling of it.
+            "/inference/alpha/decisions",
+            "/inference/alpha/decisions%3F",
+            "/inference/alpha/decisions%3Fx=1",
+            "/inference/alpha/decisions%253F",
+            "/inference/alpha%2Fdecisions",
+            "/inference/alpha%252Fdecisions",
+            "/inference/alpha/decisions/",
+            "/inference/Alpha/Decisions",
+            "/inference/alpha/decisions;x",
+            "/inference/alpha/decisions%23",
+            "/inference/chat/../alpha/decisions",
+            # Anything but the chat completions an agent needs.
+            "/inference/key",
+            "/inference/key%3F",
+            "/inference/completions",
+            "/inference/embeddings",
+            "/inference/chat/completions/",
+            "/inference/CHAT/completions",
+            "/inference/chat/completions%3F",
+            "/inference/models",
+        ],
+    )
+    def test_inference_posts_only_to_chat_completions(self, active_inference_grant, path):
+        """An agent POSTs only the exact chat completions route; nothing it can spell reaches
+        another upstream route (403 before the body is read, where the chat route answers 400
+        for this bodiless request)."""
+        conn = http.client.HTTPConnection("127.0.0.1", PROXY_PORT, timeout=5)
+        conn.request(
+            "POST",
+            path,
+            body="{}",
+            headers={
+                "Authorization": "Bearer sk-or-expected",
+                "Content-Type": "application/json",
+            },
+        )
+        response = conn.getresponse()
+        assert (response.status, json.loads(response.read())) == (
+            403,
+            {"error": "forbidden"},
+        ), path
+        chat = requests.post(
+            f"http://127.0.0.1:{PROXY_PORT}/inference/chat/completions",
+            headers={"Authorization": "Bearer sk-or-expected"},
+            json={},
+            timeout=5,
+        )
+        assert chat.status_code == 400 and "model" in chat.json()["error"]
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
         """A grouped solver turn reaches the real SessionServer only through nginx."""
@@ -196,7 +374,6 @@ class TestSandboxIsolation:
                 json.dumps(
                     {
                         "session_id": "integration-session",
-                        "tool_contract_version": "oro_task_tools_v2",
                         "call_id": "integration-group-1",
                         "idempotency_key": "integration-group-1",
                         "turn": 1,
@@ -238,10 +415,7 @@ class TestSandboxIsolation:
                     "problem_id": "positive",
                     "query": "Run the deterministic environment preflight.",
                     "environment": {
-                        "binding": {
-                            "session_id": "integration-session",
-                            "tool_contract_version": "oro_task_tools_v2",
-                        },
+                        "binding": {"session_id": "integration-session"},
                         "action_groups": [
                             [
                                 {"name": "search", "args": {"query": "shoes"}},
@@ -311,7 +485,6 @@ class TestSandboxIsolation:
                             "policy_view": {
                                 "query": "Public shopper request",
                                 "max_steps": 10,
-                                "tool_contract_version": "oro_task_tools_v2",
                                 "tools": [],
                                 "max_calls_per_turn": 16,
                             },

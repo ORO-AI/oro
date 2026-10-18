@@ -11,6 +11,7 @@ def agent_main(_problem):
         {
             "cost": 0.25,
             "prompt_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 6},
             "completion_tokens": 2,
         }
     )

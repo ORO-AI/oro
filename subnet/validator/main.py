@@ -4,14 +4,16 @@ import gzip
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from uuid import UUID
 
 import requests
@@ -30,7 +32,13 @@ from src.agent.sandbox_executor import (
 )
 from src.agent.types import ProblemDict, SandboxMetadata
 from .backend_client import BackendClient, BackendError
-from .bounded_io import read_text_lossy, run_capped
+from .bounded_io import (
+    RunStoppedEarly,
+    SandboxResourceExceeded,
+    make_fs_usage_guard,
+    read_text_lossy,
+    run_capped,
+)
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
 from .output_split import split_output_by_problem
@@ -54,11 +62,12 @@ from .environment_preflight import (
     environment_preflight_run_id,
     run_environment_preflight,
 )
-from .episode_emitter import emit_finalized_results
+from .episode_emitter import emit_finalized_results, load_inference_transcripts
 from .generated_evaluation import (
     GENERATED_SCORE_SCHEMA,
     aggregate_results,
     select_run_task_roster,
+    summarize_agent_inference_usage,
     summarize_episode_resource_usage,
     validate_run_results,
     write_problem_file,
@@ -196,6 +205,16 @@ def _claim_environment_binding(
     return pack_sha256
 
 
+# Per-evaluation disk budget. While the sandbox runs, the validator watches the free
+# space and free inodes of the evaluation filesystem; if the run consumes more than
+# this much of either, the run is killed and that evaluation fails. The byte budget
+# leaves room for the validator's own capped capture logs written during the run, and
+# both sit far below a validator host's free space. Sparse files consume no real
+# blocks, so they count toward nothing.
+SANDBOX_RUN_MAX_DISK_BYTES = 2 * 1024 * 1024 * 1024
+SANDBOX_RUN_MAX_INODES = 100_000
+
+
 class Validator:
     def __init__(self):
         self.config = self.get_config()
@@ -273,7 +292,7 @@ class Validator:
         parser.add_argument(
             "--sandbox-max-workers",
             type=int,
-            default=int(os.environ.get("SANDBOX_MAX_WORKERS") or "45"),
+            default=int(os.environ.get("SANDBOX_MAX_WORKERS") or "30"),
             help="Number of parallel problem workers in sandbox (env: SANDBOX_MAX_WORKERS).",
         )
         parser.add_argument(
@@ -303,7 +322,10 @@ class Validator:
             "--session-tool-timeout",
             type=float,
             default=float(os.environ.get("ORO_SESSION_TOOL_TIMEOUT", "10")),
-            help="Per-action timeout before quarantine (env: ORO_SESSION_TOOL_TIMEOUT).",
+            help=(
+                "Per-action timeout before quarantine; a grouped call gets it per action, "
+                "up to 30s (env: ORO_SESSION_TOOL_TIMEOUT)."
+            ),
         )
         parser.add_argument(
             "--session-simulator-timeout",
@@ -346,7 +368,7 @@ class Validator:
         parser.add_argument(
             "--heartbeat-interval",
             type=int,
-            default=int(os.environ.get("ORO_HEARTBEAT_INTERVAL", "30")),
+            default=int(os.environ.get("ORO_HEARTBEAT_INTERVAL", "8")),
             help="Seconds between heartbeats during execution (env: ORO_HEARTBEAT_INTERVAL)",
         )
         parser.add_argument(
@@ -452,8 +474,9 @@ class Validator:
         """
         d = Path(self.config.workspace_dir) / "logs" / f"eval_{eval_run_id_str}"
         d.mkdir(parents=True, exist_ok=True)
-        # Sandbox runs as --user 1000:1000, ensure it can write to this directory
-        os.chmod(d, 0o777)
+        # Sandbox runs as --user 1000:1000, ensure it can write to this directory.
+        # The sticky bit keeps the validator's own files (logs, inputs) in place.
+        os.chmod(d, 0o1777)
         return d
 
     @staticmethod
@@ -481,7 +504,9 @@ class Validator:
 
             eval_dir = self._eval_dir(eval_run_id)
             agent_path = eval_dir / "agent.py"
-            agent_path.write_text(response.text)
+            # Raw bytes: response.text guesses the charset (S3 sends none) and
+            # can mis-decode UTF-8 source, corrupting non-ASCII literals.
+            agent_path.write_bytes(response.content)
             logging.info(f"Successfully downloaded agent to {agent_path}")
             return agent_path
         except requests.exceptions.RequestException as e:
@@ -499,6 +524,7 @@ class Validator:
         inference_access_token: Optional[str] = None,
         inference_provider: Optional[str] = None,
         inference_base_url: Optional[str] = None,
+        stop_event: threading.Event | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         """Run sandbox with downloaded agent, return output file path and metadata.
 
@@ -557,6 +583,11 @@ class Validator:
         SANDBOX_ACTIVE.inc()
         start_time = time.time()
         try:
+            size_guard = make_fs_usage_guard(
+                eval_dir,
+                max_bytes=SANDBOX_RUN_MAX_DISK_BYTES,
+                max_inodes=SANDBOX_RUN_MAX_INODES,
+            )
             return self._run_sandbox_inner(
                 cmd=cmd,
                 stdout_log=stdout_log,
@@ -564,6 +595,8 @@ class Validator:
                 output_file=output_file,
                 eval_run_id=eval_run_id,
                 metadata=metadata,
+                stop_event=stop_event,
+                size_guard=size_guard,
             )
         finally:
             duration = time.time() - start_time
@@ -580,6 +613,8 @@ class Validator:
         output_file: Path,
         eval_run_id: str,
         metadata: SandboxMetadata,
+        stop_event: threading.Event | None = None,
+        size_guard: Callable[[], str | None] | None = None,
     ) -> tuple[Optional[Path], SandboxMetadata]:
         try:
             # Capture through a byte cap so a runaway agent's stdout/stderr can't
@@ -591,12 +626,16 @@ class Validator:
                 stderr_path=stderr_log,
                 max_bytes=self.config.sandbox_log_max_bytes,
                 timeout=self.config.sandbox_timeout,
+                stop_event=stop_event,
+                size_guard=size_guard,
             )
             metadata["exit_code"] = returncode
 
             # Always log sandbox output for debugging
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
                     log_fn = logging.error if returncode != 0 else logging.info
@@ -605,7 +644,9 @@ class Validator:
                     )
 
             if stdout_log.exists():
-                stdout_content = read_text_lossy(stdout_log)
+                stdout_content = read_text_lossy(
+                    stdout_log, self.config.sandbox_log_max_bytes
+                )
                 if stdout_content.strip():
                     logging.info(
                         f"Sandbox stdout for eval_run {eval_run_id}:\n{stdout_content}"
@@ -636,11 +677,25 @@ class Validator:
                     f"Output file not found after sandbox execution: {output_file}"
                 )
                 if stderr_log.exists():
-                    stderr_content = read_text_lossy(stderr_log)
+                    stderr_content = read_text_lossy(
+                        stderr_log, self.config.sandbox_log_max_bytes
+                    )
                     if stderr_content.strip():
                         logging.error(f"Sandbox stderr:\n{stderr_content}")
                 return None, metadata
 
+        except SandboxResourceExceeded as e:
+            metadata["exit_code"] = -1
+            metadata["stderr_tail"] = str(e)[-500:]
+            logging.error(
+                f"Sandbox exceeded its disk budget for eval_run {eval_run_id}: {e}"
+            )
+            self._kill_sandbox_container(eval_run_id)
+            return None, metadata
+        except RunStoppedEarly:
+            metadata["exit_code"] = -1
+            self._kill_sandbox_container(eval_run_id)
+            return None, metadata
         except subprocess.TimeoutExpired:
             metadata["exit_code"] = -1
             # run_capped SIGKILLs the `docker run` CLI, but the container keeps
@@ -649,7 +704,9 @@ class Validator:
             # own internal timeout. Kill the orphan by name (ORO-1414).
             self._kill_sandbox_container(eval_run_id)
             if stderr_log.exists():
-                stderr_content = read_text_lossy(stderr_log)
+                stderr_content = read_text_lossy(
+                    stderr_log, self.config.sandbox_log_max_bytes
+                )
                 if stderr_content.strip():
                     metadata["stderr_tail"] = stderr_content[-500:]
             logging.warning(
@@ -746,6 +803,11 @@ class Validator:
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
 
+        # Validate the optional startup gate before starting any background
+        # service.  A mixed configuration (runtime enabled without a valid
+        # pack pin) must fail fast; otherwise startup enters the HTTP server
+        # cleanup path even though no preflight can possibly run.
+        self._validate_environment_preflight_config()
         self.session_server.start()
         logging.info(
             "Session runtime listening on "
@@ -946,15 +1008,8 @@ class Validator:
             logging.info("Environment runtime feature flag is disabled")
             return None
 
+        self._validate_environment_preflight_config()
         pack_sha256 = self.config.environment_preflight_pack_sha256
-        if len(pack_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in pack_sha256
-        ):
-            raise RuntimeError(
-                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
-                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
-            )
-
         loaded_pack = asyncio.run(
             fetch_and_validate_pack(
                 pack_sha256,
@@ -983,6 +1038,20 @@ class Validator:
         )
         logging.info(f"Environment preflight passed: pack={pack_sha256}")
         return summary
+
+    def _validate_environment_preflight_config(self) -> None:
+        """Reject an unusable opt-in preflight before starting services."""
+
+        if not self.config.environment_runtime_enabled:
+            return
+        pack_sha256 = self.config.environment_preflight_pack_sha256
+        if len(pack_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in pack_sha256
+        ):
+            raise RuntimeError(
+                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
+                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
+            )
 
     def prepare_environment_sessions(
         self,
@@ -1141,6 +1210,7 @@ class Validator:
         expected_task_roster: dict[str, str] | None = None,
         *,
         require_complete: bool = False,
+        inference_transcripts: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         env_pack_sha256 = _claim_environment_binding(work)
         if env_pack_sha256 is None:
@@ -1154,6 +1224,11 @@ class Validator:
                 pack_sha256=env_pack_sha256,
                 require_complete=require_complete,
             )
+        kwargs = (
+            {"inference_transcripts": inference_transcripts}
+            if inference_transcripts is not None
+            else {}
+        )
         submitted = asyncio.run(
             emit_finalized_results(
                 backend_url=self.config.backend_url,
@@ -1161,6 +1236,7 @@ class Validator:
                 env_pack_sha256=env_pack_sha256,
                 results=results,
                 download_url_rewriter=_rewrite_localhost_url,
+                **kwargs,
             )
         )
         logging.info(
@@ -1288,17 +1364,35 @@ class Validator:
         )
         sandbox_output = None
         sandbox_metadata: SandboxMetadata = {}
-        reporter = GeneratedProgressReporter(
-            registry,
-            lambda batch: self._emit_environment_result_batch(
-                work, batch, selected_roster
-            ),
-        )
+        output_path = self._eval_dir(eval_run_id_str) / "output.jsonl"
+        sandbox_finished = False
+
+        def emit_with_transcripts(batch: list[dict[str, Any]]) -> None:
+            transcripts = (
+                load_inference_transcripts(
+                    output_path, secret_values=(inference_access_token,)
+                )
+                if output_path.exists()
+                else {}
+            )
+            if not sandbox_finished and any(
+                str(result.get("session_id")) not in transcripts for result in batch
+            ):
+                raise RuntimeError("inference transcript is not ready")
+            self._emit_environment_result_batch(
+                work,
+                batch,
+                selected_roster,
+                inference_transcripts=transcripts,
+            )
+
+        reporter = GeneratedProgressReporter(registry, emit_with_transcripts)
+        emission_failure: Exception | None = None
         try:
             reporter.start()
-            problem_file = self._eval_dir(eval_run_id_str) / "problems.jsonl"
-            write_problem_file(problem_file, sessions)
             try:
+                problem_file = self._eval_dir(eval_run_id_str) / "problems.jsonl"
+                write_problem_file(problem_file, sessions)
                 sandbox_output, sandbox_metadata = self.run_sandbox(
                     agent_path,
                     eval_run_id_str,
@@ -1306,34 +1400,49 @@ class Validator:
                     inference_access_token=inference_access_token,
                     inference_provider=inference_provider,
                     inference_base_url=inference_base_url,
+                    stop_event=registry.key_exhausted,
                 )
             finally:
                 reporter.stop()
-                results = registry.finalized_results()
-                env_pack_sha256 = _claim_environment_binding(work)
-                if env_pack_sha256 is None:
-                    raise ValueError(
-                        "environment binding disappeared before finalization"
-                    )
-                validate_run_results(
-                    results,
-                    selected_roster,
-                    evaluation_run_id=str(work.eval_run_id),
-                    agent_version_id=str(work.agent_version_id),
-                    pack_sha256=env_pack_sha256,
-                )
-                try:
-                    reporter.flush(results)
-                except Exception as exc:
-                    logging.warning(
-                        "Final generated progress batch failed: "
-                        f"{type(exc).__name__}: {exc}"
-                    )
+            sandbox_finished = True
+            results = registry.finalized_results()
+            env_pack_sha256 = _claim_environment_binding(work)
+            if env_pack_sha256 is None:
+                raise ValueError("environment binding disappeared before finalization")
+            validate_run_results(
+                results,
+                selected_roster,
+                evaluation_run_id=str(work.eval_run_id),
+                agent_version_id=str(work.agent_version_id),
+                pack_sha256=env_pack_sha256,
+            )
+            try:
+                reporter.flush(results)
+            except Exception as exc:
+                emission_failure = exc
         finally:
             reporter.stop()
             self.session_runtime.clear(registry)
 
-        if not sandbox_output:
+        key_exhausted = registry.key_exhausted.is_set()
+        if key_exhausted:
+            # Miner ran out of inference budget mid-run. Instead of failing
+            # the whole run and discarding all completed work, score the
+            # tasks that already finished. Sessions that had not started yet
+            # (or were mid-flight when the key hit its cap) are surfaced by
+            # `finalized_results` as `agent_error` and count as zero reward
+            # in `aggregate_results`, so the score is `paid_reward_sum /
+            # roster_size`. Miner gets partial credit for the episodes they
+            # completed instead of a cliff-drop to a full failure. The
+            # sandbox will have stopped early via `stop_event`, so an empty
+            # `sandbox_output` is expected on this path and is not a real
+            # sandbox failure.
+            logging.info(
+                "Miner inference key exhausted; scoring completed episodes only"
+            )
+            sandbox_metadata = dict(sandbox_metadata)
+            sandbox_metadata["_miner_inference_key_exhausted"] = True
+        elif not sandbox_output:
             self._complete_with_failure(
                 eval_run_id,
                 TerminalStatus.FAILED,
@@ -1343,7 +1452,16 @@ class Validator:
             return None
 
         try:
-            score = aggregate_results(results)
+            score = aggregate_results(
+                results,
+                selected_reader_task_ids={
+                    task_id
+                    for task_id, task in zip(
+                        registry.loaded_pack.task_ids, registry.loaded_pack.task_specs, strict=True,
+                    )
+                    if task_id in selected_roster and getattr(task.situation, "reader", None)
+                },
+            )
         except ValueError as exc:
             self._complete_with_failure(
                 eval_run_id,
@@ -1352,12 +1470,18 @@ class Validator:
                 sandbox_metadata=sandbox_metadata,
             )
             return None
+        if emission_failure is not None:
+            logging.warning(
+                "Generated episode transcript persistence failed for "
+                f"{eval_run_id_str}; scoring is unaffected: "
+                f"{type(emission_failure).__name__}: {emission_failure}"
+            )
         logging.info(
             f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
         )
         try:
             eval_dir = self._eval_dir(eval_run_id_str)
-            output_stats = read_inference_stats(str(sandbox_output))
+            output_stats = read_inference_stats(str(output_path))
             sidecar_stats = read_inference_stats(
                 str(eval_dir / "inference_stats.jsonl")
             )
@@ -1377,6 +1501,15 @@ class Validator:
                 merge_inference_stats(agent_stats, simulator_stats),
                 inference_provider,
             )
+            agent_by_episode = summarize_episode_resource_usage(
+                results,
+                agent_stats,
+                inference_provider,
+            )
+            agent_inference = summarize_agent_inference_usage(
+                agent_stats,
+                inference_provider,
+            )
         except Exception:
             logging.warning(
                 "Unable to collect shadow episode inference usage",
@@ -1385,7 +1518,9 @@ class Validator:
         else:
             sandbox_metadata = dict(sandbox_metadata)
             sandbox_metadata["_shadow_resource_usage"] = {
-                "by_episode": by_episode
+                "by_episode": by_episode,
+                "agent_by_episode": agent_by_episode,
+                "agent_inference": agent_inference,
             }
         return _EvaluationCompletion(
             score=score,
@@ -1556,6 +1691,13 @@ class Validator:
         logging.info(f"Heartbeat manager started for {eval_run_id_str}")
 
         try:
+            self.session_runtime.set_inference_grant(
+                eval_run_id_str,
+                inference_access_token,
+                work.inference_token.expires_at.timestamp(),
+            )
+            # Start from an empty directory, even after a crashed earlier attempt.
+            shutil.rmtree(self._eval_dir(eval_run_id_str))
             # Step 1: Download agent code
             agent_path = self.download_agent(work.code_download_url, eval_run_id_str)
             if not agent_path:
@@ -1594,6 +1736,7 @@ class Validator:
                 sandbox_metadata=sandbox_metadata,
             )
         finally:
+            self.session_runtime.clear_inference_grant()
             heartbeat_mgr.stop()
             if not heartbeat_mgr.is_healthy():
                 logging.warning(f"Heartbeat failures occurred during {eval_run_id_str}")
@@ -1602,8 +1745,6 @@ class Validator:
             eval_dir = self._eval_dir(eval_run_id_str)
             if eval_dir.exists():
                 try:
-                    import shutil
-
                     shutil.rmtree(eval_dir)
                 except OSError as e:
                     logging.debug(f"Cleanup failed for {eval_dir}: {e}")
@@ -1718,9 +1859,12 @@ class Validator:
                         f"Reported logs_s3_key for {len(uploaded_keys)} problems"
                     )
                 except Exception as e:
+                    # ORO-702 removed the progress retry queue on purpose ("no
+                    # disk retry queue for progress reports"). This post-run
+                    # logs_s3_key report has no retry path; on failure we drop it
+                    # (the affected problems keep a broken download link) and let
+                    # the warning above surface the real error. See ORO-2315.
                     logging.warning(f"Failed to report logs_s3_key: {e}")
-                    for update in progress_updates:
-                        self.retry_queue.add_progress(eval_run_id, update)
 
             return last_s3_key
         except Exception as e:

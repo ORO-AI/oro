@@ -9,6 +9,7 @@ import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
 
+from oro_env_runtime.contracts import RUNTIME_CONTRACT
 from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
 from validator.backend_client import BackendClient, BackendError
@@ -58,7 +59,9 @@ class TestBackendClientClaimWork:
         assert result is not None
         assert result.eval_run_id == UUID("12345678-1234-1234-1234-123456789012")
         assert result.code_download_url == "https://example.com/code.py"
-        assert "body" not in mock_call.call_args.kwargs
+        assert mock_call.call_args.kwargs["body"].to_dict() == {
+            "runtime_contract": RUNTIME_CONTRACT
+        }
 
     def test_claim_work_with_service_versions(self, mock_wallet):
         from oro_sdk.models.claim_work_response import ClaimWorkResponse

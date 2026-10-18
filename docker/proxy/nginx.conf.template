@@ -13,6 +13,9 @@ http {
     # filters tell `upstream-5xx-503` (Chutes parrot, dashboard) apart from
     # `internal-allowlist-unavailable` (proxy broken, page). See ORO-1159.
     js_set $proxy_outcome validate_model.outcome;
+    js_set $proxy_fields validate_model.fields;
+    js_set $proxy_details validate_model.details;
+    js_set $proxy_run_id validate_model.runId;
 
     # Cross-worker shared cache for the inference allowlist. njs module-level
     # vars are per-worker, so 8 workers each cold-start with an empty cache
@@ -49,10 +52,10 @@ http {
     # tell upstream-relayed 5xx apart from proxy-internal failures. See
     # ORO-1159.
     log_format inference_combined '$remote_addr - $remote_user [$time_local] '
-                                  '"$request" $status $body_bytes_sent '
+                                  '"$request_method $uri $server_protocol" $status $body_bytes_sent '
                                   '"$http_referer" "$http_user_agent" '
                                   'ups=$upstream_status urt=$upstream_response_time '
-                                  'outcome=$proxy_outcome';
+                                  'outcome=$proxy_outcome fields=$proxy_fields $proxy_details run=$proxy_run_id';
 
     # Local-only stub_status endpoint for nginx-prometheus-exporter. On a
     # separate listener so it never conflicts with the public proxy paths
@@ -100,6 +103,7 @@ http {
         location /inference/ {
             limit_req zone=agent burst=50 nodelay;
             client_body_buffer_size 1m;
+            default_type application/json;
             js_content validate_model.validate;
         }
 
@@ -120,19 +124,39 @@ http {
             proxy_read_timeout ${SESSION_CALL_TIMEOUT};
         }
 
+        # The validator checks the bearer against its active run in memory.
+        # This uses the existing private proxy-to-validator network path, so
+        # Watchtower image updates need no new Compose mount.
+        location = /_inference_grant {
+            internal;
+            resolver 127.0.0.11 valid=10s;
+            set $session_upstream http://${SESSION_RUNTIME_HOST}:${SESSION_RUNTIME_PORT};
+            proxy_pass $session_upstream/v1/inference/authorize;
+            proxy_pass_request_headers off;
+            proxy_pass_request_body off;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator $http_x_oro_validator;
+            proxy_set_header Content-Length "0";
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 5s;
+        }
+
         # Internal location: fetch the allowed-models list from the ORO Backend
         # so the proxy stays in sync without an image rebuild. njs subrequests
         # this on cache miss; shared-cache TTL lives in validate_model.js.
         location = /_backend_models {
             internal;
 
-            # Literal URL (no nginx vars) — nginx resolves the hostname once at
-            # startup via libc, which consults /etc/hosts. Lets environments
-            # that need to pin Backend to a specific IP override DNS without
-            # forking the proxy image. Location-match URI replacement still
-            # forwards `?provider=…` from the subrequest automatically.
+            # Per-request DNS, like /_openrouter_proxy/. A literal URL is
+            # resolved once at startup; when that CloudFront edge IP went
+            # stale, every allowlist fetch failed until the proxy restarted
+            # and each inference call returned 503. A variable proxy_pass
+            # sends its URI as-is, so the subrequest's `?provider=…` is
+            # appended explicitly.
+            resolver ${PROXY_RESOLVER} ipv6=off;
+            set $backend_models_upstream ${BACKEND_URL}/v1/public/inference/models;
             proxy_method GET;
-            proxy_pass ${BACKEND_URL}/v1/public/inference/models;
+            proxy_pass $backend_models_upstream$is_args$args;
             proxy_ssl_server_name on;
             proxy_http_version 1.1;
             # Strip parent-request headers + body and overwrite the framing
@@ -170,6 +194,7 @@ http {
 
             # Forward miner's auth token (set by ProxyClient from INFERENCE_ACCESS_TOKEN)
             proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
             proxy_set_header Host ${CHUTES_HOST};
             proxy_set_header X-Identifier "orosn15";
             proxy_set_header X-Real-IP $remote_addr;
@@ -195,7 +220,7 @@ http {
             resolver ${PROXY_RESOLVER} ipv6=off;
             set $openrouter_upstream https://${OPENROUTER_HOST};
 
-            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API
+            # Strip /_openrouter_proxy prefix and map to OpenRouter /api/v1/* API.
             rewrite ^/_openrouter_proxy/(.*) /api/v1/$1 break;
             proxy_pass $openrouter_upstream;
             proxy_ssl_server_name on;
@@ -203,6 +228,7 @@ http {
             # Forward miner's auth token (set by ProxyClient from
             # INFERENCE_ACCESS_TOKEN, populated per claim_work).
             proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
             proxy_set_header Host ${OPENROUTER_HOST};
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -210,6 +236,26 @@ http {
             # Prevent gzip double-encoding: tell upstream not to compress
             proxy_set_header Accept-Encoding identity;
 
+            proxy_connect_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 300s;
+        }
+
+        # The validator's typed decisions (the user simulator's disclosure
+        # reader), outside /api/v1. Its own location with a fixed upstream
+        # path, so no agent route maps onto it; validate_model.js sends only
+        # the validator's calls here.
+        location = /_openrouter_decisions {
+            internal;
+            resolver ${PROXY_RESOLVER} ipv6=off;
+            set $openrouter_upstream https://${OPENROUTER_HOST};
+            rewrite ^ /api/alpha/decisions? break;
+            proxy_pass $openrouter_upstream;
+            proxy_ssl_server_name on;
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header X-ORO-Validator "";  # the validator's secret never goes upstream
+            proxy_set_header Host ${OPENROUTER_HOST};
+            proxy_set_header Accept-Encoding identity;
             proxy_connect_timeout 300s;
             proxy_send_timeout 300s;
             proxy_read_timeout 300s;

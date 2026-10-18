@@ -9,18 +9,23 @@ import math
 import os
 import random
 import re
-import stat
 import subprocess
 import sys
-from collections import Counter, defaultdict
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from oro_env_runtime import failure_classes
+from oro_env_runtime.delivery import is_sanitized_qualifying_manifest
+from oro_env_runtime.pack import TF_BY_FAMILY
+
 from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 from subnet.validator.env_pack_loader import (
     LoadedPack,
     PackValidationError,
@@ -34,21 +39,10 @@ from subnet.validator.generated_evaluation import aggregate_results, write_probl
 from subnet.validator.session_registry import SessionRegistry
 from subnet.validator.session_service import SessionRuntime, SessionServer
 
-GENERATED_FAMILIES = frozenset(
-    {
-        "intent_decomposition",
-        "retrieval_recall",
-        "constraint_satisfaction",
-        "preference_reasoning",
-        "ranking",
-        "recovery",
-        "justification",
-    }
-)
+GENERATED_FAMILIES = frozenset(TF_BY_FAMILY)
 QUALIFYING_TASKS_PER_FAMILY = 5
 LOCAL_SUMMARY_SCHEMA = "oro.local_generated_summary.v1"
 SANDBOX_RESULT_GRACE_SECONDS = 60.0
-MAX_SANDBOX_OUTPUT_BYTES = 128 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -106,27 +100,9 @@ class LocalGeneratedValidatorError(RuntimeError):
 
 
 def _sample_problem_ids(pack: LoadedPack, count: int, seed: int | None) -> list[str]:
-    """Pick ``count`` task ids at random, spread as evenly across families as possible."""
+    """Pick ``count`` task ids at random, returned in archive order."""
 
-    rng = random.Random(seed)
-    by_family: dict[str, list[int]] = defaultdict(list)
-    for index, task in enumerate(pack.task_specs):
-        by_family[task.family].append(index)
-
-    families = sorted(by_family)
-    rng.shuffle(families)
-    for indexes in by_family.values():
-        rng.shuffle(indexes)
-
-    chosen: list[int] = []
-    deepest = max(len(indexes) for indexes in by_family.values())
-    for depth in range(deepest):
-        for family in families:
-            indexes = by_family[family]
-            if depth < len(indexes):
-                chosen.append(indexes[depth])
-                if len(chosen) == count:
-                    return [pack.task_ids[index] for index in sorted(chosen)]
+    chosen = random.Random(seed).sample(range(len(pack.task_ids)), count)
     return [pack.task_ids[index] for index in sorted(chosen)]
 
 
@@ -142,18 +118,30 @@ def validate_local_pack(
 
     Without ``problem_count`` this selects the qualifying roster: the first
     ``tasks_per_family`` of every family, in archive order. With it, that many
-    problems are sampled at random and spread across families, so a short run
-    still covers as many of TF1 through TF7 as it has room for.
+    problems are sampled at random.
     """
 
     if problem_count is None and tasks_per_family <= 0:
         raise ValueError("tasks_per_family must be positive")
+    # Local runs are practice only. A row without the public (decoupled) grader is
+    # sealed race material and never runs here;
+    # nor does a process that holds any race configuration.
+    if any(name.startswith("ORO_RACE_") and value for name, value in os.environ.items()):
+        raise ValueError("local generated validator refuses to run with race configuration set")
+    # Only the sanitized qualifying delivery, never a raw compiler pack (sealed provenance).
+    if not is_sanitized_qualifying_manifest(pack.manifest):
+        raise ValueError("local generated pack is not a sanitized qualifying delivery")
+    race = [
+        task_id
+        for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True)
+        if not (task.grading and task.grading.decoupled)
+    ]
+    if race:
+        raise ValueError(f"local generated pack holds race rows: {','.join(race[:5])}")
 
     counts = Counter(task.family for task in pack.task_specs)
-    # A pack may ship a SUBSET of the supported families (e.g. a six-family
-    # pack that omits preference_reasoning). Only an *unknown* family, or a
-    # present family with too few tasks for a full qualifying run, is invalid;
-    # an omitted family is allowed.
+    # Only an unknown family, or a family with too few tasks for a full qualifying
+    # run, is invalid.
     unexpected = sorted(set(counts) - expected_families)
     insufficient = (
         []
@@ -197,24 +185,7 @@ def _sha256(path: Path) -> str:
 
 def _read_sandbox_rows(path: Path) -> list[dict[str, Any]]:
     try:
-        parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fd = os.open(
-                path.name,
-                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-                dir_fd=parent_fd,
-            )
-        finally:
-            os.close(parent_fd)
-        with os.fdopen(fd, "rb") as source:
-            metadata = os.fstat(source.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                raise ValueError("sandbox output must be a regular file with one link")
-            if metadata.st_size > MAX_SANDBOX_OUTPUT_BYTES:
-                raise ValueError("sandbox output exceeds size limit")
-            content = source.read(MAX_SANDBOX_OUTPUT_BYTES + 1)
-        if len(content) > MAX_SANDBOX_OUTPUT_BYTES:
-            raise ValueError("sandbox output exceeds size limit")
+        content = read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES, single_link=True)
         rows = [
             json.loads(line)
             for line in content.decode("utf-8").splitlines()
@@ -256,6 +227,7 @@ def _summary_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "reward": float(verdict.get("paid_reward") or 0) if correct else 0.0,
                 "error_classification": _error_classification(result),
                 "error_detail": result.get("error_detail"),
+                "failure": result.get("failure"),
             }
         )
     return tasks
@@ -445,7 +417,6 @@ def run_local_generated_validator(
     config: LocalGeneratedConfig,
 ) -> LocalGeneratedResult:
     """Execute one local EnvPack through the generated validator components."""
-
     if config.max_workers <= 0:
         raise ValueError("max_workers must be positive")
     if config.timeout <= 0:
@@ -474,7 +445,7 @@ def run_local_generated_validator(
     caught_error: Exception | None = None
     run_error: LocalGeneratedValidatorError | None = None
     phase = "initialization"
-    runtime: SessionRuntime | None = None
+    runtime = SessionRuntime()
     server: SessionServer | None = None
     # The digest the runtime recorded as agent_version_id. Read once, before the
     # sandbox starts, so the summary cannot disagree with the episode receipts if
@@ -493,7 +464,9 @@ def run_local_generated_validator(
         )
 
         phase = "server_setup"
-        runtime = SessionRuntime()
+        runtime.set_inference_grant(
+            run_id, config.inference_access_token, time.time() + config.timeout + 300
+        )
         server = SessionServer(
             runtime,
             host=config.session_host,
@@ -599,6 +572,11 @@ def run_local_generated_validator(
         finally:
             phase = "finalization"
             results = registry.finalized_results()
+            # Each episode's failure categories, read from its own task's situation.
+            situations = dict(zip(pack.task_ids, pack.task_specs, strict=True))
+            for result in results:
+                task = situations[str(result.get("task_id"))]
+                result["failure"] = failure_classes(result, task.situation)
             _write_episode_results(artifact_dir / "episode_results.jsonl", results)
 
         if sandbox_exception is not None:
@@ -701,6 +679,7 @@ def run_local_generated_validator(
             summary_path=summary_path,
         )
     finally:
+        runtime.clear_inference_grant()
         cleanup_error = _cleanup(
             container_name=container_name,
             remove_container=remove_container,
@@ -790,7 +769,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         default=None,
         help=(
             "How many problems to run, sampled at random and spread across the "
-            "seven families. Defaults to the full qualifying roster."
+            "task families. Defaults to the full qualifying roster."
         ),
     )
     parser.add_argument(
@@ -851,7 +830,7 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         inference_base_url=base_url,
         model=model,
         pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
-        or "f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5",
+        or "919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379",
         problem_count=args.problems,
         seed=seed,
         max_workers=max_workers,

@@ -36,7 +36,7 @@ def _docker_container_count() -> int:
 
 
 # psutil.cpu_percent(interval=None) returns the value since the last call.
-# Heartbeats fire every 30s so the inter-call gap is always plenty.
+# Heartbeats are spaced by seconds, so the inter-call gap is ample.
 _COLLECTORS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("cpu_pct", lambda: float(psutil.cpu_percent(interval=None))),
     ("ram_pct", lambda: float(psutil.virtual_memory().percent)),

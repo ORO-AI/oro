@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Collection
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,16 @@ GENERATED_PROBLEM_SCHEMA = "oro.generated_environment_problem.v1"
 # a run where the agent broke the sealed contract.
 _CHEATING_OUTCOMES = frozenset({"leakage", "exploit"})
 
-# Any harness failure makes the evaluation unusable, matching Backend's
-# acceptance rule. Infrastructure failures are not zero-reward agent outcomes;
-# never accept a partial score or change the frozen roster's denominator.
+# Harness failures (environment_error / verifier_error) score as zero
+# reward alongside agent_error UP TO a fraction of the roster. Beyond the
+# threshold the whole run is treated as an infrastructure failure: the
+# upstream (simulator, verifier, provider) is degraded enough that the
+# episodes we DID get are unrepresentative, so we hard-fail the run and
+# let it re-queue when infra recovers. Prior behavior only hard-failed at
+# 100% infra which meant a rate-limited upstream day would ship dozens of
+# 0.05-score partial completions and count them against miners.
 _HARNESS_OUTCOMES = frozenset({"environment_error", "verifier_error"})
+_INFRA_FAILURE_THRESHOLD = 0.30
 
 
 def select_run_task_roster(
@@ -90,10 +97,7 @@ def write_problem_file(path: Path, sessions: list[dict[str, Any]]) -> None:
                 "category": "generated_environment",
                 "environment": {
                     "schema_version": GENERATED_PROBLEM_SCHEMA,
-                    "binding": {
-                        "session_id": session_id,
-                        "tool_contract_version": policy_view["tool_contract_version"],
-                    },
+                    "binding": {"session_id": session_id},
                     "policy_view": policy_view,
                 },
             }
@@ -104,7 +108,9 @@ def write_problem_file(path: Path, sessions: list[dict[str, Any]]) -> None:
     )
 
 
-def aggregate_results(results: list[dict[str, Any]]) -> float:
+def aggregate_results(
+    results: list[dict[str, Any]], *, selected_reader_task_ids: Collection[str] = (),
+) -> float:
     """Average paid task rewards, counting agent failures as zero."""
 
     if not results:
@@ -126,9 +132,14 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
         )
         raise ValueError(f"generated evaluation integrity failure: {detail}")
 
-    if outcomes.keys() & _HARNESS_OUTCOMES:
-        # Keep the existing count-form completion protocol understood by older
-        # Backends. Include all outcomes; integrity failures took precedence above.
+    harness_count = sum(outcomes.get(o, 0) for o in _HARNESS_OUTCOMES)
+    # A selected Reader failure is fatal; ordinary rows retain the historical
+    # strict > threshold. Count-token reasons classify either as infrastructure.
+    if any(
+        result["task_id"] in selected_reader_task_ids
+        and result.get("outcome") in _HARNESS_OUTCOMES
+        for result in results
+    ) or harness_count * 10 > len(results) * 3:
         detail = ", ".join(
             f"{outcome}={count}" for outcome, count in sorted(outcomes.items())
         )
@@ -136,6 +147,11 @@ def aggregate_results(results: list[dict[str, Any]]) -> float:
             f"generated evaluation infrastructure failure: {detail}"
         )
 
+    # A subset of harness failures is scored the same as agent failures:
+    # each counts as zero reward against the roster denominator. Prior
+    # behavior hard-failed the whole run on any environment_error /
+    # verifier_error episode, so a random tool-timeout on 1 of 90 tasks
+    # threw away the other 89 completed episodes.
     reward_total = Decimal("0")
     for result in results:
         verdict = result.get("verdict") or {}
@@ -176,20 +192,23 @@ def summarize_episode_resource_usage(
     episodes = {}
     for result in results:
         stats = stats_by_session.get(str(result.get("session_id")))
+        has_stats = stats is not None
+        stats = stats or {}
         usage = {
-            "inference_requests": int((stats or {}).get("inference_total", 0)),
-            "inference_failed_requests": int(
-                (stats or {}).get("inference_failed", 0)
-            ),
-            "prompt_tokens": int((stats or {}).get("prompt_tokens", 0)),
-            "completion_tokens": int((stats or {}).get("completion_tokens", 0)),
+            "inference_requests": int(stats.get("inference_total", 0)),
+            "inference_failed_requests": int(stats.get("inference_failed", 0)),
+            "prompt_tokens": int(stats.get("prompt_tokens", 0)),
+            "cached_tokens": int(stats.get("cached_tokens", 0)),
+            "completion_tokens": int(stats.get("completion_tokens", 0)),
+            "requested_models": dict(stats.get("requested_models") or {}),
+            "served_models": dict(stats.get("served_models") or {}),
         }
         operation_counts = _operation_counts(result)
         usage["operation_requests"] = sum(operation_counts.values())
         usage["operations"] = dict(sorted(operation_counts.items()))
         if provider != "openrouter":
             usage["inference_cost_status"] = "unsupported"
-        elif stats is None:
+        elif not has_stats:
             usage["inference_cost_status"] = "missing"
         else:
             missing = int(stats.get("inference_cost_missing", 0))
@@ -203,11 +222,50 @@ def summarize_episode_resource_usage(
     return episodes
 
 
+def summarize_agent_inference_usage(
+    stats_by_session: dict[str, dict], provider: str
+) -> dict[str, Any]:
+    """Aggregate miner-only counters separately from simulator usage."""
+
+    totals: dict[str, Any] = {
+        "inference_requests": 0,
+        "inference_failed_requests": 0,
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 0,
+        "requested_models": {},
+        "served_models": {},
+    }
+    cost_usd = 0.0
+    cost_missing = 0
+    for stats in stats_by_session.values():
+        totals["inference_requests"] += int(stats.get("inference_total", 0))
+        totals["inference_failed_requests"] += int(stats.get("inference_failed", 0))
+        totals["prompt_tokens"] += int(stats.get("prompt_tokens", 0))
+        totals["cached_tokens"] += int(stats.get("cached_tokens", 0))
+        totals["completion_tokens"] += int(stats.get("completion_tokens", 0))
+        cost_usd += float(stats.get("inference_cost_usd", 0))
+        cost_missing += int(stats.get("inference_cost_missing", 0))
+        for distribution in ("requested_models", "served_models"):
+            for model, counters in dict(stats.get(distribution) or {}).items():
+                model_total = totals[distribution].setdefault(model, {})
+                for key, value in counters.items():
+                    model_total[key] = model_total.get(key, 0) + value
+
+    if provider != "openrouter":
+        totals["inference_cost_status"] = "unsupported"
+    else:
+        totals["inference_cost_status"] = "complete" if cost_missing == 0 else "partial"
+        totals["inference_cost_usd"] = cost_usd
+    return totals
+
+
 __all__ = [
     "GENERATED_PROBLEM_SCHEMA",
     "GENERATED_SCORE_SCHEMA",
     "aggregate_results",
     "select_run_task_roster",
+    "summarize_agent_inference_usage",
     "summarize_episode_resource_usage",
     "validate_run_results",
     "write_problem_file",

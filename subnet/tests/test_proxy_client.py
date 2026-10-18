@@ -69,10 +69,15 @@ class TestInferenceStats:
             with patch.dict("os.environ", {"PROBLEM_DATA": '{"problem_id": "p-1"}'}):
                 stats = InferenceStats(stats_file=path)
                 stats.record_success(
-                    {"cost": 0.25, "prompt_tokens": 10, "completion_tokens": 4}
+                    {
+                        "cost": 0.25,
+                        "prompt_tokens": 10,
+                        "prompt_tokens_details": {"cached_tokens": 6},
+                        "completion_tokens": 4,
+                    }
                 )
                 stats.record_failure()
-                stats.record_success()
+                stats.record_success({"prompt_tokens_details": {"cached_tokens": True}})
 
             with open(path) as f:
                 lines = [json.loads(line) for line in f if line.strip()]
@@ -80,6 +85,9 @@ class TestInferenceStats:
             assert len(lines) == 3
             assert lines[0]["inference_total"] == 1
             assert lines[1]["inference_total"] == 2
+            # One client keeps one instance id across its lines.
+            assert len({line.pop("instance_id") for line in lines}) == 1
+            assert {line.pop("execution_id") for line in lines} == {None}
             assert lines[2] == {
                 "problem_id": "p-1",
                 "inference_success": 2,
@@ -88,7 +96,30 @@ class TestInferenceStats:
                 "inference_cost_usd": 0.25,
                 "inference_cost_missing": 1,
                 "prompt_tokens": 10,
+                "cached_tokens": 6,
                 "completion_tokens": 4,
+                "requested_models": {
+                    "Unknown model": {
+                        "requests": 3,
+                        "failed_requests": 1,
+                        "prompt_tokens": 10,
+                        "cached_tokens": 6,
+                        "completion_tokens": 4,
+                        "cost_usd": 0.25,
+                        "cost_missing": 1,
+                    }
+                },
+                "served_models": {
+                    "Unknown model": {
+                        "requests": 2,
+                        "failed_requests": 0,
+                        "prompt_tokens": 10,
+                        "cached_tokens": 6,
+                        "completion_tokens": 4,
+                        "cost_usd": 0.25,
+                        "cost_missing": 1,
+                    }
+                },
             }
         finally:
             os.unlink(path)
@@ -97,6 +128,54 @@ class TestInferenceStats:
         stats = InferenceStats(stats_file=None)
         stats.record_success()
         stats.record_failure()
+
+    def test_tracks_requested_and_served_models_separately(self, tmp_path):
+        path = tmp_path / "stats.jsonl"
+        stats = InferenceStats(stats_file=str(path), problem_id="p-1")
+
+        stats.record_success(
+            {"cost": 0.2, "prompt_tokens": 3, "completion_tokens": 5},
+            requested_model="requested/a",
+            result_model="served/a",
+        )
+        stats.record_failure(requested_model="requested/b")
+
+        entry = json.loads(path.read_text().splitlines()[-1])
+        assert entry["served_models"]["served/a"] == {
+            "requests": 1,
+            "failed_requests": 0,
+            "prompt_tokens": 3,
+            "cached_tokens": 0,
+            "completion_tokens": 5,
+            "cost_usd": 0.2,
+            "cost_missing": 0,
+        }
+        assert entry["requested_models"]["requested/a"]["requests"] == 1
+        assert entry["requested_models"]["requested/b"]["failed_requests"] == 1
+
+    @patch("src.agent.proxy_client.requests")
+    def test_failed_post_logs_final_status_and_provider_body(
+        self, mock_requests, tmp_path
+    ):
+        response = MagicMock()
+        response.status_code = 400
+        response.__bool__.return_value = False
+        response.json.return_value = {"error": {"message": "provider rejected request"}}
+        mock_requests.post.return_value = response
+        path = tmp_path / "requests.jsonl"
+        with patch.dict("os.environ", {"REQUEST_LOG_FILE": str(path)}):
+            client = ProxyClient(proxy_url="http://proxy:80")
+        client.max_retries = 1
+
+        assert client.post("/inference/chat", {"model": "requested/a"}) is None
+
+        summary = json.loads(path.read_text().splitlines()[-1])
+        assert summary["status_code"] == 400
+        assert summary["response"] == {
+            "kind": "upstream",
+            "status": 400,
+            "body": {"error": {"message": "provider rejected request"}},
+        }
 
     def test_problem_id_from_env(self):
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:

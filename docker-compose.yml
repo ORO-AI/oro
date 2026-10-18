@@ -60,7 +60,7 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
       - SESSION_RUNTIME_HOST=${SESSION_RUNTIME_HOST:-validator}
       - SESSION_RUNTIME_PORT=${SESSION_RUNTIME_PORT:-9101}
-      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-95s}
     # Loopback-only publish. Sandbox agents reach the proxy over the `main`
     # docker network (`SANDBOX_PROXY_URL=http://proxy:80`), so no host publish
     # is required for normal operation. Keeping a loopback publish preserves
@@ -207,6 +207,10 @@ services:
       com.centurylinklabs.watchtower.scope: "oro-validator"
     networks:
       - main
+    # Keep one large evaluation from exhausting host memory; Docker restarts
+    # the validator if the limit is hit.
+    mem_limit: ${VALIDATOR_MEM_LIMIT:-8g}
+    memswap_limit: ${VALIDATOR_MEM_LIMIT:-8g}  # equal to mem_limit: no swap on top
     restart: unless-stopped
 
   # Prometheus + nginx-prometheus-exporter. Default: local-only, 9090 bound
@@ -289,11 +293,13 @@ services:
     restart: unless-stopped
 
   test:
-    image: ghcr.io/oro-ai/oro/validator:${IMAGE_TAG:-stable}
+    image: ${LOCAL_TEST_IMAGE:-oro-local-test:local}
     pull_policy: build
     build:
       context: .
       dockerfile: docker/validator/Dockerfile
+      args:
+        RUNTIME_PROFILE: local-test
     profiles:
       - test
     depends_on:
@@ -316,7 +322,7 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - INFERENCE_PROVIDER=${INFERENCE_PROVIDER:-}
       - LOCAL_ENV_PACK_PATH=${LOCAL_ENV_PACK_PATH:-/workspace/data/local-test/env-pack.tar.gz}
-      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-f87d7f1412809f6c7dcb4cbef52c6d3661292fbb5d6743c174909fd22f15d7f5}
+      - LOCAL_ENV_PACK_SHA256=${LOCAL_ENV_PACK_SHA256:-919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379}
       - LOCAL_MAX_WORKERS=${LOCAL_MAX_WORKERS:-7}
       - LOCAL_TIMEOUT=${LOCAL_TIMEOUT:-1800}
       - SEARCH_SERVER_URL=http://test-search-server:5632
@@ -340,7 +346,7 @@ services:
       - BACKEND_HOST=${BACKEND_HOST:-api.oroagents.com}
       - SESSION_RUNTIME_HOST=127.0.0.1
       - SESSION_RUNTIME_PORT=9101
-      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-65s}
+      - SESSION_CALL_TIMEOUT=${SESSION_CALL_TIMEOUT:-95s}
     healthcheck:
       test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/health || exit 1"]
       interval: 10s

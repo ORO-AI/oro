@@ -1,7 +1,7 @@
 """Transport fixture migrated in pytest-owned temporary files only.
 
-The checked-in generator archive and catalog retain their original SHA checks.
-Family stubs keep this fixture scoped to transport tests, not real-task QA.
+The checked-in generator archive and catalog retain their original SHA checks; the
+test-owned copy is rewritten as composed situation rows for the installed runtime.
 """
 
 from __future__ import annotations
@@ -14,77 +14,164 @@ from pathlib import Path
 import pytest
 
 from oro_env_runtime import contracts
-from oro_env_runtime.pack import write_checksums
-from oro_env_runtime.reward import (
-    TF4_RELEASE_GATE_PATH,
-    tf4_release_gate_fingerprint,
-    tf4_release_gate_passed,
+from oro_env_runtime.grading import Grading
+from oro_env_runtime.delivery import DELIVERY_SUBSET_VERSION
+from oro_env_runtime.pack import (
+    COMPILED_EPOCH_VERSION,
+    fingerprint,
+    sha256_file,
+    task_set_fingerprint,
 )
+from oro_env_runtime.reward import REWARD_VERSION
 from oro_env_runtime.search_index import source_listing_id
-from oro_env_runtime.schema import TaskSpec
-from oro_env_runtime.tf4_judge_contract import judge_contract
+from oro_env_runtime.situation import LINE_SLOTS
+from oro_env_runtime.schema import CandidateRef, TaskSpec
 from validator.env_pack_loader import LoadedPack
 
-COMPAT_ARCHIVE = Path(__file__).with_name("fixtures") / "oro_env_runtime_compat_v1.tar.gz"
+COMPAT_ARCHIVE = (
+    Path(__file__).with_name("fixtures") / "oro_env_runtime_compat_v1.tar.gz"
+)
 COMPAT_METADATA = COMPAT_ARCHIVE.with_name("oro_env_runtime_compat_v1.json")
 COMPAT_PRODUCTS = COMPAT_ARCHIVE.with_name("oro_env_runtime_compat_v1_products.jsonl")
 
 
-class StubRuntimeFamily:
-    """Runtime hooks matching the generator's deliberately minimal fixture tasks."""
+# Legacy task fields the checked-in archive carries; composed rows have none of them.
+_LEGACY_FIELDS = ("event_rule", "event_rules", "interventions", "preferred", "latent_prefs")
+# Every stock line a situation must word: the line's name followed by its slots.
+_LINES = {
+    key: " ".join((key, *(f"{{{slot}}}" for slot in slots)))
+    for key, slots in LINE_SLOTS.items()
+}
 
-    agent_system = "Use the local shopping tools and complete the task."
-    metric_name = "stub_metric"
 
-    def __init__(self, name: str) -> None:
-        self.name = name
+def _migrate_to_composed(epoch: Path, manifest: dict) -> None:
+    """Rewrite the test-owned copy of the legacy archive as composed situation rows: each
+    task keeps its goal, hard constraints and accepted set, and states them as a category
+    requirement over its accepted keys plus its budget."""
 
-    def configure_environment(self, env, task: TaskSpec) -> None:  # noqa: ANN001
-        return None
-
-    def on_write(self, env, ref) -> bool:  # noqa: ANN001
-        return False
-
-    def user_sim_context(self, task: TaskSpec) -> None:
-        return None
-
-    def user_sim_allow_pushback(self, task: TaskSpec) -> bool:
-        return False
-
-    def verify_extra(
-        self,
-        task,  # noqa: ANN001
-        ledger,  # noqa: ANN001
-        catalog,  # noqa: ANN001
-        checks,  # noqa: ANN001
-        order,  # noqa: ANN001
-        order_seq,  # noqa: ANN001
-        *,
-        observed=None,  # noqa: ANN001
-    ) -> dict:
-        correct = all(
-            checks.get(name) is True
-            for name in (
-                "final_in_gold",
-                "final_in_stock",
-                "within_budget",
-                "no_illegal_side_effects",
-            )
+    task_path = epoch / "data/tasks/private_tasks.jsonl"
+    task_rows = [json.loads(line) for line in task_path.read_text().splitlines()]
+    seed_start = min(row["task"]["seed"] for row in task_rows)
+    for index, row in enumerate(task_rows):
+        task = {k: v for k, v in row["task"].items() if k not in _LEGACY_FIELDS}
+        keys = list(task["acceptance"]["acceptable_keys"])
+        hard = task["hard"]
+        task.update(
+            family="composed",
+            seed=seed_start + index,
+            # The source row's id keeps the rewritten rows semantically distinct.
+            family_payload={"world": {"regime": "qualifying"}, "compat_source": row["task_id"]},
+            situation={
+                "preset": "compat",
+                "lines": _LINES,
+                "requirements": [
+                    {"id": "cat", "predicate": {"kind": "category", "value": "*"}},
+                    {
+                        "id": "budget",
+                        "predicate": {
+                            "kind": "budget",
+                            "max": hard["budget"],
+                            "currency": hard["currency"],
+                        },
+                    },
+                ],
+            },
+            grading=Grading(
+                family="composed",
+                decoupled=True,
+                situation_tables={"cat": dict.fromkeys(keys, True)},
+            ).model_dump(mode="json"),
         )
-        return {
-            "construct_success": correct,
-            "family_metric": 1.0 if correct else 0.0 if order is not None else None,
+        row["task_id"] = f"TF8-composed-{task['seed']}"
+        # Qualifying deliveries keep the accepted keys beside the runtime's task model.
+        row["task"] = {
+            **TaskSpec.model_validate(task).model_dump(mode="json"),
+            "acceptance": {"acceptable_keys": keys},
         }
+    task_path.write_text(
+        "".join(
+            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
+            for row in task_rows
+        )
+    )
+    manifest["pack_version"] = COMPILED_EPOCH_VERSION
+    manifest["reward"] = {"default": REWARD_VERSION}
+    manifest["epoch"].update(
+        families=["composed"],
+        family_counts={"composed": len(task_rows)},
+        count_per_family=len(task_rows),
+        seed_range={"start": seed_start, "end_exclusive": seed_start + len(task_rows)},
+        task_set_fingerprint=fingerprint(
+            [
+                {"task_id": row["task_id"], "task_fingerprint": fingerprint(row["task"])}
+                for row in task_rows
+            ]
+        ),
+    )
+
+
+def _write_checksums(epoch: Path) -> None:
+    (epoch / "checksums.sha256").write_text(
+        "".join(
+            f"{sha256_file(path)}  {path.relative_to(epoch).as_posix()}\n"
+            for path in sorted(epoch.rglob("*"))
+            if path.is_file() and path.name != "checksums.sha256"
+        )
+    )
+
+
+def delivery_archive(
+    epoch: Path,
+    task_ids: list[str],
+    *,
+    scope: str,
+    parent_pack_sha256: str,
+    scope_id: str | None = None,
+    runtime_contract: int | None = contracts.RUNTIME_CONTRACT,
+) -> bytes:
+    """Delivery bytes for ``task_ids`` of ``epoch``, declared as the Backend declares
+    them; ``runtime_contract=None`` leaves the contract out, as older deliveries did."""
+
+    out = epoch.parent / f"delivery-{fingerprint([scope, scope_id, task_ids])[:12]}"
+    shutil.copytree(epoch, out / "epoch")
+    task_path = out / "epoch/data/tasks/private_tasks.jsonl"
+    rows = [
+        row
+        for line in task_path.read_text().splitlines()
+        if line.strip()
+        for row in [json.loads(line)]
+        if row["task_id"] in task_ids
+    ]
+    task_path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+    manifest = json.loads((out / "epoch/manifest.json").read_text())
+    manifest["epoch"].update(
+        family_counts={"composed": len(rows)},
+        task_set_fingerprint=task_set_fingerprint(rows),
+    )
+    manifest["delivery"] = {
+        "version": DELIVERY_SUBSET_VERSION,
+        "scope": scope,
+        "parent_pack_sha256": parent_pack_sha256,
+        "task_ids": [row["task_id"] for row in rows],
+        **({"scope_id": scope_id} if scope == "race" else {}),
+        **({} if runtime_contract is None else {"runtime_contract": runtime_contract}),
+    }
+    (out / "epoch/manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    _write_checksums(out / "epoch")
+    return Path(shutil.make_archive(str(out / "delivery"), "gztar", out, "epoch")).read_bytes()
+
+
+def accepted_ref(task: TaskSpec) -> CandidateRef:
+    """The first listing the compat task accepts (its rows grade a category table)."""
+
+    product_id, _, sku = next(iter(task.grading.situation_tables["cat"])).partition("::")
+    return CandidateRef(product_id=product_id, sku=sku)
 
 
 @pytest.fixture
 def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Extract the trusted compatibility archive without importing the generator."""
 
-    lookup = lambda name: StubRuntimeFamily(name)  # noqa: E731
-    monkeypatch.setattr("oro_env_runtime.families.get_family", lookup)
-    monkeypatch.setattr("oro_env_runtime.verify.get_family", lookup)
-    monkeypatch.setattr("validator.session_registry.get_family", lookup)
     metadata = json.loads(COMPAT_METADATA.read_text())
     artifact = COMPAT_ARCHIVE.read_bytes()
     assert len(artifact) == metadata["artifact_size_bytes"]
@@ -107,20 +194,12 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         == manifest["source_sha256"]["products_schema_b.jsonl"]
     )
     manifest["contracts"]["runtime"] = contracts.RUNTIME_VERSION
-    manifest["contracts"]["tools"] = contracts.TOOL_CONTRACT_VERSION
-    manifest["contracts"]["verifier"] = contracts.VERIFIER_VERSION
-    gate_path = epoch / "tf4_hybrid_release_gate.json"
-    shutil.copy2(TF4_RELEASE_GATE_PATH, gate_path)
-    gate = json.loads(gate_path.read_text())
-    tf4_contract = judge_contract(manifest["models"]["judge"])
-    tf4_reward = manifest["reward"]["preference_reasoning"]
-    tf4_reward["release_gate_fingerprint"] = tf4_release_gate_fingerprint(gate)
-    tf4_reward["judge_contract"] = tf4_contract
-    gate_active = tf4_release_gate_passed(gate_path, judge_contract=tf4_contract)
-    tf4_reward["active"] = gate_active
-    tf4_reward["status"] = "active" if gate_active else "shadow"
-    (epoch / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    write_checksums(epoch)
+    _migrate_to_composed(epoch, manifest)
+    (epoch / "tf4_hybrid_release_gate.json").unlink(missing_ok=True)
+    (epoch / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+    _write_checksums(epoch)
     shutil.make_archive(str(epoch), "gztar", root_dir=tmp_path, base_dir="epoch")
 
     def catalog_record(product_id: str) -> dict:
@@ -199,7 +278,6 @@ def compiled_epoch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         return StubSearch()
 
     monkeypatch.setattr("oro_env_runtime.runtime.SearchServerClient", client)
-    monkeypatch.setattr("oro_env_runtime.validation.SearchServerClient", client)
     return epoch
 
 
@@ -227,4 +305,4 @@ def loaded_pack(compiled_epoch: Path, tmp_path: Path) -> LoadedPack:
     )
 
 
-__all__ = ["COMPAT_ARCHIVE", "COMPAT_METADATA"]
+__all__ = ["COMPAT_ARCHIVE", "COMPAT_METADATA", "accepted_ref", "delivery_archive"]

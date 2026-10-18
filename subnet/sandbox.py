@@ -1,16 +1,23 @@
-"""Shared Docker sandbox utilities for test_runner and validator.
+"""Shared Docker sandbox utilities for local runs and the validator.
 
-Centralises sandbox image/network configuration, host-path mapping, problem
-loading, and Docker command construction so the two call-sites stay in sync.
+Centralises sandbox image/network configuration, host-path mapping, and
+Docker command construction so the call sites stay in sync.
 """
 
-import json
 import os
 from pathlib import Path
 
-# Docker configuration — shared between test_runner and validator
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES
+
+# Docker configuration shared by local runs and the validator
 SANDBOX_IMAGE = os.environ.get("SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:latest")
 SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
+# Hard per-file write ceiling for the sandbox (SIGXFSZ past this): the same cap the
+# validator rejects oversized reads at, so the container can't write a file every
+# reader then refuses. The validator bounds aggregate run disk use separately.
+SANDBOX_MAX_FILE_BYTES = MAX_SANDBOX_OUTPUT_BYTES
+# The sandbox container runs as this uid.
+SANDBOX_UID = 1000
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
 
 
@@ -25,7 +32,7 @@ def host_path(path: str, workspace_dir: str | None = None) -> str:
         path: The container-local path to translate.
         workspace_dir: If provided (validator case), strip this prefix from
             *path* before joining with ``HOST_PROJECT_DIR``.  When ``None``
-            (test_runner case), the function strips well-known prefixes
+            (local-run case), the function strips well-known prefixes
             (``/app/``, ``/workspace/``).
 
     Returns:
@@ -41,34 +48,12 @@ def host_path(path: str, workspace_dir: str | None = None) -> str:
             return str(Path(HOST_PROJECT_DIR) / relative)
         return path
 
-    # test_runner: strip well-known container prefixes
+    # Strip well-known container prefixes for local runs.
     if path.startswith("/app/"):
         return str(Path(HOST_PROJECT_DIR) / path[len("/app/") :])
     if path.startswith("/workspace/"):
         return str(Path(HOST_PROJECT_DIR) / path[len("/workspace/") :])
     return path
-
-
-def load_problems(problem_path: Path) -> list[dict]:
-    """Load problems from a JSON array or JSONL file.
-
-    Supports both formats so callers don't need to care which one the file
-    uses.  Returns an empty list for empty files.
-    """
-    with open(problem_path) as f:
-        content = f.read().strip()
-    if not content:
-        return []
-    # JSON array format (e.g. problem_suite_v1.json)
-    if content.startswith("["):
-        return json.loads(content)
-    # JSONL format (one JSON object per line)
-    problems: list[dict] = []
-    for line in content.splitlines():
-        line = line.strip()
-        if line:
-            problems.append(json.loads(line))
-    return problems
 
 
 def attach_title_embeddings(reward, title_embeddings) -> None:
@@ -191,6 +176,8 @@ def build_sandbox_command(
             # in flight per worker (HTTP + DNS + keepalive), pushing toward the
             # 1024 cap and silently capping throughput before the worker count.
             "nofile=4096:4096",
+            "--ulimit",
+            f"fsize={SANDBOX_MAX_FILE_BYTES}:{SANDBOX_MAX_FILE_BYTES}",
             # CPU priority — sandbox runs during the validator's blocked
             # subprocess.run(); only the heartbeat + weight-setter threads compete
             # for CPU at that point, so giving sandbox 2x the default share keeps
@@ -199,7 +186,7 @@ def build_sandbox_command(
             "--cpu-shares",
             "2048",
             "--user",
-            "1000:1000",
+            f"{SANDBOX_UID}:{SANDBOX_UID}",
             # Security hardening — minimize container attack surface
             "--cap-drop=ALL",
             "--security-opt",

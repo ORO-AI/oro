@@ -1,11 +1,13 @@
 """HTTP proxy client for ShoppingBench services."""
 
+import asyncio
 import json
 import logging
 import math
 import os
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlencode
@@ -128,35 +130,127 @@ class InferenceStats:
         self._cost_usd = 0.0
         self._cost_missing = 0
         self._prompt_tokens = 0
+        self._cached_tokens = 0
         self._completion_tokens = 0
+        self._requested_models: dict[str, dict[str, int | float]] = {}
+        self._served_models: dict[str, dict[str, int | float]] = {}
         self._stats_file = stats_file
         self._problem_id = problem_id
+        # Each ProxyClient owns one counter and writes its own running totals, so the
+        # reader must sum per instance. An agent that builds a client per call would
+        # otherwise report one call per problem.
+        self._instance_id = uuid.uuid4().hex
+        self._execution_id = os.environ.get("INFERENCE_STATS_EXECUTION_ID")
 
-    def record_success(self, usage: Optional[Dict] = None):
+    @staticmethod
+    def _model(value: object) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip()[:200]
+
+    @staticmethod
+    def _tokens(usage: object, key: str) -> int | None:
+        value = usage.get(key) if isinstance(usage, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return max(value, 0)
+
+    @staticmethod
+    def _cost(usage: object) -> float | None:
+        value = usage.get("cost") if isinstance(usage, dict) else None
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value < 0
+            or not math.isfinite(value)
+        ):
+            return None
+        return float(value)
+
+    def _record_model(
+        self,
+        distribution: dict[str, dict[str, int | float]],
+        model: str | None,
+        *,
+        failed: bool,
+        prompt_tokens: int | None = None,
+        cached_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
+        totals = distribution.setdefault(
+            model or "Unknown model",
+            {
+                "requests": 0,
+                "failed_requests": 0,
+                "prompt_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 0,
+                "cost_usd": 0.0,
+                "cost_missing": 0,
+            },
+        )
+        totals["requests"] += 1
+        totals["failed_requests"] += int(failed)
+        totals["prompt_tokens"] += prompt_tokens or 0
+        totals["cached_tokens"] += cached_tokens or 0
+        totals["completion_tokens"] += completion_tokens or 0
+        if cost_usd is None:
+            totals["cost_missing"] += int(not failed)
+        else:
+            totals["cost_usd"] += cost_usd
+
+    def record_success(
+        self,
+        usage: Optional[Dict] = None,
+        *,
+        requested_model: object = None,
+        result_model: object = None,
+    ):
         with self._lock:
             self._success += 1
-            cost = usage.get("cost") if isinstance(usage, dict) else None
-            if (
-                isinstance(cost, (int, float))
-                and not isinstance(cost, bool)
-                and cost >= 0
-                and math.isfinite(cost)
-            ):
+            cost = self._cost(usage)
+            if cost is not None:
                 self._cost_usd += cost
             else:
                 self._cost_missing += 1
-            if isinstance(usage, dict):
-                prompt_tokens = usage.get("prompt_tokens")
-                completion_tokens = usage.get("completion_tokens")
-                if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
-                    self._prompt_tokens += max(prompt_tokens, 0)
-                if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
-                    self._completion_tokens += max(completion_tokens, 0)
+            prompt_tokens = self._tokens(usage, "prompt_tokens")
+            cached_tokens = self._tokens(
+                usage.get("prompt_tokens_details") if isinstance(usage, dict) else None,
+                "cached_tokens",
+            )
+            completion_tokens = self._tokens(usage, "completion_tokens")
+            self._prompt_tokens += prompt_tokens or 0
+            self._cached_tokens += cached_tokens or 0
+            self._completion_tokens += completion_tokens or 0
+            self._record_model(
+                self._requested_models,
+                self._model(requested_model),
+                failed=False,
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost,
+            )
+            self._record_model(
+                self._served_models,
+                self._model(result_model),
+                failed=False,
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+                completion_tokens=completion_tokens,
+                cost_usd=cost,
+            )
             self._flush()
 
-    def record_failure(self):
+    def record_failure(self, *, requested_model: object = None):
         with self._lock:
             self._failed += 1
+            self._record_model(
+                self._requested_models,
+                self._model(requested_model),
+                failed=True,
+            )
             self._flush()
 
     def _flush(self) -> None:
@@ -172,13 +266,18 @@ class InferenceStats:
                 problem_id = problem.get("problem_id") or problem.get("id", "unknown")
             entry = {
                 "problem_id": str(problem_id),
+                "instance_id": self._instance_id,
+                "execution_id": self._execution_id,
                 "inference_success": self._success,
                 "inference_failed": self._failed,
                 "inference_total": self._success + self._failed,
                 "inference_cost_usd": self._cost_usd,
                 "inference_cost_missing": self._cost_missing,
                 "prompt_tokens": self._prompt_tokens,
+                "cached_tokens": self._cached_tokens,
                 "completion_tokens": self._completion_tokens,
+                "requested_models": self._requested_models,
+                "served_models": self._served_models,
             }
             with open(self._stats_file, "a") as f:
                 f.write(json.dumps(entry) + "\n")
@@ -244,6 +343,7 @@ class ProxyClient:
         self.retry_delay = retry_delay
         self.rate_limit_retry_delay = rate_limit_retry_delay
         self.api_key = api_key or os.getenv("INFERENCE_ACCESS_TOKEN")
+        self.headers: dict[str, str] = {}  # sent on every POST
         stats_file = inference_stats_file or os.environ.get(
             "INFERENCE_STATS_FILE", "/app/logs/inference_stats.jsonl"
         )
@@ -281,9 +381,13 @@ class ProxyClient:
         request_func: Callable[[], requests.Response],
         method: str,
         path: str,
-    ) -> Optional[requests.Response]:
+    ) -> tuple[Optional[requests.Response], Optional[Any]]:
         """
         Make an HTTP request with retry logic.
+
+        A 200 whose body is not JSON is retried like a 5xx: OpenRouter sends
+        the status and keep-alive whitespace before the completion, and can
+        end the body with nothing else.
 
         Rate-limited (429) responses use a separate retry counter with longer
         backoff (5s base) so transient capacity issues don't exhaust the normal
@@ -300,7 +404,7 @@ class ProxyClient:
             path: Request path (e.g., "/inference/chat"), recorded per attempt
 
         Returns:
-            Response object if successful, None otherwise
+            The last response (or None) and its parsed JSON body when successful
         """
         operation_name = f"{method} {path}"
         # Track the last response we saw across retries. Returned to the
@@ -316,15 +420,24 @@ class ProxyClient:
                 response = request_func()
                 status_code = response.status_code
                 if response.status_code == 200:
-                    self.request_log.record_attempt(
-                        method,
-                        path,
-                        i,
-                        (time.monotonic() - attempt_t0) * 1000,
-                        status_code=status_code,
-                    )
-                    return response
-                if response.status_code == 429:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        error_class = "InvalidJSONBody"
+                        logger.warning(
+                            f"{operation_name} returned a non-JSON body, "
+                            f"retry {i + 1}/{self.max_retries}"
+                        )
+                    else:
+                        self.request_log.record_attempt(
+                            method,
+                            path,
+                            i,
+                            (time.monotonic() - attempt_t0) * 1000,
+                            status_code=status_code,
+                        )
+                        return response, data
+                elif response.status_code == 429:
                     logger.warning(
                         f"{operation_name} rate limited (429), "
                         f"retry {i + 1}/{self.max_retries}"
@@ -359,7 +472,7 @@ class ProxyClient:
                 time.sleep(delay)
 
         logger.error(f"Failed {operation_name} after {self.max_retries} retries")
-        return response
+        return response, None
 
     def get(self, path: str, params: Optional[Dict] = None) -> Optional[Dict]:
         """Make a GET request to the proxy."""
@@ -369,54 +482,23 @@ class ProxyClient:
             return requests.get(url, timeout=self.timeout)
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "GET", path)
+        response, result = self._make_request_with_retries(make_request, "GET", path)
         duration_ms = (time.monotonic() - t0) * 1000
-        result = response.json() if response and response.status_code == 200 else None
 
+        error = self._full_error(response) if result is None else None
         self.request_log.record(
             method="GET",
             path=path,
             params=params,
-            status_code=response.status_code if response else None,
-            response_body=result,
+            status_code=response.status_code if response is not None else None,
+            response_body=result if result is not None else error,
             duration_ms=duration_ms,
         )
         return result
 
     def post(self, path: str, json_data: Optional[Dict] = None) -> Optional[Dict]:
         """Make a POST request to the proxy."""
-        url = self._build_url(path)
-        headers: Dict[str, str] = {}
-        if self.api_key and "/inference/" in path:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        def make_request():
-            response = requests.post(
-                url, json=json_data, headers=headers, timeout=self.timeout
-            )
-            if response.status_code == 404:
-                logger.error(f"Resource not found: {path}")
-            return response
-
-        t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "POST", path)
-        duration_ms = (time.monotonic() - t0) * 1000
-
-        result = None
-        if response and response.status_code == 200:
-            result = response.json()
-
-        self._record_inference_result(path, result)
-
-        self.request_log.record(
-            method="POST",
-            path=path,
-            json_data=json_data,
-            status_code=response.status_code if response else None,
-            response_body=result,
-            duration_ms=duration_ms,
-        )
-        return result
+        return self.post_verbose(path, json_data).data
 
     def post_verbose(self, path: str, json_data: Optional[Dict] = None) -> "PostResult":
         """POST returning both the parsed JSON on success AND the upstream
@@ -433,7 +515,7 @@ class ProxyClient:
         provider body.
         """
         url = self._build_url(path)
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = dict(self.headers)
         if self.api_key and "/inference/" in path:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -446,13 +528,10 @@ class ProxyClient:
             return response
 
         t0 = time.monotonic()
-        response = self._make_request_with_retries(make_request, "POST", path)
+        response, data = self._make_request_with_retries(make_request, "POST", path)
         duration_ms = (time.monotonic() - t0) * 1000
 
-        data: Optional[Dict] = None
-        if response is not None and response.status_code == 200:
-            data = response.json()
-        self._record_inference_result(path, data)
+        self._record_inference_result(path, data, json_data)
 
         error: Optional[Dict[str, Any]] = None
         if data is None:
@@ -462,21 +541,116 @@ class ProxyClient:
             method="POST",
             path=path,
             json_data=json_data,
-            status_code=response.status_code if response else None,
-            response_body=data,
+            status_code=response.status_code if response is not None else None,
+            response_body=data if data is not None else self._full_error(response),
             duration_ms=duration_ms,
         )
         return PostResult(data=data, error=error)
 
-    def _record_inference_result(self, path: str, result: object) -> None:
+    async def post_verbose_async(
+        self, path: str, json_data: Optional[Dict] = None
+    ) -> "PostResult":
+        """Cancellable POST with the same outcomes and accounting as post_verbose.
+
+        Own the HTTP client inside this call: simulator turns use separate event loops.
+        Cancellation is recorded separately from provider failure; upstream usage is unknown.
+        """
+        import httpx
+
+        headers = dict(self.headers)
+        if self.api_key and "/inference/" in path:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        started = time.monotonic()
+        response, data = None, None
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+                for attempt in range(self.max_retries):
+                    attempt_started = time.monotonic()
+                    status_code, error_class = None, None
+                    try:
+                        response = await client.post(self._build_url(path), json=json_data, headers=headers)
+                        status_code = response.status_code
+                        if status_code == 200:
+                            try:
+                                data = response.json()
+                            except ValueError:
+                                error_class = "InvalidJSONBody"
+                            else:
+                                break
+                    except httpx.RequestError as exc:
+                        response = None
+                        error_class = type(exc).__name__
+                    except asyncio.CancelledError:
+                        error_class = "CancelledError"
+                        raise
+                    finally:
+                        self.request_log.record_attempt(
+                            "POST", path, attempt, (time.monotonic() - attempt_started) * 1000,
+                            status_code=status_code, error_class=error_class,
+                        )
+                    logger.warning("POST %s attempt %d/%d failed (status=%s error=%s)",
+                                   path, attempt + 1, self.max_retries, status_code, error_class)
+                    if attempt < self.max_retries - 1:
+                        base = self.rate_limit_retry_delay if status_code == 429 else self.retry_delay
+                        await asyncio.sleep(min(base * (2**attempt), 10))
+        except asyncio.CancelledError:
+            logger.info("POST %s cancelled; upstream usage unknown", path)
+            self.request_log.record(
+                "POST", path, json_data=json_data,
+                response_body={"kind": "cancelled", "usage": "unknown"},
+                duration_ms=(time.monotonic() - started) * 1000,
+            )
+            raise
+        self._record_inference_result(path, data, json_data)
+        error = self._describe_error(response) if data is None else None
+        self.request_log.record(
+            "POST", path, json_data=json_data,
+            status_code=response.status_code if response is not None else None,
+            response_body=data if data is not None else self._full_error(response),
+            duration_ms=(time.monotonic() - started) * 1000,
+        )
+        return PostResult(data=data, error=error)
+
+    def _record_inference_result(
+        self, path: str, result: object, request: object = None
+    ) -> None:
         """Record one final inference outcome for either POST interface."""
         if "/inference/" not in path:
             return
+        requested_model = request.get("model") if isinstance(request, dict) else None
         if result is None:
-            self.inference_stats.record_failure()
+            self.inference_stats.record_failure(requested_model=requested_model)
             return
         usage = result.get("usage") if isinstance(result, dict) else None
-        self.inference_stats.record_success(usage)
+        result_model = result.get("model") if isinstance(result, dict) else None
+        self.inference_stats.record_success(
+            usage,
+            requested_model=requested_model,
+            result_model=result_model,
+        )
+
+    @staticmethod
+    def _full_error(response: Optional[requests.Response]) -> Dict[str, Any]:
+        """Return the complete final provider error for the private transcript."""
+
+        if response is None:
+            return {
+                "kind": "network",
+                "status": None,
+                "body": "no response (network error or timeout)",
+            }
+        try:
+            body: object = response.json()
+        except (ValueError, requests.RequestException):
+            try:
+                body = response.text
+            except Exception:  # noqa: BLE001 - best-effort forensic capture
+                body = "<unreadable body>"
+        return {
+            "kind": "upstream",
+            "status": response.status_code,
+            "body": body,
+        }
 
     @staticmethod
     def _describe_error(response: Optional[requests.Response]) -> Dict[str, Any]:
@@ -486,6 +660,8 @@ class ProxyClient:
 
         - ``kind="network"`` — every attempt raised (DNS/connect/timeout).
         - ``kind="upstream"`` — got an HTTP response, status != 200.
+        - ``kind="malformed"`` — status 200 but the body was never JSON
+          (e.g. only keep-alive whitespace) on every attempt.
         """
         if response is None:
             return {
@@ -498,7 +674,7 @@ class ProxyClient:
         except Exception:  # noqa: BLE001 — best effort; body must not throw
             body_text = "<unreadable body>"
         return {
-            "kind": "upstream",
+            "kind": "malformed" if response.status_code == 200 else "upstream",
             "status": response.status_code,
             "body": body_text[:800],
         }

@@ -159,3 +159,11 @@ test("keeps the whole query when the runtime appends no task rules", async () =>
   assert.equal(trajectory.query, "Want a gaming monitor around 12599 PHP.");
   assert.equal(trajectory.taskRules, "");
 });
+
+test("reads the episode's failure categories", async () => {
+  const [{ value }] = await loadSamples();
+  const episode = structuredClone(value);
+  assert.equal(normalizeOroEpisode(episode, "a.json").failure, null);
+  episode.episode.failure = { primary: "did_not_finish", categories: ["did_not_finish"] };
+  assert.deepEqual(normalizeOroEpisode(episode, "b.json").failure, episode.episode.failure);
+});

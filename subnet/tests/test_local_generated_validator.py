@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import time
-from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -25,12 +24,26 @@ from subnet.validator.session_service import SessionRuntime
 pytest_plugins = ("tests.compat_fixture",)
 
 
+# A local run's tasks: seven composed rows.
+_ROSTER = ["composed"] * 7
+
+
 def _pack(families: list[str]) -> SimpleNamespace:
     return SimpleNamespace(
-        task_specs=[SimpleNamespace(family=family) for family in families],
+        task_specs=[
+            SimpleNamespace(
+                family=family,
+                grading=SimpleNamespace(decoupled=True),
+                situation=SimpleNamespace(requirements=[], obligations=[], metrics=[]),
+            )
+            for family in families
+        ],
         task_ids=[f"task-{index}" for index in range(len(families))],
         pack_sha256="a" * 64,
-        manifest={"models": {"user_simulator": "vendor/sim"}},
+        manifest={
+            "models": {"user_simulator": "vendor/sim"},
+            "delivery": {"scope": "qualifying", "task_contract": "oro.qualifying_task.v1"},
+        },
         metadata={"search_index_sha256": "b" * 64},
         close=MagicMock(),
     )
@@ -99,20 +112,19 @@ def _install_runtime_fakes(
     *,
     results: list[dict],
 ) -> tuple[SimpleNamespace, MagicMock, list[list[str]], SessionRuntime, MagicMock]:
-    pack = _pack(sorted(GENERATED_FAMILIES))
+    pack = _pack(_ROSTER)
     registry = MagicMock()
     registry.start.side_effect = [
         {
             "session_id": f"session-{index}",
             "policy_view": {
                 "query": family,
-                "tool_contract_version": "v1",
                 "tools": [],
                 "max_steps": 4,
                 "max_calls_per_turn": 16,
             },
         }
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     registry.finalized_results.return_value = results
     registry.close.side_effect = pack.close
@@ -165,70 +177,47 @@ def _failure_summary(error: LocalGeneratedValidatorError) -> dict:
     return summary
 
 
-def test_local_pack_selects_first_five_tasks_from_each_generated_family() -> None:
-    families = sorted(GENERATED_FAMILIES)
-    roster = [family for family in families for _ in range(6)]
-    pack = _pack(roster)
+def test_local_pack_selects_the_first_five_composed_tasks() -> None:
+    pack = _pack(["composed"] * 6)
 
-    assert validate_local_pack(pack) == [
-        f"task-{family_index * 6 + task_index}"
-        for family_index in range(7)
-        for task_index in range(5)
-    ]
-
-    # A subset pack (one supported family omitted) is valid — omitted families
-    # are allowed, so long as every present family has enough tasks.
-    subset = sorted(GENERATED_FAMILIES)[:-1]
-    subset_roster = [family for family in subset for _ in range(6)]
-    assert validate_local_pack(_pack(subset_roster)) == [
-        f"task-{family_index * 6 + task_index}"
-        for family_index in range(len(subset))
-        for task_index in range(5)
-    ]
-
-    unexpected = sorted(GENERATED_FAMILIES) + ["unsupported"]
+    assert validate_local_pack(pack) == [f"task-{index}" for index in range(5)]
     with pytest.raises(ValueError, match="unexpected="):
-        validate_local_pack(_pack(unexpected))
-
+        validate_local_pack(_pack(["composed"] * 5 + ["unsupported"]))
     with pytest.raises(ValueError, match="insufficient="):
-        validate_local_pack(_pack(families * 4))
+        validate_local_pack(_pack(["composed"] * 4))
 
 
-def test_problem_count_samples_across_every_family_it_can_reach() -> None:
-    families = sorted(GENERATED_FAMILIES)
-    pack = _pack([family for family in families for _ in range(5)])
-    family_of = {
-        f"task-{index}": family
-        for index, family in enumerate(family for family in families for _ in range(5))
-    }
+def test_local_pack_never_runs_race_rows_or_with_race_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roster = ["composed"] * 5
+    sealed = _pack(roster)
+    sealed.task_specs[1].grading = SimpleNamespace(decoupled=False)
+    with pytest.raises(ValueError, match="race rows: task-1"):
+        validate_local_pack(sealed, frozenset({"composed"}))
+    raw = _pack(roster)
+    raw.manifest = {"models": {}}  # a raw compiler pack, not the qualifying delivery
+    with pytest.raises(ValueError, match="sanitized qualifying delivery"):
+        validate_local_pack(raw)
+    monkeypatch.setenv("ORO_RACE_ANY", "")
+    validate_local_pack(_pack(roster))  # an empty value is no configuration
+    monkeypatch.setenv("ORO_RACE_ANY", "x")
+    with pytest.raises(ValueError, match="race configuration"):
+        validate_local_pack(_pack(roster))
+
+
+def test_problem_count_samples_in_archive_order() -> None:
+    pack = _pack(["composed"] * 35)
 
     seven = validate_local_pack(pack, problem_count=7, seed=1)
-    assert len(seven) == 7
-    assert sorted(family_of[task] for task in seven) == families
-
-    three = validate_local_pack(pack, problem_count=3, seed=1)
-    assert len(three) == 3
-    assert len({family_of[task] for task in three}) == 3
-
-    ten = validate_local_pack(pack, problem_count=10, seed=1)
-    assert len(ten) == 10
-    assert sorted(Counter(family_of[task] for task in ten).values()) == [
-        1,
-        1,
-        1,
-        1,
-        2,
-        2,
-        2,
-    ]
-
-    assert validate_local_pack(pack, problem_count=35, seed=1) == pack.task_ids
+    assert len(seven) == 7 == len(set(seven))
     # Archive order, so problems.jsonl and the roster stay readable.
     assert seven == sorted(seven, key=lambda task: int(task.removeprefix("task-")))
+    assert validate_local_pack(pack, problem_count=35, seed=1) == pack.task_ids
 
 
 def test_problem_selection_repeats_only_for_a_repeated_seed() -> None:
-    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+    pack = _pack(["composed"] * 35)
 
     assert validate_local_pack(pack, problem_count=7, seed=7) == validate_local_pack(
         pack, problem_count=7, seed=7
@@ -239,7 +228,7 @@ def test_problem_selection_repeats_only_for_a_repeated_seed() -> None:
 
 
 def test_problem_count_outside_the_pack_names_the_bounds() -> None:
-    pack = _pack([family for family in sorted(GENERATED_FAMILIES) for _ in range(5)])
+    pack = _pack(["composed"] * 35)
 
     for count in (0, 36):
         with pytest.raises(ValueError, match="--problems must be between 1 and 35"):
@@ -248,7 +237,7 @@ def test_problem_count_outside_the_pack_names_the_bounds() -> None:
 
 def test_a_short_run_does_not_require_a_full_qualifying_family(tmp_path: Path) -> None:
     # The per-family minimum is a qualifying rule; a sampled run should not inherit it.
-    pack = _pack(sorted(GENERATED_FAMILIES))
+    pack = _pack(["composed"] * 3)
 
     assert len(validate_local_pack(pack, problem_count=3, seed=1)) == 3
     with pytest.raises(ValueError, match="insufficient="):
@@ -261,7 +250,7 @@ def test_failed_run_still_writes_the_trajectory_report(
     # A failed run is exactly when a miner needs the trajectories.
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
     monkeypatch.setattr(
@@ -337,7 +326,7 @@ def test_summary_reports_the_digest_the_runtime_recorded(
     # agent_version_id already baked into every episode receipt.
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
     config = _config(tmp_path)
@@ -387,7 +376,7 @@ def test_sandbox_interruption_preserves_finalized_receipts(
     monkeypatch: pytest.MonkeyPatch,
     termination: str,
 ) -> None:
-    families = sorted(GENERATED_FAMILIES)
+    families = _ROSTER
     results = [
         _episode(0, families[0]),
         *[
@@ -451,24 +440,17 @@ def test_timeout_retries_container_removal_after_failed_forced_removal(
     monkeypatch: pytest.MonkeyPatch,
     loaded_pack,
 ) -> None:
-    from oro_env_runtime.runtime import TOOL_CONTRACT_VERSION
-
     from subnet.validator.session_registry import InvalidSessionError, SessionRegistry
 
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _, _, _, runtime, _ = _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-    # This test fixes the roster to one task per family; the fixture has two.
-    selected = {
-        task.family: (task_id, task)
-        for task_id, task in zip(
-            loaded_pack.task_ids, loaded_pack.task_specs, strict=True
-        )
-    }
-    loaded_pack.task_ids = [task_id for task_id, _ in selected.values()]
-    loaded_pack.task_specs = [task for _, task in selected.values()]
+    # The run config asks for seven problems: keep seven of the fixture's rows.
+    loaded_pack.task_ids = loaded_pack.task_ids[:7]
+    loaded_pack.task_specs = loaded_pack.task_specs[:7]
+    loaded_pack.manifest["delivery"] = _pack([]).manifest["delivery"]
     registry = SessionRegistry(loaded_pack)
     monkeypatch.setattr(
         local_generated_validator, "load_local_pack", lambda *_: loaded_pack
@@ -486,7 +468,6 @@ def test_timeout_retries_container_removal_after_failed_forced_removal(
             runtime.call(
                 {
                     "session_id": rows[0]["session_id"],
-                    "tool_contract_version": TOOL_CONTRACT_VERSION,
                     "call_id": "late",
                     "idempotency_key": "late",
                     "turn": 1,
@@ -519,18 +500,19 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    families = sorted(GENERATED_FAMILIES)
-    # Verifier errors prevent aggregation; the sandbox exit code must still
-    # take precedence over the aggregate failure.
+    families = _ROSTER
+    # Stay UNDER the 30% infra threshold so aggregation still succeeds
+    # with a partial score — verifier count 2/7 = 28.6%. The sandbox exit
+    # code must still take precedence over the aggregate.
     results = [
         _episode(0, families[0]),
         *[
             _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[1:4], 1)
+            for index, family in enumerate(families[1:3], 1)
         ],
         *[
             _episode(index, family, outcome="agent_error")
-            for index, family in enumerate(families[4:], 4)
+            for index, family in enumerate(families[3:], 3)
         ],
     ]
     _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
@@ -549,15 +531,19 @@ def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
 
     assert caught.value.classification == "infrastructure"
     assert "sandbox exited with code 17" in str(caught.value)
+    # Fixture: 1 completed (reward=1) + 2 verifier_error + 4 agent_error,
+    # so aggregate = 1 / 7. Verifier ratio 2/7 = 28.6% stays under the
+    # 30% infra threshold so aggregation succeeds and the sandbox failure
+    # fires later.
     summary = _failure_summary(caught.value)
-    assert summary["aggregate_score"] is None
+    assert summary["aggregate_score"] == pytest.approx(1 / 7)
 
 
 def test_sandbox_failure_takes_precedence_when_receipt_roster_is_incomplete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    families = sorted(GENERATED_FAMILIES)
+    families = _ROSTER
     results = [_episode(index, family) for index, family in enumerate(families[:-1])]
     _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch, tmp_path, results=results
@@ -583,7 +569,7 @@ def test_sandbox_cannot_mount_evaluator_artifacts_writable(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _pack_value, _registry, commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch, tmp_path, results=results
@@ -605,7 +591,7 @@ def test_sandbox_report_cannot_change_evaluator_diagnostics(
 ) -> None:
     results = [
         _episode(index, family, outcome="agent_error")
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
     original_run = local_generated_validator.subprocess.run
@@ -693,7 +679,7 @@ def test_run_composes_generated_components_and_writes_per_family_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    families = sorted(GENERATED_FAMILIES)
+    families = _ROSTER
     results = [
         _episode(index, family, correct=index != 0, reward=0.5)
         for index, family in enumerate(families)
@@ -712,9 +698,7 @@ def test_run_composes_generated_components_and_writes_per_family_summary(
     assert registry.start.call_count == 7
     summary = json.loads(completed.summary_path.read_text(encoding="utf-8"))
     assert summary["aggregate_score"] == pytest.approx(3 / 7)
-    assert summary["family_rewards"] == {
-        family: (0.0 if index == 0 else 0.5) for index, family in enumerate(families)
-    }
+    assert summary["family_rewards"] == {"composed": pytest.approx(3 / 7)}
     assert [task["family"] for task in summary["tasks"]] == families
     assert summary["tasks"][0] == {
         "task_id": "task-0",
@@ -724,6 +708,8 @@ def test_run_composes_generated_components_and_writes_per_family_summary(
         "reward": 0.0,
         "error_classification": None,
         "error_detail": None,
+        # The fake episode's ledger has no order.
+        "failure": {"primary": "did_not_finish", "categories": ["did_not_finish"]},
     }
     assert (
         len((completed.artifact_dir / "problems.jsonl").read_text().splitlines()) == 7
@@ -750,7 +736,7 @@ def test_sandbox_inherits_provider_tokens_without_putting_values_in_argv(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _pack_value, _registry, commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch,
@@ -798,7 +784,7 @@ def test_summary_ignores_sandbox_inference_failure_claims(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    families = sorted(GENERATED_FAMILIES)
+    families = _ROSTER
     results = [
         _episode(0, families[0], outcome="agent_error"),
         _episode(1, families[1], outcome="agent_error"),
@@ -839,52 +825,53 @@ def test_summary_ignores_sandbox_inference_failure_claims(
     assert completed.aggregate_score == pytest.approx(5 / 7)
 
 
-@pytest.mark.parametrize("outcome,classification", [
-    ("verifier_error", "verifier"), ("environment_error", "environment")
-])
-def test_isolated_harness_failure_rejects_local_run(
+@pytest.mark.parametrize(
+    "outcome,classification",
+    [("verifier_error", "verifier"), ("environment_error", "environment")],
+)
+def test_isolated_harness_failure_scores_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     outcome: str,
     classification: str,
 ) -> None:
-    """A single harness failure invalidates the run without losing diagnostics."""
-    families = sorted(GENERATED_FAMILIES)
+    """A subset of harness failures no longer rejects the run — the completed
+    episodes are scored (env/verifier errors count as 0 reward alongside
+    agent errors), matching production `aggregate_results` semantics."""
+    families = _ROSTER
     results = [
         _episode(0, families[0], outcome=outcome),
         *[_episode(index, family) for index, family in enumerate(families[1:], 1)],
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-    assert caught.value.classification == classification
-    summary = _failure_summary(caught.value)
+    completed = run_local_generated_validator(_config(tmp_path))
+    # 6 completed with reward=1.0 (via _episode default), 1 harness failure at 0
+    assert completed.aggregate_score == pytest.approx(6 / 7)
+    summary = json.loads(completed.summary_path.read_text())
     assert summary["tasks"][0]["error_classification"] == classification
-    assert summary["aggregate_score"] is None
     assert len(summary["tasks"]) == len(families)
 
 
-def test_multiple_verifier_failures_reject_local_run(
+def test_multiple_verifier_failures_below_threshold_score_local_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Multiple harness failures also preserve per-task diagnostics."""
-    families = sorted(GENERATED_FAMILIES)
+    """Multiple harness failures below the 30% infra threshold still score
+    partially — 2 verifier errors + 5 completed = 2/7 = 28.6% < 30%."""
+    families = _ROSTER
     results = [
         *[
             _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[:3])
+            for index, family in enumerate(families[:2])
         ],
-        *[_episode(index, family) for index, family in enumerate(families[3:], 3)],
+        *[_episode(index, family) for index, family in enumerate(families[2:], 2)],
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "verifier"
-    summary = _failure_summary(caught.value)
+    completed = run_local_generated_validator(_config(tmp_path))
+    assert completed.aggregate_score == pytest.approx(5 / 7)
+    summary = json.loads(completed.summary_path.read_text())
     assert summary["tasks"][0]["error_classification"] == "verifier"
 
 
@@ -894,7 +881,7 @@ def test_missing_finalized_task_is_an_infrastructure_failure(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES)[:-1])
+        for index, family in enumerate(_ROSTER[:-1])
     ]
     _install_runtime_fakes(monkeypatch, tmp_path, results=results)
 
@@ -914,7 +901,7 @@ def test_preinstall_failure_closes_registry_and_pack(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     pack, registry, _commands, runtime, _server = _install_runtime_fakes(
         monkeypatch,
@@ -946,7 +933,7 @@ def test_problem_execution_budget_does_not_cut_off_finalization(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _pack_value, registry, _commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch,
@@ -978,7 +965,7 @@ def test_finalization_and_cleanup_complete_synchronously_before_return(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     pack, registry, _commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch,
@@ -1023,7 +1010,7 @@ def test_interrupted_sandbox_run_cleans_up_before_propagating_interrupt(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     pack, registry, _commands, _runtime, server = _install_runtime_fakes(
         monkeypatch,
@@ -1056,7 +1043,7 @@ def test_registry_cleanup_failure_fails_run_and_writes_summary(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _pack_value, registry, _commands, _runtime, _server = _install_runtime_fakes(
         monkeypatch,
@@ -1092,7 +1079,7 @@ def test_started_run_failures_write_classified_summary(
 ) -> None:
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     _pack_value, registry, _commands, _runtime, server = _install_runtime_fakes(
         monkeypatch,
@@ -1197,16 +1184,16 @@ def test_problem_execution_timeout_uses_one_budget_across_worker_batches(
     monkeypatch.setattr(local_generated_validator, "QUALIFYING_TASKS_PER_FAMILY", 1)
     results = [
         _episode(index, family)
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
-    pack = _pack(sorted(GENERATED_FAMILIES))
+    pack = _pack(_ROSTER)
     registry = MagicMock()
     registry.start.side_effect = [
         {
             "session_id": f"session-{index}",
-            "policy_view": {"query": family, "tool_contract_version": "v1"},
+            "policy_view": {"query": family},
         }
-        for index, family in enumerate(sorted(GENERATED_FAMILIES))
+        for index, family in enumerate(_ROSTER)
     ]
     registry.finalized_results.return_value = results
 

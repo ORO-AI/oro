@@ -1,15 +1,16 @@
-"""Real SessionServer process for sandbox-to-proxy integration coverage."""
+"""Private session server for sandbox-to-proxy integration coverage."""
 
 from __future__ import annotations
 
 import copy
 import hashlib
 import json
-import threading
 from typing import Any
 
+import uvicorn
+
 from subnet.validator.session_errors import InvalidSessionError
-from subnet.validator.session_service import SessionRuntime, SessionServer
+from subnet.validator.session_service import SessionRuntime, create_session_app
 
 
 class _IntegrationRegistry:
@@ -24,10 +25,6 @@ class _IntegrationRegistry:
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
         if envelope.get("session_id") != "integration-session":
             raise InvalidSessionError("unknown session_id")
-        if envelope.get("tool_contract_version") != "oro_task_tools_v2":
-            raise InvalidSessionError(
-                "tool_contract_version does not match the active session"
-            )
         call_id = envelope.get("call_id")
         idempotency_key = envelope.get("idempotency_key")
         if not isinstance(call_id, str) or not call_id:
@@ -84,7 +81,6 @@ class _IntegrationRegistry:
             "turn": int(envelope.get("turn") or 1),
             "solver_turn_count": int(envelope.get("turn") or 1),
             "action_count": len(calls),
-            "tool_contract_version": "oro_task_tools_v2",
             "calls": public_calls,
             "user_message": {"content": "continue with the selected option"},
             "provider_status": "complete",
@@ -107,9 +103,18 @@ class _IntegrationRegistry:
 def main() -> None:
     runtime = SessionRuntime()
     runtime.install(_IntegrationRegistry())  # type: ignore[arg-type]
-    server = SessionServer(runtime, host="0.0.0.0", port=9101)
-    server.start()
-    threading.Event().wait()
+    app = create_session_app(runtime)
+
+    @app.put("/_test/inference-grant")
+    def set_grant(grant: dict[str, Any]) -> None:
+        if grant:
+            runtime.set_inference_grant(
+                str(grant["run_id"]), str(grant["token"]), float(grant["expires_at"])
+            )
+        else:
+            runtime.clear_inference_grant()
+
+    uvicorn.run(app, host="0.0.0.0", port=9101, log_level="warning", access_log=False)
 
 
 if __name__ == "__main__":

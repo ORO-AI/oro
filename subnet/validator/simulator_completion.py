@@ -4,15 +4,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import secrets
+import threading
 import time
+from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any
 
 from src.agent.proxy_client import ProxyClient
 
+# Marks the validator's own proxy calls (the disclosure reader's decisions), which the
+# agent sandbox may not make. Minted per process and never given to the sandbox: the
+# agent holds the same provider key, so the key alone cannot tell the two apart.
+VALIDATOR_CALLER_HEADER = "X-ORO-Validator"
+VALIDATOR_CALLER_SECRET = secrets.token_urlsafe(32)
+
 logger = logging.getLogger(__name__)
 
-# The shopper-simulator LLM call is a single-shot dependency in the middle
-# of a task episode; a lone transient (429, 5xx, socket reset, empty body)
+# Simulator calls (the shopper's chat and the disclosure Reader's decisions)
+# are single-shot dependencies in the middle of a task episode; a lone
+# transient (429, an in-flight credit 402, 5xx, socket reset, empty body)
 # used to trip ``environment_error`` on the task. Retry a bounded number
 # of times before we escalate — the provider usually recovers.
 #
@@ -21,11 +33,13 @@ logger = logging.getLogger(__name__)
 # it. Shorter waits would repeatedly hit the same closed window.
 #
 # Wall budget: request latency counts against ``simulator_timeout_s``
-# (60s at session_registry), not just the sleeps. Skip further retries
-# once the projected wall (elapsed + next backoff + a safety margin for
-# the next request) would exceed the budget, so we surface a clean
-# ``InferenceProviderError`` instead of getting quarantined mid-sleep by
-# the outer future's ``TimeoutError``.
+# (60s at session_registry), not just the sleeps, and every phase of a
+# simulator turn shares that deadline (``SIMULATOR_DEADLINE``). Skip
+# further retries once the projected wall (elapsed + next backoff + a
+# safety margin for the next request) would pass this call's budget or
+# the turn's deadline, so we surface a clean ``InferenceProviderError``
+# instead of getting quarantined mid-sleep by the outer ``TimeoutError``.
+SIMULATOR_DEADLINE: ContextVar[float] = ContextVar("simulator_deadline")
 _MAX_ATTEMPTS = 4
 _RETRY_BACKOFFS_S = (5.0, 10.0, 20.0)
 _WALL_BUDGET_S = 55.0
@@ -43,12 +57,26 @@ class InferenceProviderError(RuntimeError):
     message — see ORO-1866 disclosure canary).
     """
 
-    def __init__(self, status: int | None, body: str) -> None:
+    def __init__(self, status: int | None, body: str, *, network: bool = False) -> None:
         self.status = status
         self.body = body
+        self.network = network
         super().__init__(
             f"user simulator inference returned no completion "
             f"(status={status} body={body!r})"
+        )
+
+    @property
+    def key_exhausted(self) -> bool:
+        """The run key's limit (403) or the miner account's credit (402) is spent.
+
+        The in-flight reservation 402 clears as other calls finish, so it doesn't count.
+        """
+        body = self.body.lower()
+        if self.status == 403:
+            return "key limit exceeded" in body
+        return self.status == 402 and (
+            "insufficient credits" in body or "requires more credits" in body
         )
 
 
@@ -64,9 +92,16 @@ class SimulatorCompletion:
         client: ProxyClient | None = None,
         inference_stats_file: str | None = None,
         episode_id: str | None = None,
+        key_exhausted_event: threading.Event | None = None,
     ) -> None:
         if not access_token:
-            raise ValueError("miner inference access token is required")
+            raise ValueError("inference access token is required")
+        self._access_token = access_token
+        self._key_exhausted_event = key_exhausted_event
+        # Configured Readers require Jev's decisions endpoint, which only OpenRouter
+        # provides; runtime setup rejects them when this callable is unavailable.
+        if not access_token.startswith("sk-or-"):
+            self.decide = None
         self._client = client or ProxyClient(
             proxy_url=proxy_url,
             api_key=access_token,
@@ -75,6 +110,7 @@ class SimulatorCompletion:
             inference_stats_file=inference_stats_file,
             inference_stats_problem_id=episode_id,
         )
+        self._client.headers = {VALIDATOR_CALLER_HEADER: VALIDATOR_CALLER_SECRET}
 
     async def __call__(
         self,
@@ -83,6 +119,8 @@ class SimulatorCompletion:
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 8192,
         temperature: float | None = 0.0,
+        reasoning: bool | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "model": model,
@@ -94,34 +132,75 @@ class SimulatorCompletion:
             request["temperature"] = temperature
         if tools:
             request["tools"] = tools
-
-        # Use ``post_verbose`` — its return value carries the upstream
-        # status+body directly. Callers must not rely on a shared client
-        # attribute (see ORO-2191 review): a single ProxyClient shared by
-        # concurrent sessions would let session B's failure overwrite
-        # session A's just before A reads it, corrupting A's ledger.
-        started = time.monotonic()
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            result = self._client.post_verbose(
-                "/inference/chat/completions",
-                json_data=request,
+        if reasoning is not None:
+            request["reasoning"] = (
+                reasoning if isinstance(reasoning, dict) else {"enabled": reasoning}
             )
-            data = result.data
+            if not self._access_token.startswith("sk-or-"):
+                preference = request["reasoning"]
+                if model != "Qwen/Qwen3.5-397B-A17B-TEE" or preference.get("enabled") is not False or len(preference) != 1:
+                    raise ValueError("Unsupported simulator reasoning preference for Chutes")
+                # Chutes' Qwen non-thinking mode uses the vLLM template switch.
+                request["chat_template_kwargs"] = {"enable_thinking": False}
+                del request["reasoning"]
+        if response_format is not None:
+            request["response_format"] = response_format
+
+        def completion(data: Any) -> dict[str, Any] | None:
             choices = data.get("choices") if isinstance(data, dict) else None
             choice = choices[0] if isinstance(choices, list) and choices else None
             message = choice.get("message") if isinstance(choice, dict) else None
-            if isinstance(message, dict):
+            if not isinstance(message, dict):
+                return None
+            return {
+                "text": (message.get("content") or "").replace(self._access_token, "[REDACTED]"),
+                "tool_calls": message.get("tool_calls") or [],
+                "finish_reason": choice.get("finish_reason"),
+            }
+
+        return await self._post("/inference/chat/completions", request, completion)
+
+    async def decide(
+        self, model: str, state: dict[str, Any], questions: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Typed answers from a decisions model, on the same run key and retries.
+
+        A configured Reader has no other judge to fall back to when this raises.
+        """
+        try:
+            return await self._post(
+                "/inference/alpha/decisions",
+                {"model": model, "state": state, "questions": questions},
+                lambda data: data if isinstance(data, dict) else None,
+            )
+        except InferenceProviderError as exc:
+            # No response is an outage: a situation without a Reader asks its next judge.
+            if exc.network:
+                raise ConnectionError(exc.body or "no response") from exc
+            raise
+
+    async def _post(
+        self, path: str, json_data: dict[str, Any], parse: Callable[[Any], Any]
+    ) -> Any:
+        """POST with bounded retries; ``parse`` returns the result, or None if malformed."""
+        deadline = min(time.monotonic() + _WALL_BUDGET_S, SIMULATOR_DEADLINE.get(math.inf))
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            # Use ``post_verbose_async`` — its return value carries the upstream
+            # status+body directly. Callers must not rely on a shared client
+            # attribute (see ORO-2191 review): a single ProxyClient shared by
+            # concurrent sessions would let session B's failure overwrite
+            # session A's just before A reads it, corrupting A's ledger.
+            result = await self._client.post_verbose_async(path, json_data=json_data)
+            parsed = parse(result.data)
+            if parsed is not None:
                 if attempt > 1:
                     logger.warning(
-                        "user simulator inference recovered on attempt %d/%d",
+                        "user simulator inference %s recovered on attempt %d/%d",
+                        path,
                         attempt,
                         _MAX_ATTEMPTS,
                     )
-                return {
-                    "text": message.get("content") or "",
-                    "tool_calls": message.get("tool_calls") or [],
-                    "finish_reason": choice.get("finish_reason"),
-                }
+                return parsed
 
             # Extract the upstream signal from this call's own return value —
             # never from a shared attribute. ``result.error`` describes the
@@ -130,8 +209,8 @@ class SimulatorCompletion:
             error = result.error or {}
             kind = error.get("kind", "unknown")
             upstream_status = error.get("status")
-            upstream_body = (error.get("body") or "").strip()
-            if data is None and result.error is None:
+            upstream_body = (error.get("body") or "").strip().replace(self._access_token, "[REDACTED]")
+            if result.data is None and result.error is None:
                 # ProxyClient returned no data but no error info — treat as
                 # a malformed 200 body (see ORO-2191 non-blocker: a JSON
                 # ``null`` body decodes to None on a 200 response).
@@ -144,35 +223,34 @@ class SimulatorCompletion:
                 else "proxy non-200"
             )
             log_detail = (
-                f"{failure_label} status={upstream_status} body={upstream_body!r}"
+                f"{path} {failure_label} status={upstream_status} body={upstream_body!r}"
             )
+            provider_error = InferenceProviderError(
+                upstream_status, upstream_body, network=kind == "network"
+            )
+            if provider_error.key_exhausted:
+                if self._key_exhausted_event is not None:
+                    self._key_exhausted_event.set()
+                logger.warning("inference key budget exhausted during user simulation")
+                raise provider_error
             if attempt >= _MAX_ATTEMPTS:
                 logger.error(
                     "user simulator inference failed after %d attempts (%s)",
                     _MAX_ATTEMPTS,
                     log_detail,
                 )
-                raise InferenceProviderError(
-                    status=upstream_status,
-                    body=upstream_body,
-                )
+                raise provider_error
             backoff_s = _RETRY_BACKOFFS_S[attempt - 1]
-            projected_s = (
-                (time.monotonic() - started) + backoff_s + _NEXT_ATTEMPT_HEADROOM_S
-            )
-            if projected_s > _WALL_BUDGET_S:
+            remaining_s = deadline - time.monotonic()
+            if backoff_s + _NEXT_ATTEMPT_HEADROOM_S > remaining_s:
                 logger.error(
                     "user simulator inference wall budget exhausted "
-                    "after %d attempts (%s); projected=%.2fs budget=%.2fs",
+                    "after %d attempts (%s); remaining=%.2fs",
                     attempt,
                     log_detail,
-                    projected_s,
-                    _WALL_BUDGET_S,
+                    remaining_s,
                 )
-                raise InferenceProviderError(
-                    status=upstream_status,
-                    body=upstream_body,
-                )
+                raise provider_error
             logger.warning(
                 "user simulator inference failed on attempt %d/%d (%s); "
                 "retrying in %.2fs",
@@ -182,6 +260,5 @@ class SimulatorCompletion:
                 backoff_s,
             )
             await asyncio.sleep(backoff_s)
-
 
 __all__ = ["InferenceProviderError", "SimulatorCompletion"]

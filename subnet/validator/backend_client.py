@@ -31,6 +31,7 @@ from oro_sdk.api.validator import (
     update_progress,
 )
 from oro_sdk.models.epoch_standings import EpochStandings
+from oro_sdk.models.claim_work_request import ClaimWorkRequest
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.complete_run_request import CompleteRunRequest
 from oro_sdk.models.complete_run_response import CompleteRunResponse
@@ -48,16 +49,17 @@ from oro_sdk.models.progress_update_request import ProgressUpdateRequest
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
+from oro_env_runtime.contracts import RUNTIME_CONTRACT
 from oro_sdk import errors as sdk_errors
 
 from .types import ResourceMetrics
 
 
-def _build_heartbeat_body(
+def _heartbeat_fields(
     service_versions: Optional[dict[str, str]],
     resource_metrics: Optional[ResourceMetrics],
-) -> Optional[SdkHeartbeatRequest]:
-    """Build an SdkHeartbeatRequest from optional inputs, or None if both empty.
+) -> dict[str, Any]:
+    """The optional heartbeat fields that are set.
 
     Centralised so claim_work and heartbeat construct the body the same way.
     """
@@ -69,9 +71,7 @@ def _build_heartbeat_body(
             value = resource_metrics.get(key)
             if value is not None:
                 body_kwargs[key] = value
-    if not body_kwargs:
-        return None
-    return SdkHeartbeatRequest(**body_kwargs)
+    return body_kwargs
 
 
 class BackendError(Exception):
@@ -389,13 +389,14 @@ class BackendClient:
                 - is_conflict=True if at capacity (409)
                 - is_auth_error=True if authentication fails (401/403)
         """
+        # The Backend hands out only work delivered for this runtime contract.
         kwargs: dict[str, Any] = {
             "client": self._auth_client,
+            "body": ClaimWorkRequest(
+                runtime_contract=RUNTIME_CONTRACT,
+                **_heartbeat_fields(service_versions, resource_metrics),
+            ),
         }
-
-        body = _build_heartbeat_body(service_versions, resource_metrics)
-        if body is not None:
-            kwargs["body"] = body
 
         return self._call_api(
             claim_work.sync_detailed,
@@ -431,9 +432,9 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        body = _build_heartbeat_body(service_versions, resource_metrics)
-        if body is not None:
-            kwargs["body"] = body
+        fields = _heartbeat_fields(service_versions, resource_metrics)
+        if fields:
+            kwargs["body"] = SdkHeartbeatRequest(**fields)
 
         return self._call_api(
             heartbeat.sync_detailed,

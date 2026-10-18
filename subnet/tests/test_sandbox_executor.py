@@ -7,12 +7,15 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from src.agent.sandbox_executor import (
     _read_inference_stats,
     _read_request_log,
     build_result_envelope,
     execute_single_problem,
     read_inference_stats,
+    read_regular_file,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -102,8 +105,31 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
         "inference_cost_usd": 0.25,
         "inference_cost_missing": 0,
         "prompt_tokens": 10,
+        "cached_tokens": 6,
         "completion_tokens": 2,
-    }
+            "requested_models": {
+                "Unknown model": {
+                "requests": 1,
+                "failed_requests": 0,
+                "prompt_tokens": 10,
+                "cached_tokens": 6,
+                "completion_tokens": 2,
+                "cost_usd": 0.25,
+                "cost_missing": 0,
+                }
+            },
+            "served_models": {
+                "Unknown model": {
+                    "requests": 1,
+                    "failed_requests": 0,
+                    "prompt_tokens": 10,
+                    "cached_tokens": 6,
+                    "completion_tokens": 2,
+                    "cost_usd": 0.25,
+                    "cost_missing": 0,
+                }
+            },
+        }
     assert result.inference_usage == usage["episode-1"]
     output = tmp_path / "runner-output.jsonl"
     envelope = build_result_envelope(result)
@@ -243,3 +269,90 @@ class TestReadRequestLog:
             assert len(entries) == 2
         finally:
             os.unlink(path)
+
+
+def test_sums_counters_from_multiple_clients_for_one_problem(tmp_path):
+    """An agent that builds a new ProxyClient per call must not report one call per problem."""
+    from src.agent.proxy_client import InferenceStats
+
+    path = str(tmp_path / "inference_stats.jsonl")
+    for _ in range(3):  # three clients, each making two calls for the same problem
+        stats = InferenceStats(stats_file=path, problem_id="p1")
+        stats.record_success({"cost": 0.01, "prompt_tokens": 10, "completion_tokens": 2})
+        stats.record_success({"cost": 0.01, "prompt_tokens": 10, "completion_tokens": 2})
+
+    usage = read_inference_stats(path)["p1"]
+
+    assert usage["inference_total"] == 6
+    assert usage["prompt_tokens"] == 60
+    assert round(usage["inference_cost_usd"], 6) == 0.06
+
+
+def test_execution_id_keeps_repeated_runs_of_one_problem_separate(tmp_path, monkeypatch):
+    """/run and /run_matrix can run one problem repeatedly against the same stats file."""
+    from src.agent.proxy_client import InferenceStats
+
+    path = str(tmp_path / "inference_stats.jsonl")
+    for execution_id, calls in (("run-a", 2), ("run-b", 5)):
+        monkeypatch.setenv("INFERENCE_STATS_EXECUTION_ID", execution_id)
+        stats = InferenceStats(stats_file=path, problem_id="p1")
+        for _ in range(calls):
+            stats.record_success()
+
+    assert read_inference_stats(path, "run-a")["p1"]["inference_total"] == 2
+    assert read_inference_stats(path, "run-b")["p1"]["inference_total"] == 5
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "sparse"])
+def test_read_regular_file_rejects_non_regular_or_oversized_files(tmp_path, kind):
+    path = tmp_path / "output.jsonl"
+    if kind == "symlink":
+        path.symlink_to("/dev/zero")
+    elif kind == "fifo":
+        os.mkfifo(path)
+    else:
+        with open(path, "wb") as f:
+            f.truncate(1 << 40)
+    with pytest.raises((OSError, ValueError)):
+        read_regular_file(path, max_bytes=1024)
+
+
+def test_read_inference_stats_skips_a_non_regular_stats_file(tmp_path):
+    target = tmp_path / "trusted.jsonl"
+    target.write_text(json.dumps({"problem_id": "p1", "inference_total": 9}) + "\n")
+    stats = tmp_path / "inference_stats.jsonl"
+    stats.symlink_to(target)
+    assert read_inference_stats(str(stats)) == {}
+
+
+def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
+    stats = tmp_path / "inference_stats.jsonl"
+    good = json.dumps({"problem_id": "p1", "inference_total": 2}).encode()
+    stats.write_bytes(b"\xff\xfe broken\n" + good + b"\n")
+    assert read_inference_stats(str(stats))["p1"]["inference_total"] == 2
+
+
+def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
+    path = tmp_path / "output.jsonl"
+    path.mkdir()
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(20):
+        with pytest.raises((OSError, ValueError)):
+            read_regular_file(path, max_bytes=1024)
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monkeypatch):
+    import src.agent.sandbox_executor as se
+
+    stats = tmp_path / "inference_stats.jsonl"
+    line = json.dumps({"problem_id": "p1", "inference_total": 1}) + "\n"
+    stats.write_text(line * 3)
+    monkeypatch.setattr(se, "MAX_SANDBOX_OUTPUT_BYTES", len(line) + 1)
+    real_open = se.open_regular_file
+    # Passes the size check at open, then holds more than the cap.
+    monkeypatch.setattr(
+        se, "open_regular_file", lambda path, _cap: real_open(path, 1 << 30)
+    )
+
+    assert read_inference_stats(str(stats)) == {}

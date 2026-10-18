@@ -104,6 +104,7 @@ export function normalizeOroEpisode(input, sourceName = "trajectory.json") {
       };
     }),
     verdict: episode.verdict ?? {},
+    failure: episode.failure ?? null,
     provenance: {
       ...(episode.provenance ?? {}),
       execution_contract_id: input.execution_contract_id ?? null,

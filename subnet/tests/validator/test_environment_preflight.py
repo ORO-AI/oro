@@ -2,16 +2,27 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from oro_env_runtime.environment import Environment
+from oro_env_runtime.situation import (
+    Budget,
+    Requirement,
+    Situation,
+    SolverTurn,
+    Transition,
+    Utterance,
+)
 
 from validator import environment_preflight, environment_preflight_agent, main
 from validator.env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
 from validator.environment_preflight import run_environment_preflight
+from validator.session_registry import SessionRegistry
 from validator.session_service import SessionRuntime
 
 pytest_plugins = ("tests.compat_fixture",)
@@ -144,6 +155,72 @@ def test_select_reference_case_requires_a_discriminating_case(
         match="self-verifiable positive/negative",
     ):
         environment_preflight._select_reference_case(loaded_pack)
+
+
+def test_replay_matches_live_when_a_line_is_due_at_turn_2(
+    loaded_pack: LoadedPack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timeline line due at turn 2 is said at turn 1's boundary in the live
+    session; the replay must say it at the same boundary to match."""
+    task_id, task, targets = environment_preflight._select_reference_case(loaded_pack)
+    situation = Situation(
+        preset="boundary",
+        requirements=[
+            Requirement(
+                id="budget",
+                predicate=Budget(max=task.hard.budget, currency=task.hard.currency),
+            )
+        ],
+        timeline=[
+            Transition(
+                id="second",
+                trigger=SolverTurn(turn=2),
+                effects=[Utterance(text="one more thing.")],
+            )
+        ],
+    )
+    open_session = LoadedPack.open_session
+
+    def with_line(self, task_id, **kwargs):  # noqa: ANN001, ANN202
+        session = open_session(self, task_id, **kwargs)
+        session.task = session.task.model_copy(update={"situation": situation})
+        session.env = Environment(session.task, session.catalog, search=session.search)
+        return session
+
+    monkeypatch.setattr(LoadedPack, "open_session", with_line)
+    with SessionRegistry(
+        loaded_pack,
+        simulator_factory=lambda _session: environment_preflight._DeterministicSimulator(),
+    ) as registry:
+        for policy, groups in environment_preflight._action_groups(task, targets).items():
+            registry.start(
+                evaluation_run_id="run",
+                agent_version_id=policy,
+                task_id=task_id,
+                session_id=policy,
+            )
+            binding = {"session_id": policy}
+            for turn, actions in enumerate(groups, start=1):
+                registry.call(
+                    {
+                        **binding,
+                        "call_id": f"{turn}",
+                        "idempotency_key": f"{turn}",
+                        "turn": turn,
+                        "calls": [
+                            {"call_id": f"{turn}-{index}", "action": action}
+                            for index, action in enumerate(actions)
+                        ],
+                    }
+                )
+            result = registry.verdict(binding)
+            assert {"kind": "user_message", "content": "one more thing."} in [
+                {"kind": e["kind"], "content": e["payload"].get("content")}
+                for e in result["ledger"]
+            ]
+            checks = environment_preflight._replay_checks(loaded_pack, result, groups)
+            assert all(checks.values()), checks
 
 
 def test_preflight_clears_runtime_when_sandbox_fails(
@@ -310,6 +387,21 @@ def test_enabled_feature_flag_requires_valid_pack_sha() -> None:
         validator._run_environment_preflight_if_enabled()
 
 
+def test_invalid_preflight_config_fails_before_session_server_starts() -> None:
+    validator = main.Validator.__new__(main.Validator)
+    validator.config = SimpleNamespace(
+        environment_runtime_enabled=True,
+        environment_preflight_pack_sha256="",
+    )
+    validator.session_server = MagicMock()
+
+    with pytest.raises(RuntimeError, match="64 lowercase hex"):
+        validator.run()
+
+    validator.session_server.start.assert_not_called()
+    validator.session_server.stop.assert_not_called()
+
+
 def test_finalize_submits_all_sessions_and_clears_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -361,3 +453,32 @@ def test_finalize_failure_cannot_change_legacy_evaluation(
 
     validator.finalize_environment_sessions(work, registry)
     validator.session_runtime.clear.assert_called_once_with(registry)
+
+
+def test_select_reference_case_reads_v8_task_rows(loaded_pack: LoadedPack) -> None:
+    """The preflight reads delivered rows through the shared reader, so a v8 pack (whose
+    task file opens with an encoding record) selects the same case as its v7 original."""
+    from oro_env_runtime.task_codec import V8_PACK_VERSION, encode_task_rows
+
+    v7 = environment_preflight._select_reference_case(loaded_pack)
+    tasks = loaded_pack.pack_dir / "data/tasks/private_tasks.jsonl"
+    rows = [json.loads(line) for line in tasks.read_text(encoding="utf-8").splitlines()]
+    tasks.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in encode_task_rows(rows, V8_PACK_VERSION)),
+        encoding="utf-8",
+    )
+    manifest_path = loaded_pack.pack_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pack_version"] = V8_PACK_VERSION
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    checksums = loaded_pack.pack_dir / "checksums.sha256"
+    changed = {"data/tasks/private_tasks.jsonl": tasks, "manifest.json": manifest_path}
+    checksums.write_text(
+        "".join(
+            f"{hashlib.sha256(changed[rel].read_bytes()).hexdigest() if rel in changed else digest}  {rel}\n"
+            for digest, rel in (line.split("  ", 1) for line in checksums.read_text().splitlines())
+        )
+    )
+
+    v8 = environment_preflight._select_reference_case(loaded_pack)
+    assert v8[0] == v7[0] and v8[2] == v7[2]

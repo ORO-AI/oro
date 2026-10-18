@@ -8,14 +8,16 @@ import math
 import multiprocessing
 import os
 import queue
+import stat
 import sys
 import time
+import uuid
 from concurrent.futures import (
     ThreadPoolExecutor,
     TimeoutError as FutureTimeoutError,
     as_completed,
 )
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, BinaryIO, Dict, List, Optional, Union, Callable
 from dataclasses import dataclass, field
 
 from src.agent.sandbox_status import SandboxProblemStatus
@@ -163,43 +165,148 @@ def _load_agent(agent_file: Optional[str] = None) -> Callable:
     return agent_main
 
 
+# An entry counts only with a valid request count; the other counters are
+# summed once admitted but cannot admit an entry on their own.
+_ADMITTING_COUNTERS = ("inference_success", "inference_total")
 _INFERENCE_COUNTERS = (
-    "inference_success",
+    *_ADMITTING_COUNTERS,
     "inference_failed",
-    "inference_total",
     "inference_cost_usd",
     "inference_cost_missing",
     "prompt_tokens",
+    "cached_tokens",
     "completion_tokens",
 )
 
 
+def _numeric_counter_map(entry: dict, keys: tuple[str, ...]) -> dict[str, int | float]:
+    numeric = {}
+    for key in keys:
+        value = entry.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            numeric[key] = value
+    return numeric
+
+
 def _numeric_inference_counters(entry: dict) -> dict[str, int | float]:
-    return {
-        counter: value
-        for counter in _INFERENCE_COUNTERS
-        if isinstance((value := entry.get(counter)), (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value >= 0
-    }
+    return _numeric_counter_map(entry, _INFERENCE_COUNTERS)
 
 
-def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
-    """Merge latest cumulative counters from one or more isolated files."""
+def _model_inference_counters(
+    entry: dict, distribution: str
+) -> dict[str, dict[str, int | float]]:
+    models = entry.get(distribution)
+    if not isinstance(models, dict):
+        return {}
+    sanitized = {}
+    for model, counters in models.items():
+        if not isinstance(model, str) or not isinstance(counters, dict):
+            continue
+        numeric = _numeric_counter_map(
+            counters,
+            (
+                "requests",
+                "failed_requests",
+                "prompt_tokens",
+                "cached_tokens",
+                "completion_tokens",
+                "cost_usd",
+                "cost_missing",
+            ),
+        )
+        if numeric:
+            sanitized[model[:200] or "Unknown model"] = numeric
+    return sanitized
+
+
+def _merge_model_inference_counters(total: dict, entry: dict) -> None:
+    for distribution in ("requested_models", "served_models"):
+        for model, counters in _model_inference_counters(entry, distribution).items():
+            model_total = total.setdefault(distribution, {}).setdefault(model, {})
+            for key, value in counters.items():
+                model_total[key] = model_total.get(key, 0) + value
+
+
+# Composed dialogues run ~1.4 MB per episode.
+MAX_SANDBOX_OUTPUT_BYTES = 512 * 1024 * 1024
+
+
+def open_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> BinaryIO:
+    """Open a sandbox output file of at most ``max_bytes`` without blocking.
+
+    ``single_link`` also rejects hard-linked files. Use it only where the agent
+    cannot create links itself; on agent-written output it would let one extra
+    link block every read.
+    """
+    parent_fd = os.open(
+        os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    )
+    try:
+        fd = os.open(
+            os.path.basename(path),
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+    finally:
+        os.close(parent_fd)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"{path} must be a regular file")
+        if single_link and metadata.st_nlink != 1:
+            raise ValueError(f"{path} must have exactly one link")
+        if metadata.st_size > max_bytes:
+            raise ValueError(f"{path} exceeds {max_bytes} bytes")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read_regular_file(
+    path: str | os.PathLike, max_bytes: int, *, single_link: bool = False
+) -> bytes:
+    """Read a sandbox output file, bounded to ``max_bytes``."""
+    with open_regular_file(path, max_bytes, single_link=single_link) as source:
+        content = source.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise ValueError(f"{path} exceeds {max_bytes} bytes")
+    return content
+
+
+def read_inference_stats(
+    path: str | list[str], execution_id: str | None = None
+) -> dict[str, dict]:
+    """Merge latest cumulative counters from one or more isolated files.
+
+    With ``execution_id``, only lines written by that execution count, so repeated
+    runs of one problem that share a stats file stay separate.
+    """
 
     latest_by_source = {}
     paths = [path] if isinstance(path, str) else path
     for source, stats_path in enumerate(paths):
         try:
-            with open(stats_path) as f:
+            found = {}
+            with open_regular_file(stats_path, MAX_SANDBOX_OUTPUT_BYTES) as f:
+                read = 0
                 for line in f:
+                    read += len(line)  # the file can grow after the size check at open
+                    if read > MAX_SANDBOX_OUTPUT_BYTES:
+                        raise ValueError(f"{stats_path} exceeds the size limit")
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         entry = json.loads(line)
-                    except json.JSONDecodeError:
+                    except ValueError:  # malformed JSON or invalid UTF-8
                         continue
                     if not isinstance(entry, dict):
                         continue
@@ -208,18 +315,25 @@ def read_inference_stats(path: str | list[str]) -> dict[str, dict]:
                         if not isinstance(nested, dict):
                             continue
                         entry = {**nested, "problem_id": entry.get("problem_id")}
-                    key = (str(entry.get("problem_id")), source)
-                    latest_by_source[key] = entry
-        except (FileNotFoundError, OSError):
+                    if execution_id is not None and entry.get("execution_id") != execution_id:
+                        continue
+                    # Each client writes cumulative totals; keep the latest per client.
+                    key = (str(entry.get("problem_id")), source, str(entry.get("instance_id") or ""))
+                    found[key] = entry
+            latest_by_source.update(found)
+        except FileNotFoundError:
             pass
+        except (OSError, ValueError) as exc:
+            logger.warning("Skipping inference stats %s: %s", stats_path, exc)
     totals: dict[str, dict] = {}
-    for (problem_id, _source), entry in latest_by_source.items():
+    for (problem_id, _source, _instance), entry in latest_by_source.items():
         numeric = _numeric_inference_counters(entry)
-        if not numeric:
+        if numeric.keys().isdisjoint(_ADMITTING_COUNTERS):
             continue
         total = totals.setdefault(problem_id, {"problem_id": problem_id})
         for counter in _INFERENCE_COUNTERS:
             total[counter] = total.get(counter, 0) + numeric.get(counter, 0)
+        _merge_model_inference_counters(total, entry)
     return totals
 
 
@@ -232,11 +346,12 @@ def merge_inference_stats(*sources: dict[str, dict]) -> dict[str, dict]:
             if not isinstance(entry, dict):
                 continue
             numeric = _numeric_inference_counters(entry)
-            if not numeric:
+            if numeric.keys().isdisjoint(_ADMITTING_COUNTERS):
                 continue
             total = totals.setdefault(problem_id, {"problem_id": problem_id})
             for counter, value in numeric.items():
                 total[counter] = total.get(counter, 0) + value
+            _merge_model_inference_counters(total, entry)
     return totals
 
 
@@ -278,6 +393,7 @@ def _run_in_process(
     result_queue,
     stats_file: Optional[str] = None,
     request_log_file: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> None:
     """Target function executed in a child process.
 
@@ -287,6 +403,8 @@ def _run_in_process(
     """
     if stats_file:
         os.environ["INFERENCE_STATS_FILE"] = stats_file
+    if execution_id:
+        os.environ["INFERENCE_STATS_EXECUTION_ID"] = execution_id
     if request_log_file:
         os.environ["REQUEST_LOG_FILE"] = request_log_file
     os.environ["PROBLEM_DATA"] = json.dumps(problem)
@@ -327,11 +445,12 @@ def execute_single_problem(
     output_file = os.environ.get("SANDBOX_OUTPUT_FILE", "")
     output_dir = os.path.dirname(output_file) if output_file else "/tmp"
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
+    execution_id = uuid.uuid4().hex  # scopes this run's lines in the shared stats file
     request_log_file = os.path.join(output_dir, f"request_log_{problem_id}.jsonl")
     result_queue: multiprocessing.Queue = _MP_CTX.Queue()
     process = _MP_CTX.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue, stats_file, request_log_file),
+        args=(problem, agent_file, result_queue, stats_file, request_log_file, execution_id),
     )
     process.start()
     deadline = time.monotonic() + timeout
@@ -361,7 +480,7 @@ def execute_single_problem(
             process.kill()
             process.join()
 
-    inference_usage = read_inference_stats(stats_file).get(str(problem_id))
+    inference_usage = read_inference_stats(stats_file, execution_id).get(str(problem_id))
     include_private_usage = problem.get("category") == "generated_environment"
     inf_failures = int((inference_usage or {}).get("inference_failed", 0))
     inf_total = int((inference_usage or {}).get("inference_total", 0))
@@ -466,6 +585,9 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
     and the HTTP server so consumers see identical envelopes.
     """
     dialogue: Optional[List[Dict]] = None
+    summary_calls = [
+        call for call in (result.proxy_calls or []) if call.get("kind") != "attempt"
+    ]
     if result.success and isinstance(result.result, list):
         dialogue = result.result
         for i, step in enumerate(dialogue):
@@ -478,19 +600,16 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
         # Stamp per-problem execution time onto the first step only — consumers
         # that look at dialogue[0].extra_info still find it there.
         if dialogue:
-            dialogue[0]["extra_info"].setdefault("execution_time", result.execution_time)
+            dialogue[0]["extra_info"].setdefault(
+                "execution_time", result.execution_time
+            )
         # Distribute proxy calls across steps by timestamp approximation.
         # Calls before the first step go to step 0; calls between step N and
         # N+1 go to step N.
         if result.proxy_calls and dialogue:
-            step_timestamps = [
-                s["extra_info"].get("timestamp", 0) for s in dialogue
-            ]
+            step_timestamps = [s["extra_info"].get("timestamp", 0) for s in dialogue]
             # Per-attempt entries (kind="attempt") are diagnostic only — keep
             # them out of the trajectory the judge sees.
-            summary_calls = [
-                c for c in result.proxy_calls if c.get("kind") != "attempt"
-            ]
             buckets: Dict[int, List[Dict]] = {}
             for call in summary_calls:
                 call_ts = call.get("timestamp", 0)
@@ -525,6 +644,8 @@ def build_result_envelope(result: ExecutionResult) -> Dict[str, Any]:
     }
     if result.include_private_usage and result.inference_usage is not None:
         envelope["_shadow_inference_usage"] = result.inference_usage
+    if result.include_private_usage and summary_calls:
+        envelope["_shadow_proxy_calls"] = summary_calls
     return envelope
 
 
