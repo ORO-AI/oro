@@ -7,6 +7,8 @@ import logging
 from pathlib import Path
 from uuid import UUID
 
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
+
 
 def split_output_by_problem(
     output_file: Path,
@@ -29,7 +31,8 @@ def split_output_by_problem(
     """
     problem_lines: dict[str, bytes] = {}
 
-    for raw_line in output_file.read_bytes().splitlines():
+    content = read_regular_file(output_file, MAX_SANDBOX_OUTPUT_BYTES)
+    for raw_line in content.splitlines():
         if not raw_line.strip():
             continue
         try:
@@ -88,6 +91,6 @@ def split_output_by_problem(
         logging.warning(
             "Could not split output by problem_id, uploading as single file"
         )
-        problem_lines[str(problem_ids[0])] = output_file.read_bytes()
+        problem_lines[str(problem_ids[0])] = content
 
     return problem_lines
