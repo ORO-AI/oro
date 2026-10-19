@@ -1,3 +1,5 @@
+# Validator and local test dependencies: see tests/integration/README.md.
+# Their source of truth is docker/validator/pyproject.toml + uv.lock.
 pyserini==1.0.0
 Flask==3.1.3
 ujson==5.13.0
@@ -8,6 +10,5 @@ duckduckgo_search==8.1.1
 colorama==0.4.6
 googlesearch-python==1.3.0
 bittensor==10.5.0
-oro-sdk==1.0.101
 prometheus-client>=0.20.0
 psutil>=5.9.0

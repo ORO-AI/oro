@@ -4,14 +4,28 @@ Integration tests verify that ShoppingBench services work correctly when running
 
 ## Prerequisites
 
-- Python virtual environment (`.venv`) - create with `uv venv --python 3.10 && source .venv/bin/activate && uv pip install -r requirements.txt`
+- Python 3.11 and [uv](https://docs.astral.sh/uv/getting-started/installation/)
 - Docker and Docker Compose installed
 ## Quick Start
 
-1. **Activate virtual environment:**
+1. **Create the test environment (from the repository root):**
    ```bash
+   uv venv --seed --python 3.11
    source .venv/bin/activate
+   python -m pip --version
+   command -v pip
+   UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --project docker/validator/ \
+     --frozen --inexact --no-install-project --no-default-groups --group validator
+   uv pip install --python .venv/bin/python pytest
    ```
+
+   `docker/validator/pyproject.toml` declares validator dependencies, including
+   `oro-sdk`; `docker/validator/uv.lock` locks the versions used by both the
+   validator image and this local environment. Update these together when changing
+   dependencies. The root `requirements.txt` covers legacy search/tooling
+   dependencies and is not the validator or integration-test install source.
+   CI checks that the SDK pin matches the lockfile and is not reintroduced in the
+   root requirements. For later test runs, activate `.venv` again.
 
 2. **Build indexes (if not already built):**
    ```bash

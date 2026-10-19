@@ -45,17 +45,17 @@ jobs:
 
     - name: Install test dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest-cov requests pydantic
+        uv venv --seed --python 3.11
         # Validator tests need bittensor-wallet and oro-sdk; install from
         # the validator lockfile so the test suite exercises the same
         # package versions the validator ships with.
-        uv pip install --system --project docker/validator/ \
-          --group validator -r docker/validator/pyproject.toml
+        UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --project docker/validator/ \
+          --frozen --inexact --no-install-project --no-default-groups --group validator
+        uv pip install --python .venv/bin/python pytest-cov
 
     - name: Run tests with pytest and coverage
       run: |
-        pytest --ignore=tests/integration \
+        .venv/bin/python -m pytest --ignore=tests/integration \
           --ignore=subnet/tests/test_local_generated_cli.py \
           --ignore=subnet/tests/test_local_generated_compose.py \
           --ignore=subnet/tests/test_local_generated_validator.py \
@@ -97,14 +97,14 @@ jobs:
 
     - name: Install local-test dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install pytest-cov requests pydantic
-        uv pip install --system --project docker/validator/ \
-          --group local-test -r docker/validator/pyproject.toml
+        uv venv --seed --python 3.11
+        UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --project docker/validator/ \
+          --frozen --inexact --no-install-project --no-default-groups --group local-test
+        uv pip install --python .venv/bin/python pytest-cov
 
     - name: Run miner local-testing tests
       run: |
-        pytest -v \
+        .venv/bin/python -m pytest -v \
           subnet/tests/test_local_generated_cli.py \
           subnet/tests/test_local_generated_compose.py \
           subnet/tests/test_local_generated_validator.py
