@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+import os
 import sys
 import tarfile
 import types
@@ -71,14 +72,17 @@ def world(text="a red shoe\nb blue shoe\nc red hat\n"):
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    monkeypatch.setattr(worlds, "_all_terms_query", lambda text: ("all", text))
+    monkeypatch.setattr(
+        worlds, "_all_terms_query", lambda terms: ("all", " ".join(terms))
+    )
+    monkeypatch.setattr(worlds, "_analyzer", lambda: SimpleNamespace(analyze=str.split))
     return worlds.Worlds(tmp_path / "worlds", FakeSearcher, capacity=2, keep=3)
 
 
 def test_install_search_and_bm25_settings(store):
     wid, body = world()
     assert store.install(wid, {"bm25": {"k1": 1.2}}, io.BytesIO(body)) is True
-    assert store.install(wid, {}, io.BytesIO(body)) is False
+    assert store.install(wid, {"bm25": {"k1": 1.2}}, io.BytesIO(body)) is False
     w = store.get(wid)
     assert w.searcher.bm25 == (
         1.2,
@@ -104,8 +108,41 @@ def test_default_and_custom_bm25(store, tmp_path):
     wid2, body2 = world("x y\n")
     store.install(wid2, {}, io.BytesIO(body2))
     assert store.get(wid2).searcher.bm25 == (0.9, 0.4)
+
+
+@pytest.mark.parametrize(
+    "bm25",
+    [{"k1": "1"}, {"k1": 0}, {"k1": 10.5}, {"k1": float("nan")}, {"k1": float("inf")},
+     {"b": -0.1}, {"b": 1.1}, {"b": True}, {"k1": False}, 5, [1]],
+)  # fmt: skip
+def test_bad_bm25_settings(store, bm25):
+    wid, body = world()
     with pytest.raises(ValueError):
-        store.install(wid2, {"bm25": {"k1": "1"}}, io.BytesIO(body2))
+        store.install(wid, {"bm25": bm25}, io.BytesIO(body))
+    assert list(store.root.iterdir()) == []
+
+
+def test_reinstall_reuses_the_open_searcher(tmp_path):
+    opened = []
+    factory = lambda path: opened.append(FakeSearcher(path)) or opened[-1]  # noqa: E731
+    store = worlds.Worlds(tmp_path / "worlds", factory, capacity=2, keep=3)
+    wid, body = world()
+    for _ in range(3):
+        store.install(wid, {"bm25": {"k1": 1.2}}, io.BytesIO(body))
+    assert [s.closed for s in opened] == [False]
+    assert store.get(wid).searcher is opened[0]
+
+
+def test_reinstall_with_other_settings_conflicts(store):
+    wid, body = world()
+    store.install(wid, {"bm25": {"k1": 1.2}}, io.BytesIO(body))
+    store.install(
+        wid, {"bm25": {"k1": 1.2, "b": 0.4}}, io.BytesIO(body)
+    )  # the same effective weights
+    for other in ({}, {"bm25": {"k1": 1.3}}):
+        with pytest.raises(worlds.SettingsConflict):
+            store.install(wid, other, io.BytesIO(body))
+    assert store.get(wid).searcher.bm25 == (1.2, 0.4)
 
 
 @pytest.mark.parametrize(
@@ -180,6 +217,42 @@ def test_links_and_garbage_rejected(store):
             store.install(hashlib.sha256(body).hexdigest(), {}, io.BytesIO(body))
 
 
+def test_failed_upload_leaves_no_temp_files(store):
+    wid, body = world()
+
+    class Broken(io.BytesIO):
+        def read(self, n=-1):
+            if self.tell():
+                raise OSError("client went away")
+            return super().read(10)
+
+    with pytest.raises(OSError):
+        store.install(wid, {}, Broken(body))
+    assert list(store.root.iterdir()) == []
+
+
+def test_unopenable_index_is_removed(tmp_path):
+    def factory(path):
+        raise RuntimeError("not a Lucene index")
+
+    store = worlds.Worlds(tmp_path / "worlds", factory, capacity=2, keep=3)
+    wid, body = world()
+    with pytest.raises(RuntimeError):
+        store.install(wid, {}, io.BytesIO(body))
+    assert list(store.root.iterdir()) == []
+
+
+def test_stale_temp_files_are_swept(store):
+    store.root.mkdir(parents=True, exist_ok=True)
+    stale, fresh = store.root / ".upload-stale", store.root / ".world-fresh"
+    stale.write_bytes(b"x")
+    fresh.mkdir()
+    os.utime(stale, (0, 0))
+    wid, body = world()
+    store.install(wid, {}, io.BytesIO(body))
+    assert {p.name for p in store.root.iterdir()} == {wid, fresh.name}
+
+
 def test_lru_open_and_on_disk(store):
     ids = []
     for i in range(4):
@@ -187,6 +260,7 @@ def test_lru_open_and_on_disk(store):
         store.install(wid, {}, io.BytesIO(body))
         ids.append(wid)
     assert list(store.open) == ids[2:]  # capacity 2 open searchers
+    assert [store.get(i).searcher.closed for i in ids[2:]] == [False, False]
     on_disk = {p.name for p in store.root.iterdir()}
     assert on_disk == set(ids[1:])  # keep 3 unpacked worlds
     with pytest.raises(KeyError):
@@ -196,6 +270,30 @@ def test_lru_open_and_on_disk(store):
     )  # unpacked but closed: reopened from disk, evicting the oldest open one
     assert list(store.open) == [ids[3], ids[1]]
     assert worlds.search(reopened, "word", {})["hits"][0]["id"] == "d1"
+
+
+@pytest.mark.parametrize("query", ["x" * 1025, "red \ud800"])
+def test_bad_queries(store, query):
+    wid, body = world()
+    store.install(wid, {}, io.BytesIO(body))
+    with pytest.raises(ValueError):
+        worlds.search(store.get(wid), query, {})
+    assert worlds.search(store.get(wid), "red " + "x" * 1020, {})["hits"]  # 1024 chars
+
+
+@pytest.mark.parametrize("all_terms", [False, True])
+def test_too_many_terms(store, monkeypatch, all_terms):
+    monkeypatch.setattr(
+        worlds, "_analyzer", lambda: SimpleNamespace(analyze=list)
+    )  # one term per character
+    wid, body = world()
+    store.install(wid, {}, io.BytesIO(body))
+    han = "".join(chr(0x4E00 + i) for i in range(1024))
+    with pytest.raises(ValueError, match="terms"):
+        worlds.search(store.get(wid), han, {"all_terms": all_terms})
+    assert worlds.search(store.get(wid), han[1:], {"all_terms": all_terms}) == {
+        "hits": []
+    }
 
 
 def test_another_process_sees_installed_worlds(store):
@@ -260,8 +358,29 @@ def test_route_errors(client):
     )
     assert (r.status_code, r.get_json()) == (404, {"error": "unknown world"})
     assert client.put(f"/internal/worlds/{wid}", data=body).status_code == 201
-    for payload in ({"query": "red", "params": {"k": 0}}, {"query": 3}, ["red"]):
+    for payload in (
+        {"query": "red", "params": {"k": 0}},
+        {"query": 3},
+        ["red"],
+        {"query": "x" * 1025},
+    ):
         assert (
             client.post(f"/internal/worlds/{wid}/search", json=payload).status_code
             == 400
         )
+    r = client.post(f"/internal/worlds/{wid}/search", data='{"query": "red \\ud800"}',
+                    headers={"Content-Type": "application/json"})  # fmt: skip
+    assert r.status_code == 400
+
+
+def test_route_settings_errors(client):
+    wid, body = world()
+    put = lambda bm25: client.put(f"/internal/worlds/{wid}", data=body,  # noqa: E731
+                                  headers={"X-ORO-World-Settings": f'{{"bm25": {bm25}}}'})  # fmt: skip
+    assert [
+        put(x).status_code for x in ('{"k1": 0}', '{"b": 2}', '{"k1": NaN}', "5")
+    ] == [400] * 4
+    assert put('{"k1": 1.2}').status_code == 201
+    assert put('{"k1": 1.2}').status_code == 200
+    r = put('{"k1": 1.3}')
+    assert r.status_code == 409 and "settings" in r.get_json()["error"]

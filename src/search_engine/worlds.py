@@ -21,6 +21,7 @@ import threading
 import time
 import zlib
 from collections import Counter, OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -30,9 +31,16 @@ from flask import Blueprint, jsonify, request
 
 BM25 = {"k1": 0.9, "b": 0.4}  # the weights of an index whose settings name none
 K_MAX = 1000
+MAX_QUERY = 1024  # characters
+MAX_TERMS = 1023  # distinct analyzed terms: under Lucene's 1024 clauses per query
+STALE_S = 3600  # temp files older than this are left by a worker that died mid-install
 MAX_BYTES = 4 << 30  # the most an archive may unpack to
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _LUCENE_SPECIAL = str.maketrans({c: " " for c in '+-&|!(){}[]^"~*?:\\/'})
+
+
+class SettingsConflict(ValueError):
+    """The world is already installed with other settings."""
 
 
 @dataclass
@@ -65,7 +73,7 @@ class Worlds:
         """Verify, unpack and open the archive ``body`` as ``world_id``; False if it was already unpacked."""
         if not _SHA256.fullmatch(world_id) or not isinstance(settings, dict):
             raise ValueError("bad world id or settings")
-        _bm25(settings)
+        weights = _bm25(settings)
         fd, archive = tempfile.mkstemp(dir=self.root, prefix=".upload-")
         try:
             digest = hashlib.sha256()
@@ -91,9 +99,21 @@ class Worlds:
                     shutil.rmtree(staging, ignore_errors=True)
         finally:
             os.unlink(archive)
+        if (
+            _bm25(json.loads((self.root / world_id / "settings.json").read_text()))
+            != weights
+        ):
+            raise SettingsConflict("the world is installed with other settings")
         with self.lock:
-            self.open.pop(world_id, None)
-            self._open(world_id)
+            if world_id in self.open:
+                self.open.move_to_end(world_id)
+            else:
+                try:
+                    self._open(world_id)
+                except Exception:
+                    if created:
+                        shutil.rmtree(self.root / world_id, ignore_errors=True)
+                    raise
             self._prune(world_id)
         return created
 
@@ -129,6 +149,13 @@ class Worlds:
             if path.name in self.open:
                 _close(self.open.pop(path.name))
             shutil.rmtree(path, ignore_errors=True)
+        for path in self.root.iterdir():
+            with suppress(FileNotFoundError):  # another process may sweep it first
+                if (
+                    path.name.startswith((".upload-", ".world-"))
+                    and path.lstat().st_mtime < time.time() - STALE_S
+                ):
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
 
 
 def _close(world: World) -> None:
@@ -138,12 +165,14 @@ def _close(world: World) -> None:
 
 
 def _bm25(settings: dict) -> tuple[float, float]:
-    weights = BM25 | (settings.get("bm25") or {})
-    k1, b = weights["k1"], weights["b"]
+    """The (k1, b) weights of ``settings``: k1 in (0, 10], b in [0, 1]."""
+    weights = settings.get("bm25") or {}
+    if not isinstance(weights, dict):
+        raise ValueError("bad bm25 settings")
+    k1, b = (BM25 | weights)["k1"], (BM25 | weights)["b"]
     if not all(
-        isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0
-        for x in (k1, b)
-    ):
+        isinstance(x, (int, float)) and not isinstance(x, bool) for x in (k1, b)
+    ) or not (0 < k1 <= 10 and 0 <= b <= 1):  # also rejects NaN and infinities
         raise ValueError("bad bm25 settings")
     return float(k1), float(b)
 
@@ -190,10 +219,19 @@ def search(world: World, query: str, params: dict) -> dict:
     if not (isinstance(k, int) and not isinstance(k, bool) and 1 <= k <= K_MAX and isinstance(all_terms, bool)
             and isinstance(query, str)):  # fmt: skip
         raise ValueError("bad search params")
+    if len(query) > MAX_QUERY:
+        raise ValueError(f"query is longer than {MAX_QUERY} characters")
+    try:
+        query.encode()
+    except UnicodeEncodeError:
+        raise ValueError("query is not valid Unicode") from None
     text = " ".join(query.translate(_LUCENE_SPECIAL).split())
+    terms = Counter(_analyzer().analyze(text)) if text else Counter()
+    if len(terms) > MAX_TERMS:
+        raise ValueError(f"query has more than {MAX_TERMS} distinct terms")
     hits = (
-        world.searcher.search(_all_terms_query(text) if all_terms else text, k)
-        if text
+        world.searcher.search(_all_terms_query(terms) if all_terms else text, k)
+        if terms
         else []
     )
     return {"hits": [{"id": h.docid, "score": float(h.score)} for h in hits]}
@@ -206,13 +244,12 @@ def _analyzer():
     return Analyzer(get_lucene_analyzer())
 
 
-def _all_terms_query(text: str):
-    """A Lucene query requiring every distinct analyzed term of ``text``, each weighted by its count as in the
-    bag-of-words query."""
+def _all_terms_query(terms: Counter):
+    """A Lucene query requiring every analyzed term, each weighted by its count as in the bag-of-words query."""
     from pyserini.search.lucene import querybuilder as qb
 
     builder = qb.get_boolean_query_builder()
-    for term, count in sorted(Counter(_analyzer().analyze(text)).items()):
+    for term, count in sorted(terms.items()):
         clause = qb.JTermQuery(qb.JTerm("contents", term))
         builder.add(
             qb.JBoostQuery(clause, float(count)) if count > 1 else clause,
@@ -234,6 +271,8 @@ def blueprint(store: Worlds) -> Blueprint:
         try:
             settings = json.loads(request.headers.get("X-ORO-World-Settings", "{}"))
             created = store.install(world_id, settings, request.stream)
+        except SettingsConflict as exc:
+            return jsonify({"error": str(exc)}), 409
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         return jsonify({"id": world_id}), 201 if created else 200
