@@ -1208,7 +1208,7 @@ class Validator:
             if sandbox_output and not registry.key_exhausted.is_set():
                 registry.rerun_environment_faults(rerun)
             sandbox_finished = True
-            records = registry.terminal_results()
+            records = registry.terminal_results(final=True)
             try:
                 reporter.flush(records)
             except Exception as exc:

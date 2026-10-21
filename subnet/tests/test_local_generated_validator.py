@@ -298,7 +298,7 @@ def test_quarantined_episodes_beyond_the_threshold_fail_as_environment(
     error = _failure(_config(tmp_path))
 
     assert error.classification == "environment"
-    assert "infrastructure failure: 2 of 2" in str(error)
+    assert "infrastructure failure: environment_error=2" in str(error)
     summary = json.loads(error.summary_path.read_text())
     assert [t["outcome"] for t in summary["tasks"]] == ["environment_error"] * 2
 

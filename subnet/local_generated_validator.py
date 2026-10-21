@@ -504,7 +504,7 @@ def run_local_generated_validator(
                         sandbox_output.write_bytes(earlier + later.read_bytes())
 
                 registry.rerun_environment_faults(rerun)
-            records = registry.terminal_results()
+            records = registry.terminal_results(final=True)
             episodes = _episode_rows(
                 records,
                 run_id=run_id,

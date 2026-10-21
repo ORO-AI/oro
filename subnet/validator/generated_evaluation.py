@@ -14,12 +14,14 @@ from typing import Any
 GENERATED_SCORE_SCHEMA = "oro.generated_run_score.v1"
 GENERATED_PROBLEM_SCHEMA = "oro.generated_environment_problem.v1"
 
-# A quarantined episode (no verdict), a world error or a run-bound trip is a
-# harness failure, not an agent one. Up
-# to this fraction of the roster scores zero like an agent failure; beyond it
-# the run is an infrastructure failure and re-queues.
-_HARNESS_FLAGS = frozenset({"world_error", "possible_world_defect"})
+# A validator-side quarantine (no verdict) or a world error is a harness failure,
+# not an agent one. Up to this fraction of the roster scores zero like an agent
+# failure; beyond it the run is an infrastructure failure and re-queues. A
+# deterministic bound trip is the agent's "did not finish": it scores zero and
+# keeps its review flag. Any episode left unscored by an environment fault fails
+# the run: it can never count as zero.
 _INFRA_FAILURE_THRESHOLD = 0.30
+_INFRA_FAILURE_PREFIX = "generated evaluation infrastructure failure: "
 
 
 def claim_roster(pack: Any, delivery_id: str | None, nonces: Any) -> dict[str, str]:
@@ -66,16 +68,13 @@ def aggregate_results(records: list[dict[str, Any]], roster: Collection[str]) ->
     task_ids = [record["task_id"] for record in records]
     if len(set(task_ids)) != len(task_ids) or not set(task_ids) <= set(roster):
         raise ValueError("generated results differ from the delivery roster")
-    harness = sum(
-        record["verdict"] is None
-        or bool(_HARNESS_FLAGS & set(record["verdict"]["flags"]))
-        for record in records
-    )
-    if harness > len(roster) * _INFRA_FAILURE_THRESHOLD:
-        raise ValueError(
-            f"generated evaluation infrastructure failure: {harness} of "
-            f"{len(roster)} episodes hit a world error"
-        )
+    environment = sum(record["verdict"] is None and record.get("unscored") == "environment" for record in records)
+    quarantined = sum(record["verdict"] is None for record in records) - environment
+    world = sum(record["verdict"] is not None and "world_error" in record["verdict"]["flags"] for record in records)
+    if environment or quarantined + world > len(roster) * _INFRA_FAILURE_THRESHOLD:
+        # The Backend's failure classifier reads these outcome counts.
+        counts = {"environment_error": environment + quarantined, "verifier_error": world}
+        raise ValueError(_INFRA_FAILURE_PREFIX + ", ".join(f"{k}={n}" for k, n in sorted(counts.items()) if n))
     total = sum(
         Decimal(str(record["verdict"]["score"]))
         for record in records

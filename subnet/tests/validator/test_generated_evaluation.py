@@ -104,16 +104,35 @@ def test_score_is_mean_verdict_score_over_the_roster() -> None:
     assert aggregate_results(records, ["a", "b", "c", "d"]) == pytest.approx(0.3125)
 
 
-def test_harness_failures_score_zero_up_to_the_threshold() -> None:
+def test_quarantines_and_world_errors_score_zero_up_to_the_threshold() -> None:
     roster = [str(i) for i in range(10)]
     records = [_record("0", verdict=False), _record("1", flags=["world_error"]),
-               _record("2", flags=["possible_world_defect"]),
-               *(_record(t, 1.0) for t in roster[3:])]
+               *(_record(t, 1.0) for t in roster[2:])]
 
-    assert aggregate_results(records, roster) == pytest.approx(0.7)
-    records[3] = _record("3", verdict=False)
-    with pytest.raises(ValueError, match="infrastructure failure: 4 of 10"):
+    assert aggregate_results(records, roster) == pytest.approx(0.8)
+    records[2] = _record("2", verdict=False)
+    records[3] = _record("3", flags=["world_error"])
+    with pytest.raises(ValueError) as failure:
         aggregate_results(records, roster)
+    assert str(failure.value) == (
+        "generated evaluation infrastructure failure: environment_error=2, verifier_error=2"
+    )
+
+
+def test_bound_trips_score_zero_and_never_fail_the_run() -> None:
+    roster = ["a", "b", "c"]
+    records = [_record(t, flags=["possible_world_defect"]) for t in roster]
+
+    assert aggregate_results(records, roster) == 0.0
+
+
+def test_any_environment_unscored_episode_fails_the_run_as_infrastructure() -> None:
+    roster = [str(i) for i in range(10)]
+    records = [{**_record("0", verdict=False), "unscored": "environment"}, *(_record(t, 1.0) for t in roster[1:])]
+
+    with pytest.raises(ValueError) as failure:
+        aggregate_results(records, roster)
+    assert str(failure.value) == "generated evaluation infrastructure failure: environment_error=1"
 
 
 @pytest.mark.parametrize(
@@ -418,6 +437,7 @@ def test_generated_runner_scores_and_flushes_every_record(tmp_path, monkeypatch)
     assert completion.score == pytest.approx(0.75)
     assert completion.score_components == {"schema_version": "oro.generated_run_score.v1"}
     registry.finish_all.assert_called_once_with()
+    registry.terminal_results.assert_called_once_with(final=True)
     reporter.flush.assert_called_once_with(records)
     validator.session_runtime.clear.assert_called_once_with(registry)
     validator.backend_client.complete_run.assert_not_called()
@@ -476,7 +496,7 @@ def test_generated_runner_fails_on_world_errors(tmp_path, monkeypatch) -> None:
     failure = validator.backend_client.complete_run.call_args.kwargs
     assert failure["status"] == validator_main.TerminalStatus.FAILED
     assert failure["failure_reason"] == (
-        "generated evaluation infrastructure failure: 1 of 2 episodes hit a world error"
+        "generated evaluation infrastructure failure: verifier_error=1"
     )
     validator.session_runtime.clear.assert_called_once_with(registry)
 

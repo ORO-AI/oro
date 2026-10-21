@@ -432,20 +432,23 @@ class SessionRegistry:
             and self._reruns.get(record["task_id"], 0) < MAX_ENVIRONMENT_RERUNS
         )
 
-    def terminal_results(self) -> list[dict[str, Any]]:
+    def terminal_results(self, *, final: bool = False) -> list[dict[str, Any]]:
         """Records of every finished or quarantined episode, graded on first request.
 
-        An environment fault awaiting its re-run is held back; one that persisted
-        past the re-runs has no verdict, like a quarantined episode.
+        An environment fault awaiting its re-run is held back until ``final``; a
+        fault that persisted, or that ends the run without its re-run, is unscored:
+        no verdict and ``unscored`` "environment".
         """
 
         results = []
         for _state, record in self._terminal():
-            if self._may_rerun(record):
-                continue
-            if record["verdict"] is not None and record["verdict"]["category"] == ENVIRONMENT_FAULT:
-                record["verdict"] = None
-                record["error"] = f"environment fault persisted after {MAX_ENVIRONMENT_RERUNS} re-runs"
+            verdict = record["verdict"]
+            if verdict is not None and verdict["category"] == ENVIRONMENT_FAULT:
+                if self._may_rerun(record) and not final:
+                    continue
+                reruns = self._reruns.get(record["task_id"], 0)
+                record.update(verdict=None, unscored="environment",
+                              error=f"environment fault persisted after {reruns} re-runs")
             results.append(record)
         return results
 

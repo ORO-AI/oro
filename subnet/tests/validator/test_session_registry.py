@@ -305,6 +305,16 @@ def test_a_real_wall_clock_trip_is_rerun_not_scored(registry, monkeypatch) -> No
     assert record["verdict"]["score"] == 1.0
 
 
+def test_final_results_report_a_fault_that_got_no_rerun_as_unscored(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=1)
+    registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.terminal_results() == []  # progress: held back for its re-run
+    [record] = registry.terminal_results(final=True)  # the run ends without one
+    assert record["verdict"] is None and record["unscored"] == "environment"
+
+
 def test_a_persistent_environment_fault_is_an_unscored_infrastructure_failure(registry, monkeypatch) -> None:
     _faulting_grader(monkeypatch, faults=99)
     registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
@@ -315,6 +325,7 @@ def test_a_persistent_environment_fault_is_an_unscored_infrastructure_failure(re
     assert len(runs) == session_registry.MAX_ENVIRONMENT_RERUNS
     [record] = registry.terminal_results()
     assert record["verdict"] is None and "environment fault persisted" in record["error"]
+    assert record["unscored"] == "environment"
     with pytest.raises(InvalidSessionError, match="no environment fault"):
         registry.restart("t1")
 
