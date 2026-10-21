@@ -15,21 +15,21 @@
 
 ---
 
-ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they search a frozen product catalog, ask the shopper about needs the request leaves out, keep up with price, stock and shopper changes, and place one order. Validators run those agents in sandboxed Docker environments against ORO Bench, a set of generated shopping tasks sealed in versioned EnvPacks. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
+ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they work with each world's own tools, ask the shopper about needs the request leaves out, keep up with changes during the task, and finish with one order, or a decline when the request can't be met. Validators run those agents in sandboxed Docker environments against ORO Bench, where every race runs on its own freshly compiled world, sealed in a versioned EnvPack. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
 
 ## How It Works
 
 <img src="img/how-it-works.svg" alt="ORO subnet architecture — Miner submits agent, Backend orchestrates, Validator evaluates in Docker sandbox, Bittensor distributes emissions" />
 
-1. **Miners** write Python agents that drive a shopping session through the task's tools: search, read listings, message the shopper, and order
+1. **Miners** write Python agents that drive a shopping session through the world's tools, one tool call per step
 2. **Validators** run each agent in an isolated Docker sandbox against the active ORO Bench qualifying or race tasks
-3. **Scoring** grades each order against the task's sealed requirements and obligations: a miss scores 0, and a passing order earns up to 1.0, less for extra questions or a less-than-best pick ([scoring](https://docs.oroagents.com/docs/miners/scoring))
+3. **Scoring** grades each finish against the task's sealed answer: 1 if it is fully correct and within the world's stated budgets, otherwise 0 ([scoring](https://docs.oroagents.com/docs/miners/scoring))
 4. **The best agent** earns top position on the [leaderboard](https://oroagents.com) and receives TAO emissions proportional to validator stake
 5. **Challengers** must exceed a decaying score threshold to claim the top spot — preventing trivial improvements from churning the leader
 
 ## For Miners
 
-Miners submit Python agents that define an `agent_main(problem_data)` function. The validator injects a per-task `problem_data["environment"]` object — the agent reads its `binding` and `policy_view.tools`, then drives the shopping session by calling the runtime-supplied tools until the environment reports `done=true`.
+Miners submit Python agents that define an `agent_main(problem_data)` function. The validator injects a per-task `problem_data["environment"]` object — the agent reads its `binding` and `policy_view`, then drives the shopping session by sending one tool call per step to `/environment/call` until a response reports `finished: true`.
 
 **Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start) — build an agent, test locally with Docker, and submit to the network.
 
@@ -37,13 +37,13 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 
 ### Test generated environments locally
 
-Local testing verifies a signed practice world delivery, then runs its first
-five problems through the world-pack runtime, which also grades them. Set
+Local testing verifies a signed practice world delivery, then runs all its
+tasks through the network's runtime, which also grades them. Set
 `LOCAL_ENV_PACK_PATH` to the delivery (a `.tar.gz` with `manifest.json` at its
-root). Network qualifying runs the active suite's full roster.
+root, inside the checkout). Practice worlds use one fixed configuration that
+race worlds never share, so a local score does not predict a race score.
 
-Keep your inference credentials in `.env`, with `INFERENCE_PROVIDER` selecting
-between keys when both are present. `SANDBOX_MODEL` optionally overrides the
+Set `OPENROUTER_API_KEY` in `.env`. `SANDBOX_MODEL` optionally overrides the
 included reference agent. Custom agents may use any models permitted by the
 live Backend allowlist. Run from the repository root:
 
@@ -51,11 +51,10 @@ live Backend allowlist. Run from the repository root:
 docker compose run test --agent-file src/agent/environment_agent.py
 ```
 
-The command prints each problem's reward and, for a failed or partial one, why
-(its failure categories), the models in play, the aggregate, and
-an artifact directory under `logs/environment-runs/` that includes a
-self-contained `trajectories.html` for stepping through every episode. Generated agents use the environment's dynamic
-tools and `policy_view`; `src/agent/environment_agent.py` is the reference.
+The command prints each task's score (1 or 0) grouped by failure category,
+the aggregate, and an artifact directory under `logs/environment-runs/` that
+includes a self-contained `trajectories.html` for stepping through every
+episode. `src/agent/environment_agent.py` is the reference agent.
 See [the miner guide](docs/miner-guide.md#local-testing) for image setup,
 configuration, and outputs.
 
