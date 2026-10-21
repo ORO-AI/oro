@@ -1,4 +1,4 @@
-"""Local adapter for the production generated-environment validator path."""
+"""Run a signed practice delivery locally through the validator's world path."""
 
 from __future__ import annotations
 
@@ -13,36 +13,32 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-
-from oro_env_runtime import failure_classes
-from oro_env_runtime.delivery import is_sanitized_qualifying_manifest
-from oro_env_runtime.pack import TF_BY_FAMILY
 
 from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
 from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
-from subnet.validator.env_pack_loader import (
-    LoadedPack,
-    PackValidationError,
-    load_local_pack,
-)
-from subnet.validator.episode_emitter import (
-    build_episode_artifact,
-    serialize_episode_artifact,
-)
+from subnet.validator import env_pack_loader, session_registry
 from subnet.validator.generated_evaluation import aggregate_results, write_problem_file
-from subnet.validator.session_registry import SessionRegistry
 from subnet.validator.session_service import SessionRuntime, SessionServer
 
-GENERATED_FAMILIES = frozenset(TF_BY_FAMILY)
-QUALIFYING_TASKS_PER_FAMILY = 5
-LOCAL_SUMMARY_SCHEMA = "oro.local_generated_summary.v1"
+LOCAL_SUMMARY_SCHEMA = "oro.local_generated_summary.v2"
+EPISODE_SCHEMA = "oro.world_episode.v1"
 SANDBOX_RESULT_GRACE_SECONDS = 60.0
+# The local proxy shares this process's network namespace (see docker-compose).
+LOCAL_PROXY_URL = "http://127.0.0.1:80"
+
+
+def _default_search_url() -> str:
+    return (
+        os.environ.get("E2E_SEARCH_URL")
+        or os.environ.get("SEARCH_SERVER_URL")
+        or "http://localhost:5632"
+    )
 
 
 @dataclass(frozen=True)
@@ -54,13 +50,13 @@ class LocalGeneratedConfig:
     inference_provider: str
     inference_base_url: str
     model: str
-    pack_sha256: str | None = None
     problem_count: int | None = None
     seed: int | None = None
     max_workers: int = 7
     timeout: float = 1800.0
     session_host: str = "0.0.0.0"
     session_port: int = 9101
+    search_url: str = field(default_factory=_default_search_url)
 
 
 @dataclass(frozen=True)
@@ -81,7 +77,7 @@ class LocalGeneratedResult:
 
 
 class LocalGeneratedValidatorError(RuntimeError):
-    """A local generated run failed outside normal agent task outcomes."""
+    """A local run failed outside normal agent task outcomes."""
 
     def __init__(
         self,
@@ -99,80 +95,27 @@ class LocalGeneratedValidatorError(RuntimeError):
         self.report_path = report_path
 
 
-def _sample_problem_ids(pack: LoadedPack, count: int, seed: int | None) -> list[str]:
-    """Pick ``count`` task ids at random, returned in archive order."""
-
-    chosen = random.Random(seed).sample(range(len(pack.task_ids)), count)
-    return [pack.task_ids[index] for index in sorted(chosen)]
-
-
-def validate_local_pack(
-    pack: LoadedPack,
-    expected_families: frozenset[str] = GENERATED_FAMILIES,
-    tasks_per_family: int = QUALIFYING_TASKS_PER_FAMILY,
-    *,
-    problem_count: int | None = None,
-    seed: int | None = None,
+def select_tasks(
+    pack: Any, *, problem_count: int | None = None, seed: int | None = None
 ) -> list[str]:
-    """Validate the family roster, then choose which problems to run.
+    """Refuse anything but a practice delivery, then choose the tasks to run.
 
-    Without ``problem_count`` this selects the qualifying roster: the first
-    ``tasks_per_family`` of every family, in archive order. With it, that many
-    problems are sampled at random.
+    Without ``problem_count`` every task runs; with it, that many are sampled.
     """
 
-    if problem_count is None and tasks_per_family <= 0:
-        raise ValueError("tasks_per_family must be positive")
-    # Local runs are practice only. A row without the public (decoupled) grader is
-    # sealed race material and never runs here;
-    # nor does a process that holds any race configuration.
+    # Local runs are practice only, never in a process holding race configuration.
     if any(name.startswith("ORO_RACE_") and value for name, value in os.environ.items()):
         raise ValueError("local generated validator refuses to run with race configuration set")
-    # Only the sanitized qualifying delivery, never a raw compiler pack (sealed provenance).
-    if not is_sanitized_qualifying_manifest(pack.manifest):
-        raise ValueError("local generated pack is not a sanitized qualifying delivery")
-    race = [
-        task_id
-        for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True)
-        if not (task.grading and task.grading.decoupled)
-    ]
-    if race:
-        raise ValueError(f"local generated pack holds race rows: {','.join(race[:5])}")
-
-    counts = Counter(task.family for task in pack.task_specs)
-    # Only an unknown family, or a family with too few tasks for a full qualifying
-    # run, is invalid.
-    unexpected = sorted(set(counts) - expected_families)
-    insufficient = (
-        []
-        if problem_count is not None
-        else sorted(
-            f"{family}:{counts[family]}"
-            for family in counts
-            if counts[family] < tasks_per_family
-        )
-    )
-    if unexpected or insufficient:
-        details = [f"task_count={len(pack.task_specs)}"]
-        if unexpected:
-            details.append(f"unexpected={','.join(unexpected)}")
-        if insufficient:
-            details.append(f"insufficient={','.join(insufficient)}")
-        raise ValueError("invalid local generated pack: " + "; ".join(details))
-
+    kind = (pack.manifest.get("delivery") or {}).get("kind")
+    if kind != "practice":
+        raise ValueError(f"local runs take a practice delivery, not {kind!r}")
+    task_ids = sorted(pack.tasks)
     if problem_count is None:
-        selected: list[str] = []
-        selected_counts: Counter[str] = Counter()
-        for task_id, task in zip(pack.task_ids, pack.task_specs, strict=True):
-            if selected_counts[task.family] < tasks_per_family:
-                selected.append(task_id)
-                selected_counts[task.family] += 1
-        return selected
-
-    available = len(pack.task_ids)
-    if not 1 <= problem_count <= available:
-        raise ValueError(f"--problems must be between 1 and {available}")
-    return _sample_problem_ids(pack, problem_count, seed)
+        return task_ids
+    if not 1 <= problem_count <= len(task_ids):
+        raise ValueError(f"--problems must be between 1 and {len(task_ids)}")
+    chosen = random.Random(seed).sample(range(len(task_ids)), problem_count)
+    return [task_ids[index] for index in sorted(chosen)]
 
 
 def _sha256(path: Path) -> str:
@@ -200,34 +143,26 @@ def _read_sandbox_rows(path: Path) -> list[dict[str, Any]]:
         ) from exc
 
 
-def _error_classification(result: dict[str, Any]) -> str | None:
-    outcome = str(result.get("outcome") or "")
-    if outcome == "completed":
-        return None
-    if outcome == "verifier_error":
-        return "verifier"
-    if outcome == "environment_error":
-        return "environment"
-    if outcome in {"leakage", "exploit"}:
-        return "infrastructure"
-    return "agent"
+def _episode_outcome(record: dict[str, Any]) -> str:
+    if record["verdict"] is None:
+        return "environment_error"  # quarantined, never graded
+    return "world_error" if "world_error" in record["verdict"]["flags"] else "completed"
 
 
-def _summary_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _summary_tasks(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tasks = []
-    for result in results:
-        verdict = result.get("verdict") or {}
-        correct = bool(verdict.get("correct"))
+    for record in records:
+        verdict = record["verdict"] or {"score": 0.0, "category": None, "flags": []}
+        outcome = _episode_outcome(record)
         tasks.append(
             {
-                "task_id": str(result.get("task_id") or ""),
-                "family": result.get("family"),
-                "outcome": result.get("outcome"),
-                "correct": correct,
-                "reward": float(verdict.get("paid_reward") or 0) if correct else 0.0,
-                "error_classification": _error_classification(result),
-                "error_detail": result.get("error_detail"),
-                "failure": result.get("failure"),
+                "task_id": record["task_id"],
+                "score": float(verdict["score"]),
+                "category": verdict["category"],
+                "flags": list(verdict["flags"]),
+                "outcome": outcome,
+                "error_classification": "environment" if outcome != "completed" else None,
+                "error_detail": record.get("error"),
             }
         )
     return tasks
@@ -237,10 +172,9 @@ def _write_summary(
     path: Path,
     *,
     run_id: str,
-    pack: LoadedPack | None,
-    configured_pack_sha256: str | None,
+    loaded: Any,
     task_ids: list[str],
-    results: list[dict[str, Any]],
+    records: list[dict[str, Any]],
     aggregate_score: float | None,
     status: str,
     problem_count: int | None = None,
@@ -249,53 +183,27 @@ def _write_summary(
     agent_sha256: str | None = None,
     error: LocalGeneratedValidatorError | None = None,
 ) -> dict[str, Any]:
-    task_rows = _summary_tasks(results)
-    family_counts: Counter[str] = Counter()
-    family_totals: Counter[str] = Counter()
-    for task in task_rows:
-        family = task["family"]
-        if family is not None:
-            family = str(family)
-            family_counts[family] += 1
-            family_totals[family] += float(task["reward"])
+    pack = loaded.pack if loaded is not None else None
     summary = {
         "schema_version": LOCAL_SUMMARY_SCHEMA,
         "run_id": run_id,
         "status": status,
-        "pack_sha256": (
-            pack.pack_sha256 if pack is not None else configured_pack_sha256
-        ),
-        "task_count": len(results),
+        "pack_sha256": loaded.archive_sha256 if loaded is not None else None,
+        "world_id": pack.manifest.get("world_id") if pack is not None else None,
+        "task_count": len(records),
         "task_roster": task_ids,
-        "pack_task_count": len(pack.task_ids) if pack is not None else len(results),
+        "pack_task_count": len(pack.tasks) if pack is not None else len(records),
         # Derived from the request, not from the seed: a seed alone never samples.
-        "selection_mode": (
-            "random_sample" if problem_count is not None else "qualifying_roster"
-        ),
+        "selection_mode": "random_sample" if problem_count is not None else "all_tasks",
         "selection_seed": seed if problem_count is not None else None,
         "agent_file": agent_file,
         "agent_sha256": agent_sha256,
-        "models": (
-            {
-                str(role): str(model)
-                for role, model in pack.manifest.get("models", {}).items()
-            }
-            if pack is not None
-            else {}
-        ),
         "aggregate_score": aggregate_score,
-        "tasks": task_rows,
-        "family_rewards": {
-            family: family_totals[family] / count
-            for family, count in family_counts.items()
-        },
+        "tasks": _summary_tasks(records),
         "error": (
             None
             if error is None
-            else {
-                "classification": error.classification,
-                "message": str(error),
-            }
+            else {"classification": error.classification, "message": str(error)}
         ),
     }
     path.write_text(
@@ -305,29 +213,31 @@ def _write_summary(
     return summary
 
 
-def _run_failure_classification(results: list[dict[str, Any]]) -> str:
-    outcomes = {str(result.get("outcome") or "") for result in results}
-    if "verifier_error" in outcomes:
-        return "verifier"
-    if "environment_error" in outcomes:
-        return "environment"
-    return "infrastructure"
-
-
-def _validate_result_roster(task_ids: list[str], results: list[dict[str, Any]]) -> None:
-    expected = Counter(task_ids)
-    actual = Counter(str(result.get("task_id") or "") for result in results)
-    if actual != expected:
-        raise ValueError(
-            "local generated run requires one finalized result per pack task"
-        )
-
-
-def _write_episode_results(path: Path, results: list[dict[str, Any]]) -> None:
-    artifacts = [
-        serialize_episode_artifact(build_episode_artifact(result)) for result in results
+def _episode_rows(
+    records: list[dict[str, Any]],
+    *,
+    run_id: str,
+    loaded: Any,
+    agent_identity: str | None,
+    wall_seconds: float,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "schema_version": EPISODE_SCHEMA,
+            "episode": {
+                **record,
+                "step_count": record["steps"],
+                "terminal_reason": record["ledger"]["episode"][-1].get("reason"),
+                "outcome": _episode_outcome(record),
+                "evaluation_run_id": run_id,
+                "agent_version_id": agent_identity,
+                "pack_sha256": loaded.archive_sha256,
+                "world_id": loaded.pack.manifest.get("world_id"),
+                "wall_seconds": wall_seconds,
+            },
+        }
+        for record in records
     ]
-    path.write_bytes(b"\n".join(artifacts) + b"\n")
 
 
 def _raise_run_error(
@@ -345,6 +255,13 @@ def _raise_run_error(
     )
 
 
+_PHASE_CLASSIFICATION = {
+    "pack_load": "configuration",
+    "pack_validation": "configuration",
+    "finalization": "verifier",
+}
+
+
 def _classified_error(
     error: Exception,
     *,
@@ -354,17 +271,9 @@ def _classified_error(
 ) -> LocalGeneratedValidatorError:
     if isinstance(error, LocalGeneratedValidatorError):
         return error
-    if isinstance(error, PackValidationError):
-        classification = "search" if "search" in str(error).lower() else "configuration"
-    elif phase == "pack_validation":
-        classification = "configuration"
-    elif phase == "finalization":
-        classification = "verifier"
-    else:
-        classification = "infrastructure"
     return LocalGeneratedValidatorError(
         str(error) or type(error).__name__,
-        classification=classification,
+        classification=_PHASE_CLASSIFICATION.get(phase, "infrastructure"),
         artifact_dir=artifact_dir,
         summary_path=summary_path,
     )
@@ -375,10 +284,9 @@ def _cleanup(
     container_name: str,
     remove_container: bool,
     server: SessionServer | None,
-    runtime: SessionRuntime | None,
-    registry: SessionRegistry | None,
+    runtime: SessionRuntime,
+    registry: Any,
     registry_installed: bool,
-    pack: LoadedPack | None,
 ) -> Exception | None:
     """Release local run resources synchronously and return the first error."""
 
@@ -399,15 +307,10 @@ def _cleanup(
             cleanup_errors.append(exc)
     if registry is not None:
         try:
-            if registry_installed and runtime is not None:
+            if registry_installed:
                 runtime.clear(registry)
             else:
                 registry.close()
-        except Exception as exc:  # noqa: BLE001
-            cleanup_errors.append(exc)
-    elif pack is not None:
-        try:
-            pack.close()
         except Exception as exc:  # noqa: BLE001
             cleanup_errors.append(exc)
     return cleanup_errors[0] if cleanup_errors else None
@@ -416,7 +319,7 @@ def _cleanup(
 def run_local_generated_validator(
     config: LocalGeneratedConfig,
 ) -> LocalGeneratedResult:
-    """Execute one local EnvPack through the generated validator components."""
+    """Run one practice delivery through the validator's world components."""
     if config.max_workers <= 0:
         raise ValueError("max_workers must be positive")
     if config.timeout <= 0:
@@ -434,11 +337,12 @@ def run_local_generated_validator(
     sandbox_output = sandbox_dir / "sandbox_output.jsonl"
     container_name = f"oro-generated-{run_id}"
 
-    pack: LoadedPack | None = None
-    registry: SessionRegistry | None = None
+    loaded: Any = None
+    registry: Any = None
     registry_installed = False
     remove_container = False
-    results: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    episodes: list[dict[str, Any]] = []
     task_ids: list[str] = []
     aggregate_score: float | None = None
     completed_result: LocalGeneratedResult | None = None
@@ -447,18 +351,17 @@ def run_local_generated_validator(
     phase = "initialization"
     runtime = SessionRuntime()
     server: SessionServer | None = None
-    # The digest the runtime recorded as agent_version_id. Read once, before the
-    # sandbox starts, so the summary cannot disagree with the episode receipts if
-    # the file is edited or removed mid-run.
+    started = time.monotonic()
+    # Read once, before the sandbox starts, so the summary cannot disagree with
+    # the episode rows if the file is edited or removed mid-run.
     agent_identity: str | None = None
     try:
         _write_summary(
             summary_path,
             run_id=run_id,
-            pack=None,
-            configured_pack_sha256=config.pack_sha256,
+            loaded=None,
             task_ids=task_ids,
-            results=[],
+            records=[],
             aggregate_score=None,
             status="running",
         )
@@ -474,43 +377,38 @@ def run_local_generated_validator(
         )
 
         phase = "pack_load"
-        pack = load_local_pack(config.pack_path, config.pack_sha256)
+        loaded = env_pack_loader.load_delivery(
+            config.pack_path,
+            expected_delivery_id=None,
+            cache_root=config.output_root / ".deliveries",
+        )
 
         phase = "pack_validation"
-        task_ids = validate_local_pack(
-            pack, problem_count=config.problem_count, seed=config.seed
+        task_ids = select_tasks(
+            loaded.pack, problem_count=config.problem_count, seed=config.seed
         )
 
+        # The registry uploads every pack index to the search server first.
         phase = "session_setup"
-        registry = SessionRegistry(
-            pack,
-            max_workers=config.max_workers,
+        registry = session_registry.SessionRegistry(
+            loaded.pack,
+            # A practice run has no claim, so each episode gets a fresh nonce.
+            episode_nonces={task_id: uuid4().hex for task_id in task_ids},
+            search_client=session_registry.SearchServerClient(config.search_url),
             inference_access_token=config.inference_access_token,
-            simulator_proxy_url="http://127.0.0.1:80",
+            proxy_url=LOCAL_PROXY_URL,
         )
         agent_identity = _sha256(config.agent_path)
-        sessions = []
-        for task_id in task_ids:
-            sessions.append(
-                registry.start(
-                    evaluation_run_id=run_id,
-                    agent_version_id=agent_identity,
-                    task_id=task_id,
-                )
-            )
+        sessions = [registry.start(task_id) for task_id in task_ids]
         phase = "artifact_write"
         (artifact_dir / "environment_sessions.json").write_text(
             json.dumps(
-                {
-                    "schema_version": "oro.session_bootstrap.v1",
-                    "sessions": sessions,
-                },
+                {"schema_version": "oro.session_bootstrap.v1", "sessions": sessions},
                 sort_keys=True,
             ),
             encoding="utf-8",
         )
-        problem_file = artifact_dir / "problems.jsonl"
-        write_problem_file(problem_file, sessions)
+        write_problem_file(artifact_dir / "problems.jsonl", sessions)
 
         phase = "server_startup"
         runtime.install(registry)
@@ -571,50 +469,33 @@ def run_local_generated_validator(
             raise
         finally:
             phase = "finalization"
-            results = registry.finalized_results()
-            # Each episode's failure categories, read from its own task's situation.
-            situations = dict(zip(pack.task_ids, pack.task_specs, strict=True))
-            for result in results:
-                task = situations[str(result.get("task_id"))]
-                result["failure"] = failure_classes(result, task.situation)
-            _write_episode_results(artifact_dir / "episode_results.jsonl", results)
+            registry.finish_all()
+            records = registry.terminal_results()
+            episodes = _episode_rows(
+                records,
+                run_id=run_id,
+                loaded=loaded,
+                agent_identity=agent_identity,
+                wall_seconds=time.monotonic() - started,
+            )
+            (artifact_dir / "episode_results.jsonl").write_text(
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in episodes),
+                encoding="utf-8",
+            )
 
         if sandbox_exception is not None:
             phase = "sandbox"
             raise sandbox_exception
 
-        phase = "result_validation"
-        try:
-            _validate_result_roster(task_ids, results)
-        except ValueError as exc:
-            if sandbox_failure:
-                _raise_run_error(
-                    sandbox_failure,
-                    classification="infrastructure",
-                    artifact_dir=artifact_dir,
-                    summary_path=summary_path,
-                )
-            _raise_run_error(
-                str(exc),
-                classification="infrastructure",
-                artifact_dir=artifact_dir,
-                summary_path=summary_path,
-            )
-
         phase = "aggregation"
         try:
-            aggregate_score = aggregate_results(results)
+            if Counter(record["task_id"] for record in records) != Counter(task_ids):
+                raise ValueError("local run requires one graded episode per task")
+            aggregate_score = aggregate_results(records, task_ids)
         except ValueError as exc:
-            if sandbox_failure:
-                _raise_run_error(
-                    sandbox_failure,
-                    classification="infrastructure",
-                    artifact_dir=artifact_dir,
-                    summary_path=summary_path,
-                )
             _raise_run_error(
-                str(exc),
-                classification=_run_failure_classification(results),
+                sandbox_failure or str(exc),
+                classification="infrastructure" if sandbox_failure else "environment",
                 artifact_dir=artifact_dir,
                 summary_path=summary_path,
             )
@@ -645,10 +526,9 @@ def run_local_generated_validator(
         summary = _write_summary(
             summary_path,
             run_id=run_id,
-            pack=pack,
-            configured_pack_sha256=config.pack_sha256,
+            loaded=loaded,
             task_ids=task_ids,
-            results=results,
+            records=records,
             aggregate_score=aggregate_score,
             status="completed",
             problem_count=config.problem_count,
@@ -657,14 +537,12 @@ def run_local_generated_validator(
             agent_sha256=agent_identity,
         )
         report_path = local_report.write_trajectory_report(
-            artifact_dir.resolve() / "trajectories.html",
-            [build_episode_artifact(result) for result in results],
-            run_id=run_id,
+            artifact_dir.resolve() / "trajectories.html", episodes, run_id=run_id
         )
         completed_result = LocalGeneratedResult(
             run_id=run_id,
             aggregate_score=aggregate_score,
-            results=results,
+            results=records,
             artifact_dir=artifact_dir.resolve(),
             summary_path=summary_path.resolve(),
             summary=summary,
@@ -687,7 +565,6 @@ def run_local_generated_validator(
             runtime=runtime,
             registry=registry,
             registry_installed=registry_installed,
-            pack=pack,
         )
     if run_error is None and cleanup_error is not None:
         caught_error = cleanup_error
@@ -703,10 +580,9 @@ def run_local_generated_validator(
             _write_summary(
                 summary_path,
                 run_id=run_id,
-                pack=pack,
-                configured_pack_sha256=config.pack_sha256,
+                loaded=loaded,
                 task_ids=task_ids,
-                results=results,
+                records=records,
                 aggregate_score=aggregate_score,
                 status="failed",
                 problem_count=config.problem_count,
@@ -718,13 +594,11 @@ def run_local_generated_validator(
         except Exception:  # noqa: BLE001, S110
             pass
         # A failed run is where trajectories matter most, so emit the viewer for
-        # whatever episodes were finalized before the failure.
-        if results:
+        # whatever episodes were graded before the failure.
+        if episodes:
             try:
                 run_error.report_path = local_report.write_trajectory_report(
-                    artifact_dir.resolve() / "trajectories.html",
-                    [build_episode_artifact(result) for result in results],
-                    run_id=run_id,
+                    artifact_dir.resolve() / "trajectories.html", episodes, run_id=run_id
                 )
             except Exception:  # noqa: BLE001, S110
                 pass
@@ -738,13 +612,12 @@ def run_local_generated_validator(
 
 
 __all__ = [
-    "GENERATED_FAMILIES",
     "LOCAL_SUMMARY_SCHEMA",
     "LocalGeneratedConfig",
     "LocalGeneratedResult",
     "LocalGeneratedValidatorError",
     "run_local_generated_validator",
-    "validate_local_pack",
+    "select_tasks",
 ]
 
 
@@ -760,7 +633,7 @@ def _is_git_lfs_pointer(path: Path) -> bool:
 
 def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
     parser = argparse.ArgumentParser(
-        description="Run the bundled generated EnvPack locally."
+        description="Run a signed practice delivery locally."
     )
     parser.add_argument("--agent-file", default="src/agent/environment_agent.py")
     parser.add_argument(
@@ -768,8 +641,8 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         type=int,
         default=None,
         help=(
-            "How many problems to run, sampled at random and spread across the "
-            "task families. Defaults to the full qualifying roster."
+            "How many problems to run, sampled at random. Defaults to every task "
+            "in the delivery."
         ),
     )
     parser.add_argument(
@@ -795,11 +668,9 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
     if not agent.is_file():
         raise ValueError(f"agent file does not exist: {args.agent_file}")
 
-    root = Path(__file__).resolve().parents[1]
-    pack_path = Path(
-        os.environ.get("LOCAL_ENV_PACK_PATH")
-        or root / "data/local-test/env-pack.tar.gz"
-    )
+    if not os.environ.get("LOCAL_ENV_PACK_PATH"):
+        raise ValueError("set LOCAL_ENV_PACK_PATH to a signed practice delivery")
+    pack_path = Path(os.environ["LOCAL_ENV_PACK_PATH"])
     if pack_path.is_file() and _is_git_lfs_pointer(pack_path):
         raise ValueError(
             f"{pack_path} is a Git LFS pointer, not the pack; "
@@ -829,8 +700,6 @@ def parse_config(arguments: list[str] | None = None) -> LocalGeneratedConfig:
         inference_provider=provider,
         inference_base_url=base_url,
         model=model,
-        pack_sha256=os.environ.get("LOCAL_ENV_PACK_SHA256")
-        or "919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379",
         problem_count=args.problems,
         seed=seed,
         max_workers=max_workers,

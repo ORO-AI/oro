@@ -1,28 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import tarfile
-from importlib.metadata import version
 from pathlib import Path
 
 import pytest
-from oro_env_runtime import (
-    ENV_CONTRACT_VERSION,
-    EVENT_CONTRACT_VERSION,
-    REPLAY_CONTRACT_VERSION,
-    RESULT_SCHEMA_VERSION,
-    RUNTIME_VERSION,
-    check_epoch,
-)
-from oro_env_runtime.contracts import RUNTIME_CONTRACT
 
 from subnet import local_generated_validator as local
-
-ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_PACK_SHA256 = (
-    "919ed03183b453b990902ab6f88589dc59427cf27d2b0c8a78b19dbdb0e90379"
-)
 
 
 @pytest.fixture(autouse=True)
@@ -33,14 +15,11 @@ def inference_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         "INFERENCE_PROVIDER",
         "SANDBOX_MODEL",
         "LOCAL_ENV_PACK_PATH",
-        "LOCAL_ENV_PACK_SHA256",
         "LOCAL_OUTPUT_ROOT",
         "LOCAL_MAX_WORKERS",
         "LOCAL_TIMEOUT",
     ):
         monkeypatch.delenv(name, raising=False)
-    # Keep parse_config tests independent of whether this checkout has the
-    # LFS pack; test_bundled_pack_matches_released_runtime_contracts covers it.
     monkeypatch.setenv("LOCAL_ENV_PACK_PATH", str(tmp_path / "env-pack.tar.gz"))
 
 
@@ -94,54 +73,17 @@ def test_model_flag_is_not_required(monkeypatch, tmp_path) -> None:
 
     assert config.model == "deepseek-ai/DeepSeek-V3.2-TEE"
     assert config.pack_path.name == "env-pack.tar.gz"
-    assert config.pack_sha256 == EXPECTED_PACK_SHA256
     assert config.max_workers == 7
 
 
-def test_pack_path_defaults_to_the_bundled_archive(monkeypatch, tmp_path) -> None:
-    # Every other parse_config test runs against the fixture's temp pack so the
-    # suite does not depend on this checkout's LFS state. That hides the default
-    # path, so pin it here with the pointer probe stubbed out.
+def test_practice_delivery_path_is_required(monkeypatch, tmp_path, capsys) -> None:
     agent = tmp_path / "agent.py"
     agent.touch()
     monkeypatch.setenv("CHUTES_API_KEY", "ch-test")
     monkeypatch.delenv("LOCAL_ENV_PACK_PATH", raising=False)
-    monkeypatch.setattr(local, "_is_git_lfs_pointer", lambda path: False)
 
-    config = local.parse_config(["--agent-file", str(agent)])
-
-    assert config.pack_path == ROOT / "data" / "local-test" / "env-pack.tar.gz"
-
-
-def test_bundled_pack_matches_released_runtime_contracts(tmp_path: Path) -> None:
-    pack_path = ROOT / "data" / "local-test" / "env-pack.tar.gz"
-
-    assert hashlib.sha256(pack_path.read_bytes()).hexdigest() == EXPECTED_PACK_SHA256
-    assert version("oro-env-runtime") == "3.7.1"
-
-    with tarfile.open(pack_path, "r:gz") as archive:
-        archive.extractall(tmp_path, filter="data")
-    manifest = json.loads((tmp_path / "epoch" / "manifest.json").read_text())
-    assert check_epoch(tmp_path / "epoch") == []
-
-    assert manifest["contracts"] == {
-        "environment": ENV_CONTRACT_VERSION,
-        "event": EVENT_CONTRACT_VERSION,
-        "replay": REPLAY_CONTRACT_VERSION,
-        "result": RESULT_SCHEMA_VERSION,
-        "runtime": RUNTIME_VERSION,
-    }
-    # The validator refuses a delivery sealed for another runtime contract.
-    assert manifest["delivery"]["runtime_contract"] == RUNTIME_CONTRACT
-    family_counts = manifest["epoch"]["family_counts"]
-    # The bundled pack may ship a subset of the supported families (currently
-    # six of seven — preference_reasoning is omitted); every present family
-    # must still carry a full qualifying quota.
-    assert set(family_counts) and set(family_counts) <= local.GENERATED_FAMILIES
-    assert all(
-        count >= local.QUALIFYING_TASKS_PER_FAMILY for count in family_counts.values()
-    )
-    assert manifest["epoch"]["tasks"] == sum(family_counts.values())
+    assert local.main(["--agent-file", str(agent)]) == 2
+    assert "LOCAL_ENV_PACK_PATH" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("model", ['bad"model', "bad$model", "bad;model"])
@@ -264,34 +206,22 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
         "run_local_generated_validator",
         lambda config: local.LocalGeneratedResult(
             run_id="local-test",
-            results=[
-                {
-                    "task_id": "TF6-recovery-1",
-                    "family": "recovery",
-                    "outcome": "completed",
-                    "verdict": {
-                        "correct": True,
-                        "paid_reward": 0.5,
-                    },
-                }
-            ],
+            results=[],
             aggregate_score=0.5,
             artifact_dir=tmp_path / "results",
             summary_path=tmp_path / "results" / "summary.json",
             summary={
                 "run_id": "local-test",
                 "pack_sha256": "9e5d" + "0" * 60,
+                "world_id": "w-test",
                 "aggregate_score": 0.5,
-                "models": {"user_simulator": "vendor/sim", "judge": "vendor/judge"},
                 "tasks": [
                     {
-                        "task_id": "TF6-recovery-1",
-                        "family": "recovery",
+                        "task_id": "t-1",
+                        "score": 0.5,
+                        "category": "not the best option",
+                        "flags": [],
                         "outcome": "completed",
-                        "correct": True,
-                        "reward": 0.5,
-                        "error_classification": None,
-                        "error_detail": None,
                     }
                 ],
             },
@@ -301,8 +231,8 @@ def test_cli_prints_generated_results(monkeypatch, tmp_path, capsys) -> None:
     assert local.main(["--agent-file", str(agent)]) == 0
     output = capsys.readouterr().out
     assert "local-test" in output
-    assert "TF6-recovery-1" in output and "0.50" in output
-    assert "vendor/sim" in output and "vendor/judge" in output
+    assert "t-1" in output and "0.50" in output and "not the best option" in output
+    assert "w-test" in output
     assert "deepseek-ai/DeepSeek-V3.2-TEE" in output
     assert "Aggregate score  0.500000" in output
     assert str(tmp_path / "results") in output

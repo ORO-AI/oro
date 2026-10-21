@@ -1,1231 +1,301 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
-from subnet import local_generated_validator
-from subnet.local_generated_validator import (
-    GENERATED_FAMILIES,
-    LocalGeneratedConfig,
-    LocalGeneratedValidatorError,
-    run_local_generated_validator,
-    validate_local_pack,
+from subnet import local_generated_validator as local
+from subnet.tests.world_pack_fixture import (
+    StubModelClient,
+    StubSearchClient,
+    archive_pack,
+    build_world_pack,
+    world_keyring,  # noqa: F401
 )
-from subnet.validator.env_pack_loader import PackValidationError
-from subnet.validator.session_service import SessionRuntime
+from subnet.validator import session_registry
 
-pytest_plugins = ("tests.compat_fixture",)
-
-
-# A local run's tasks: seven composed rows.
-_ROSTER = ["composed"] * 7
+# The test world's answers: buying them scores 1.0.
+ANSWERS = {"t1": "a", "t2": "b"}
 
 
-def _pack(families: list[str]) -> SimpleNamespace:
-    return SimpleNamespace(
-        task_specs=[
-            SimpleNamespace(
-                family=family,
-                grading=SimpleNamespace(decoupled=True),
-                situation=SimpleNamespace(requirements=[], obligations=[], metrics=[]),
+@pytest.fixture
+def services(monkeypatch, world_keyring):  # noqa: F811
+    """Stub the model proxy and search server the way the e2e driver wraps them."""
+
+    models = StubModelClient()
+    search = StubSearchClient()
+    built = []
+
+    class CountingClient(session_registry.ProxyModelClient):
+        def __init__(self, token, **kwargs):
+            built.append((token, kwargs))
+
+        def complete(self, model, prompt, params, timeout):
+            return models.complete(model, prompt, params, timeout)
+
+        def decide(self, model, state, questions, params, timeout):
+            return models.decide(model, state, questions, params, timeout)
+
+    # Patched after import, exactly as the driver does: looked up at call time.
+    monkeypatch.setattr(session_registry, "ProxyModelClient", CountingClient)
+    urls = []
+    monkeypatch.setattr(
+        session_registry,
+        "SearchServerClient",
+        lambda url, *args: urls.append(url) or search,
+    )
+    return SimpleNamespace(models=models, search=search, built=built, urls=urls)
+
+
+@pytest.fixture
+def sandbox(monkeypatch):
+    """Fake the sandbox: an agent that buys each task's answer (or a chosen item)."""
+
+    state = SimpleNamespace(runtime=None, buys=dict(ANSWERS), returncode=0, commands=[],
+                            write_output=True, raise_=None)
+
+    class FakeServer:
+        def __init__(self, runtime, *, host, port):
+            state.runtime = runtime
+
+        def start(self, *, timeout):
+            pass
+
+        def stop(self):
+            pass
+
+    def run(command, **kwargs):
+        if command[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(command, 0)
+        state.commands.append((command, kwargs))
+        if state.raise_ is not None:
+            raise state.raise_
+        logs = Path(next(arg.split(":")[0] for arg in command if arg.endswith(":/app/logs:ro")))
+        rows = [json.loads(line) for line in (logs / "problems.jsonl").read_text().splitlines()]
+        for row in rows:
+            task_id = row["environment"]["policy_view"]["query"].split()[-1].rstrip(".")
+            if task_id in state.buys:
+                try:
+                    state.runtime.call({**row["environment"]["binding"], "step": 1,
+                                        "action": {"name": "buy", "args": {"id": state.buys[task_id]}}})
+                except Exception:  # noqa: BLE001  (the agent sees a failed call)
+                    pass
+        if state.write_output:
+            (logs / "sandbox" / "sandbox_output.jsonl").write_text(
+                "".join(json.dumps({"problem_id": row["problem_id"]}) + "\n" for row in rows)
             )
-            for family in families
-        ],
-        task_ids=[f"task-{index}" for index in range(len(families))],
-        pack_sha256="a" * 64,
-        manifest={
-            "models": {"user_simulator": "vendor/sim"},
-            "delivery": {"scope": "qualifying", "task_contract": "oro.qualifying_task.v1"},
-        },
-        metadata={"search_index_sha256": "b" * 64},
-        close=MagicMock(),
-    )
+        return subprocess.CompletedProcess(command, state.returncode)
+
+    monkeypatch.setattr(local, "SessionServer", FakeServer)
+    monkeypatch.setattr(local.subprocess, "run", run)
+    monkeypatch.setattr(local, "host_path", lambda path: path)
+    return state
 
 
-def _episode(
-    index: int,
-    family: str,
-    *,
-    outcome: str = "completed",
-    correct: bool = True,
-    reward: float = 1.0,
-) -> dict:
-    return {
-        "evaluation_run_id": "local-test-run",
-        "agent_version_id": "test-agent",
-        "task_id": f"task-{index}",
-        "session_id": f"session-{index}",
-        "pack_sha256": "a" * 64,
-        "family": family,
-        "outcome": outcome,
-        "terminal_reason": "environment_done" if outcome == "completed" else None,
-        "error_detail": None if outcome == "completed" else f"{outcome} detail",
-        "verdict": (
-            {"correct": correct, "paid_reward": reward}
-            if outcome == "completed"
-            else None
-        ),
-        "terminal_state_hash": "c" * 64 if outcome == "completed" else None,
-        "step_count": 1,
-        "solver_turn_count": 1,
-        "action_count": 1,
-        "render_budget": None,
-        "bootstrap": {"session_id": f"session-{index}", "policy_view": {}},
-        "call_trace": [],
-        "ledger": [],
-        "provenance": {"pack_sha256": "a" * 64},
-        "environment_error": outcome == "environment_error",
-        "verifier_error": outcome == "verifier_error",
-    }
+def _delivery(tmp_path: Path, **kwargs) -> Path:
+    name = kwargs.get("delivery_kind", "practice")
+    pack = build_world_pack(tmp_path / f"world-{name}", **kwargs)
+    return archive_pack(pack, tmp_path / f"{name}.tar.gz")
 
 
-def _config(tmp_path: Path, *, timeout: float = 120.0) -> LocalGeneratedConfig:
-    agent_path = tmp_path / "agent.py"
-    pack_path = tmp_path / "pack.tar.gz"
-    agent_path.write_text("def agent_main(problem):\n    return []\n", encoding="utf-8")
-    pack_path.write_bytes(b"pack")
-    return LocalGeneratedConfig(
-        agent_path=agent_path,
-        pack_path=pack_path,
-        output_root=tmp_path / "runs",
-        inference_access_token="test-token",
-        inference_provider="openrouter",
-        inference_base_url="https://openrouter.test/api/v1",
-        model="vendor/test-model",
-        pack_sha256="a" * 64,
-        problem_count=7,
-        max_workers=7,
-        timeout=timeout,
-    )
-
-
-def _install_runtime_fakes(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
-    results: list[dict],
-) -> tuple[SimpleNamespace, MagicMock, list[list[str]], SessionRuntime, MagicMock]:
-    pack = _pack(_ROSTER)
-    registry = MagicMock()
-    registry.start.side_effect = [
-        {
-            "session_id": f"session-{index}",
-            "policy_view": {
-                "query": family,
-                "tools": [],
-                "max_steps": 4,
-                "max_calls_per_turn": 16,
-            },
-        }
-        for index, family in enumerate(_ROSTER)
-    ]
-    registry.finalized_results.return_value = results
-    registry.close.side_effect = pack.close
-    runtime = SessionRuntime()
-    server = MagicMock()
-    commands: list[list[str]] = []
-
-    monkeypatch.setattr(
-        local_generated_validator, "load_local_pack", lambda *_a, **_k: pack
-    )
-    monkeypatch.setattr(local_generated_validator, "SessionRuntime", lambda: runtime)
-    monkeypatch.setattr(
-        local_generated_validator, "SessionServer", lambda *_a, **_k: server
-    )
-    monkeypatch.setattr(
-        local_generated_validator, "SessionRegistry", lambda *_a, **_k: registry
-    )
-
-    def run(command: list[str], **_kwargs: object) -> SimpleNamespace:
-        commands.append(command)
-        run_dirs = list((tmp_path / "runs").glob("local-*"))
-        assert len(run_dirs) == 1
-        rows = [
-            {
-                "problem_id": f"session-{index}",
-                "status": "SUCCESS",
-                "execution_time": index + 0.5,
-                "inference_failure_count": 0,
-            }
-            for index in range(7)
-        ]
-        (run_dirs[0] / "sandbox" / "sandbox_output.jsonl").write_text(
-            "".join(json.dumps(row) + "\n" for row in rows),
-            encoding="utf-8",
-        )
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", run)
-    return pack, registry, commands, runtime, server
-
-
-def _failure_summary(error: LocalGeneratedValidatorError) -> dict:
-    assert error.summary_path.is_file()
-    summary = json.loads(error.summary_path.read_text(encoding="utf-8"))
-    assert summary["status"] == "failed"
-    assert summary["error"] == {
-        "classification": error.classification,
-        "message": str(error),
-    }
-    return summary
-
-
-def test_local_pack_selects_the_first_five_composed_tasks() -> None:
-    pack = _pack(["composed"] * 6)
-
-    assert validate_local_pack(pack) == [f"task-{index}" for index in range(5)]
-    with pytest.raises(ValueError, match="unexpected="):
-        validate_local_pack(_pack(["composed"] * 5 + ["unsupported"]))
-    with pytest.raises(ValueError, match="insufficient="):
-        validate_local_pack(_pack(["composed"] * 4))
-
-
-def test_local_pack_never_runs_race_rows_or_with_race_configuration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    roster = ["composed"] * 5
-    sealed = _pack(roster)
-    sealed.task_specs[1].grading = SimpleNamespace(decoupled=False)
-    with pytest.raises(ValueError, match="race rows: task-1"):
-        validate_local_pack(sealed, frozenset({"composed"}))
-    raw = _pack(roster)
-    raw.manifest = {"models": {}}  # a raw compiler pack, not the qualifying delivery
-    with pytest.raises(ValueError, match="sanitized qualifying delivery"):
-        validate_local_pack(raw)
-    monkeypatch.setenv("ORO_RACE_ANY", "")
-    validate_local_pack(_pack(roster))  # an empty value is no configuration
-    monkeypatch.setenv("ORO_RACE_ANY", "x")
-    with pytest.raises(ValueError, match="race configuration"):
-        validate_local_pack(_pack(roster))
-
-
-def test_problem_count_samples_in_archive_order() -> None:
-    pack = _pack(["composed"] * 35)
-
-    seven = validate_local_pack(pack, problem_count=7, seed=1)
-    assert len(seven) == 7 == len(set(seven))
-    # Archive order, so problems.jsonl and the roster stay readable.
-    assert seven == sorted(seven, key=lambda task: int(task.removeprefix("task-")))
-    assert validate_local_pack(pack, problem_count=35, seed=1) == pack.task_ids
-
-
-def test_problem_selection_repeats_only_for_a_repeated_seed() -> None:
-    pack = _pack(["composed"] * 35)
-
-    assert validate_local_pack(pack, problem_count=7, seed=7) == validate_local_pack(
-        pack, problem_count=7, seed=7
-    )
-    assert validate_local_pack(pack, problem_count=7, seed=7) != validate_local_pack(
-        pack, problem_count=7, seed=8
-    )
-
-
-def test_problem_count_outside_the_pack_names_the_bounds() -> None:
-    pack = _pack(["composed"] * 35)
-
-    for count in (0, 36):
-        with pytest.raises(ValueError, match="--problems must be between 1 and 35"):
-            validate_local_pack(pack, problem_count=count)
-
-
-def test_a_short_run_does_not_require_a_full_qualifying_family(tmp_path: Path) -> None:
-    # The per-family minimum is a qualifying rule; a sampled run should not inherit it.
-    pack = _pack(["composed"] * 3)
-
-    assert len(validate_local_pack(pack, problem_count=3, seed=1)) == 3
-    with pytest.raises(ValueError, match="insufficient="):
-        validate_local_pack(pack)
-
-
-def test_failed_run_still_writes_the_trajectory_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A failed run is exactly when a miner needs the trajectories.
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-    monkeypatch.setattr(
-        local_generated_validator,
-        "aggregate_results",
-        lambda _results: (_ for _ in ()).throw(ValueError("boom")),
-    )
-
-    with pytest.raises(
-        local_generated_validator.LocalGeneratedValidatorError
-    ) as excinfo:
-        run_local_generated_validator(_config(tmp_path))
-
-    report = excinfo.value.report_path
-    assert report is not None and report.is_file()
-    assert "TF" in report.read_text() or "episode" in report.read_text()
-    summary = json.loads(excinfo.value.summary_path.read_text())
-    assert summary["status"] == "failed"
-
-
-def test_summary_records_the_agent_and_how_the_roster_was_chosen(
-    tmp_path: Path,
-) -> None:
-    family = min(GENERATED_FAMILIES)
+def _config(tmp_path: Path, **overrides) -> local.LocalGeneratedConfig:
     agent = tmp_path / "agent.py"
-    agent.write_text("def agent_main(problem):\n    return []\n", encoding="utf-8")
-    path = tmp_path / "summary.json"
-    results = [_episode(0, family)]
-
-    local_generated_validator._write_summary(
-        path,
-        run_id="local-test",
-        pack=None,
-        configured_pack_sha256="a" * 64,
-        task_ids=["task-0"],
-        results=results,
-        aggregate_score=0.5,
-        status="completed",
-        problem_count=None,
-        seed=None,
-        agent_file=agent.name,
-        agent_sha256="d" * 64,
-    )
-    roster = json.loads(path.read_text())
-    assert roster["selection_mode"] == "qualifying_roster"
-    assert roster["selection_seed"] is None
-    assert roster["agent_file"] == "agent.py"
-    assert roster["agent_sha256"] == "d" * 64
-
-    local_generated_validator._write_summary(
-        path,
-        run_id="local-test",
-        pack=None,
-        configured_pack_sha256="a" * 64,
-        task_ids=["task-0"],
-        results=results,
-        aggregate_score=0.5,
-        status="completed",
-        problem_count=7,
-        seed=99,
-        agent_file=agent.name,
-        agent_sha256="d" * 64,
-    )
-    sampled = json.loads(path.read_text())
-    assert sampled["selection_mode"] == "random_sample"
-    assert sampled["selection_seed"] == 99
-
-
-def test_summary_reports_the_digest_the_runtime_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Editing the agent mid-run must not make summary.json disagree with the
-    # agent_version_id already baked into every episode receipt.
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-    config = _config(tmp_path)
-    before = local_generated_validator._sha256(config.agent_path)
-
-    real_sha256 = local_generated_validator._sha256
-
-    def hash_then_mutate(path: Path) -> str:
-        digest = real_sha256(path)
-        config.agent_path.write_text("# edited mid-run\n", encoding="utf-8")
-        return digest
-
-    monkeypatch.setattr(local_generated_validator, "_sha256", hash_then_mutate)
-    completed = run_local_generated_validator(config)
-
-    summary = json.loads(completed.summary_path.read_text())
-    assert summary["agent_sha256"] == before
-    assert summary["agent_sha256"] != real_sha256(config.agent_path)
-
-
-def test_summary_averages_rewards_within_each_family(tmp_path: Path) -> None:
-    family = min(GENERATED_FAMILIES)
-    path = tmp_path / "summary.json"
-    results = [
-        _episode(0, family, reward=1.0),
-        _episode(1, family, correct=False),
-    ]
-
-    local_generated_validator._write_summary(
-        path,
-        run_id="local-test-run",
-        pack=None,
-        configured_pack_sha256="a" * 64,
-        task_ids=["task-0", "task-1"],
-        results=results,
-        aggregate_score=0.5,
-        status="completed",
-    )
-
-    summary = json.loads(path.read_text(encoding="utf-8"))
-    assert summary["family_rewards"] == {family: 0.5}
-
-
-@pytest.mark.parametrize("termination", ["nonzero", "timeout", "missing_output"])
-def test_sandbox_interruption_preserves_finalized_receipts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    termination: str,
-) -> None:
-    families = _ROSTER
-    results = [
-        _episode(0, families[0]),
-        *[
-            _episode(index, family, outcome="agent_error")
-            for index, family in enumerate(families[1:], 1)
-        ],
-    ]
-    _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch, tmp_path, results=results
-    )
-    original_run = local_generated_validator.subprocess.run
-    sandbox_stopped = False
-
-    def interrupt(command: list[str], **kwargs: object) -> SimpleNamespace:
-        nonlocal sandbox_stopped
-        if command[:2] == ["docker", "rm"]:
-            sandbox_stopped = True
-            return SimpleNamespace(returncode=0)
-        if termination == "missing_output":
-            return SimpleNamespace(returncode=17)
-        original_run(command, **kwargs)
-        if termination == "timeout":
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-        sandbox_stopped = True
-        return SimpleNamespace(returncode=17)
-
-    def finalize() -> list[dict]:
-        if termination == "timeout":
-            assert sandbox_stopped, "stop the sandbox before reading final state"
-        return results
-
-    _registry.finalized_results.side_effect = finalize
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", interrupt)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-    summary = _failure_summary(caught.value)
-    artifact_dir = caught.value.artifact_dir
-    assert caught.value.classification == "infrastructure"
-    if termination == "nonzero":
-        assert "sandbox exited with code 17" in str(caught.value)
-    elif termination == "timeout":
-        assert "timed out after 120 seconds" in str(caught.value)
-    else:
-        assert "sandbox exited with code 17" in str(caught.value)
-
-    assert summary["task_count"] == 7
-    assert summary["aggregate_score"] == pytest.approx(1 / 7)
-    assert summary["tasks"][0]["reward"] == 1.0
-    assert [task["reward"] for task in summary["tasks"][1:]] == [0.0] * 6
-    receipts = [
-        json.loads(line)
-        for line in (artifact_dir / "episode_results.jsonl").read_text().splitlines()
-    ]
-    assert len(receipts) == 7
-    assert receipts[0]["episode"]["terminal_state_hash"] == "c" * 64
-
-
-def test_timeout_retries_container_removal_after_failed_forced_removal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    loaded_pack,
-) -> None:
-    from subnet.validator.session_registry import InvalidSessionError, SessionRegistry
-
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _, _, _, runtime, _ = _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-    # The run config asks for seven problems: keep seven of the fixture's rows.
-    loaded_pack.task_ids = loaded_pack.task_ids[:7]
-    loaded_pack.task_specs = loaded_pack.task_specs[:7]
-    loaded_pack.manifest["delivery"] = _pack([]).manifest["delivery"]
-    registry = SessionRegistry(loaded_pack)
-    monkeypatch.setattr(
-        local_generated_validator, "load_local_pack", lambda *_: loaded_pack
-    )
-    monkeypatch.setattr(
-        local_generated_validator, "SessionRegistry", lambda *_a, **_k: registry
-    )
-    write_results = local_generated_validator._write_episode_results
-
-    def write_sealed_results(path: Path, rows: list[dict]) -> None:
-        # Docker removal has failed; the live HTTP bridge must already be sealed.
-        assert removal_attempts == 1
-        assert len(rows) == len(loaded_pack.task_ids)
-        with pytest.raises(InvalidSessionError, match="finalized"):
-            runtime.call(
-                {
-                    "session_id": rows[0]["session_id"],
-                    "call_id": "late",
-                    "idempotency_key": "late",
-                    "turn": 1,
-                    "action": {"name": "inspect_cart", "args": {}},
-                }
-            )
-        write_results(path, rows)
-
-    monkeypatch.setattr(
-        local_generated_validator, "_write_episode_results", write_sealed_results
-    )
-    removal_attempts = 0
-
-    def time_out(command: list[str], **kwargs: object) -> SimpleNamespace:
-        nonlocal removal_attempts
-        if command[:2] == ["docker", "rm"]:
-            removal_attempts += 1
-            return SimpleNamespace(returncode=1 if removal_attempts == 1 else 0)
-        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", time_out)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert removal_attempts == 2, str(caught.value)
-
-
-def test_sandbox_failure_takes_precedence_when_receipts_cannot_aggregate(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    families = _ROSTER
-    # Stay UNDER the 30% infra threshold so aggregation still succeeds
-    # with a partial score — verifier count 2/7 = 28.6%. The sandbox exit
-    # code must still take precedence over the aggregate.
-    results = [
-        _episode(0, families[0]),
-        *[
-            _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[1:3], 1)
-        ],
-        *[
-            _episode(index, family, outcome="agent_error")
-            for index, family in enumerate(families[3:], 3)
-        ],
-    ]
-    _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch, tmp_path, results=results
-    )
-    original_run = local_generated_validator.subprocess.run
-
-    def fail_sandbox(command: list[str], **kwargs: object) -> SimpleNamespace:
-        original_run(command, **kwargs)
-        return SimpleNamespace(returncode=17)
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", fail_sandbox)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "infrastructure"
-    assert "sandbox exited with code 17" in str(caught.value)
-    # Fixture: 1 completed (reward=1) + 2 verifier_error + 4 agent_error,
-    # so aggregate = 1 / 7. Verifier ratio 2/7 = 28.6% stays under the
-    # 30% infra threshold so aggregation succeeds and the sandbox failure
-    # fires later.
-    summary = _failure_summary(caught.value)
-    assert summary["aggregate_score"] == pytest.approx(1 / 7)
-
-
-def test_sandbox_failure_takes_precedence_when_receipt_roster_is_incomplete(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    families = _ROSTER
-    results = [_episode(index, family) for index, family in enumerate(families[:-1])]
-    _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch, tmp_path, results=results
-    )
-
-    monkeypatch.setattr(
-        local_generated_validator.subprocess,
-        "run",
-        lambda command, **kwargs: SimpleNamespace(returncode=17),
-    )
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "infrastructure"
-    assert "sandbox exited with code 17" in str(caught.value)
-    summary = _failure_summary(caught.value)
-    assert summary["aggregate_score"] is None
-
-
-def test_sandbox_cannot_mount_evaluator_artifacts_writable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _pack_value, _registry, commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch, tmp_path, results=results
-    )
-    completed = run_local_generated_validator(_config(tmp_path))
-    mounts = [
-        commands[0][index + 1]
-        for index, argument in enumerate(commands[0])
-        if argument == "-v"
-    ]
-    assert f"{completed.artifact_dir}:/app/logs:ro" in mounts
-    writable = [mount for mount in mounts if not mount.endswith(":ro")]
-    assert writable == [f"{completed.artifact_dir}/sandbox:/app/output"]
-    assert not completed.artifact_dir.stat().st_mode & 0o022
-
-
-def test_sandbox_report_cannot_change_evaluator_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    results = [
-        _episode(index, family, outcome="agent_error")
-        for index, family in enumerate(_ROSTER)
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-    original_run = local_generated_validator.subprocess.run
-
-    def forge(command: list[str], **kwargs: object) -> object:
-        completed = original_run(command, **kwargs)
-        run_dir = next((tmp_path / "runs").glob("local-*"))
-        (run_dir / "sandbox" / "sandbox_output.jsonl").write_text(
-            json.dumps(
-                {
-                    "problem_id": "session-0",
-                    "execution_time": float("nan"),
-                    "inference_failure_count": "forged",
-                    "error": "forged environment failure",
-                }
-            )
-            + "\n"
-        )
-        return completed
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", forge)
-    completed = run_local_generated_validator(_config(tmp_path))
-    tasks = json.loads(completed.summary_path.read_text())["tasks"]
-    assert tasks[0]["error_classification"] == "agent"
-    assert tasks[0]["error_detail"] == "agent_error detail"
-    assert "duration_seconds" not in tasks[0]
-    json.dumps(tasks, allow_nan=False)
-
-
-@pytest.mark.parametrize("kind", ["fifo", "directory", "hardlink", "parent_symlink"])
-def test_sandbox_output_reader_rejects_unsafe_files(tmp_path: Path, kind: str) -> None:
-    output = tmp_path / "sandbox_output.jsonl"
-    if kind == "fifo":
-        os.mkfifo(output)
-    elif kind == "directory":
-        output.mkdir()
-    elif kind == "hardlink":
-        target = tmp_path / "evaluator.json"
-        target.write_text("{}\n")
-        os.link(target, output)
-    else:
-        target = tmp_path / "actual"
-        target.mkdir()
-        (target / output.name).write_text("{}\n")
-        alias = tmp_path / "alias"
-        alias.symlink_to(target, target_is_directory=True)
-        output = alias / output.name
-    with pytest.raises(ValueError, match="sandbox output"):
-        local_generated_validator._read_sandbox_rows(output)
-
-
-def test_sandbox_output_reader_rejects_symlinks(tmp_path: Path) -> None:
-    target = tmp_path / "evaluator.json"
-    target.write_text('{"trusted": true}\n')
-    output = tmp_path / "sandbox_output.jsonl"
-    output.symlink_to(target)
-    with pytest.raises(ValueError, match="sandbox output"):
-        local_generated_validator._read_sandbox_rows(output)
-
-
-def test_sandbox_output_reader_bounds_input(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output = tmp_path / "sandbox_output.jsonl"
-    output.write_text('{"problem_id": "session-0"}\n')
-    assert local_generated_validator._read_sandbox_rows(output) == [
-        {"problem_id": "session-0"}
-    ]
-    monkeypatch.setattr(local_generated_validator, "MAX_SANDBOX_OUTPUT_BYTES", 8)
-    with pytest.raises(ValueError, match="sandbox output"):
-        local_generated_validator._read_sandbox_rows(output)
-
-
-@pytest.mark.parametrize("content", ["[]\n", "null\n", '"agent text"\n'])
-def test_sandbox_output_reader_requires_object_rows(
-    tmp_path: Path, content: str
-) -> None:
-    output = tmp_path / "sandbox_output.jsonl"
-    output.write_text(content)
-    with pytest.raises(ValueError, match="sandbox output"):
-        local_generated_validator._read_sandbox_rows(output)
-
-
-def test_run_composes_generated_components_and_writes_per_family_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    families = _ROSTER
-    results = [
-        _episode(index, family, correct=index != 0, reward=0.5)
-        for index, family in enumerate(families)
-    ]
-    _pack_value, registry, commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-
-    completed = run_local_generated_validator(_config(tmp_path))
-
-    assert completed.aggregate_score == pytest.approx(3 / 7)
-    assert completed.results == results
-    assert commands[0][:2] == ["docker", "run"]
-    assert registry.start.call_count == 7
-    summary = json.loads(completed.summary_path.read_text(encoding="utf-8"))
-    assert summary["aggregate_score"] == pytest.approx(3 / 7)
-    assert summary["family_rewards"] == {"composed": pytest.approx(3 / 7)}
-    assert [task["family"] for task in summary["tasks"]] == families
-    assert summary["tasks"][0] == {
-        "task_id": "task-0",
-        "family": families[0],
-        "outcome": "completed",
-        "correct": False,
-        "reward": 0.0,
-        "error_classification": None,
-        "error_detail": None,
-        # The fake episode's ledger has no order.
-        "failure": {"primary": "did_not_finish", "categories": ["did_not_finish"]},
+    agent.write_text("def run(problem):\n    return {}\n")
+    fields = {
+        "agent_path": agent,
+        "pack_path": _delivery(tmp_path),
+        "output_root": tmp_path / "runs",
+        "inference_access_token": "or-test-token",
+        "inference_provider": "openrouter",
+        "inference_base_url": "https://openrouter.ai/api/v1",
+        "model": "vendor/model",
+        "search_url": "http://search.test:5632",
     }
-    assert (
-        len((completed.artifact_dir / "problems.jsonl").read_text().splitlines()) == 7
-    )
-    bootstraps = json.loads(
-        (completed.artifact_dir / "environment_sessions.json").read_text()
-    )
-    assert len(bootstraps["sessions"]) == 7
-    episode_artifacts = [
-        json.loads(line)
-        for line in (completed.artifact_dir / "episode_results.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    assert episode_artifacts == [
-        {"schema_version": "oro.environment_episode.v1", "episode": result}
-        for result in results
-    ]
+    return local.LocalGeneratedConfig(**{**fields, **overrides})
 
 
-def test_sandbox_inherits_provider_tokens_without_putting_values_in_argv(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def _failure(config) -> local.LocalGeneratedValidatorError:
+    with pytest.raises(local.LocalGeneratedValidatorError) as caught:
+        local.run_local_generated_validator(config)
+    return caught.value
+
+
+def test_practice_run_writes_the_artifacts_the_e2e_report_reads(
+    tmp_path, services, sandbox
 ) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
+    sandbox.buys["t2"] = "a"  # wrong item: "request not met"
+
+    result = local.run_local_generated_validator(_config(tmp_path))
+
+    art = result.artifact_dir
+    summary = json.loads((art / "summary.json").read_text())
+    assert summary["status"] == "completed"
+    assert summary["aggregate_score"] == result.aggregate_score == 0.5
+    assert summary["world_id"] == "world-validator-test"
+    assert summary["task_count"] == 2 and summary["task_roster"] == ["t1", "t2"]
+    assert summary["selection_mode"] == "all_tasks"
+    assert summary["error"] is None
+    assert [(t["task_id"], t["score"], t["category"], t["outcome"]) for t in summary["tasks"]] == [
+        ("t1", 1.0, None, "completed"),
+        ("t2", 0.0, "request not met", "completed"),
     ]
-    _pack_value, _registry, commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
+    episodes = [json.loads(line)["episode"] for line in (art / "episode_results.jsonl").read_text().splitlines()]
+    sessions = json.loads((art / "environment_sessions.json").read_text())["sessions"]
+    assert [e["task_id"] for e in episodes] == ["t1", "t2"]
+    assert [e["session_id"] for e in episodes] == [s["session_id"] for s in sessions]
+    assert all(e["step_count"] == 1 and e["terminal_reason"] == "order" for e in episodes)
+    assert all(e["ledger"]["episode"][0]["delivery"]["id"] == "practice-1" for e in episodes)
+    assert all(isinstance(e["wall_seconds"], float) for e in episodes)
+    problems = [json.loads(line) for line in (art / "problems.jsonl").read_text().splitlines()]
+    assert [p["environment"]["binding"] for p in problems] == [s["binding"] for s in sessions]
+    assert (art / "sandbox" / "sandbox_output.jsonl").is_file()
+    # The registry's model client was the patched class, on the run's key and the
+    # local proxy; every index went to the configured search server first.
+    assert services.built == [("or-test-token", {
+        "proxy_url": local.LOCAL_PROXY_URL, "timeout": 60.0,
+        "inference_stats_file": None, "key_exhausted_event": services.built[0][1]["key_exhausted_event"],
+    })]
+    assert services.urls == ["http://search.test:5632"]
+    assert list(services.search.titles)
+
+
+def test_each_episode_gets_a_fresh_nonce(tmp_path, services, sandbox) -> None:
+    config = _config(tmp_path)
+    nonces = []
+    for _ in range(2):
+        art = local.run_local_generated_validator(config).artifact_dir
+        nonces.append({
+            json.loads(line)["episode"]["episode_nonce"]
+            for line in (art / "episode_results.jsonl").read_text().splitlines()
+        })
+    assert len(nonces[0] | nonces[1]) == 4
+
+
+def test_unfinished_episodes_are_finished_and_graded(tmp_path, services, sandbox) -> None:
+    sandbox.buys = {"t1": "a"}
+
+    result = local.run_local_generated_validator(_config(tmp_path))
+
+    assert result.aggregate_score == 0.5
+    assert [t["category"] for t in result.summary["tasks"]] == [None, "did not finish"]
+
+
+@pytest.mark.parametrize("kind", ["qualifying", "race", "full"])
+def test_only_a_practice_delivery_runs_locally(tmp_path, services, sandbox, kind) -> None:
+    error = _failure(_config(tmp_path, pack_path=_delivery(tmp_path, delivery_kind=kind)))
+
+    assert error.classification == "configuration"
+    assert "practice delivery" in str(error)
+    assert sandbox.commands == []
+    summary = json.loads(error.summary_path.read_text())
+    assert summary["status"] == "failed"
+    assert summary["error"]["classification"] == "configuration"
+
+
+def test_untrusted_signature_is_refused(tmp_path, services, sandbox, monkeypatch) -> None:
+    from subnet.validator import env_pack_loader
+    from oro_env_runtime.pack import pinned_keyring
+
+    monkeypatch.setattr(env_pack_loader, "KEYRING", pinned_keyring())
+
+    error = _failure(_config(tmp_path))
+
+    assert error.classification == "configuration"
+    assert "refused" in str(error)
+
+
+def test_race_configuration_refuses_to_run(tmp_path, services, sandbox, monkeypatch) -> None:
+    monkeypatch.setenv("ORO_RACE_ID", "race")
+
+    assert _failure(_config(tmp_path)).classification == "configuration"
+
+
+def test_problem_count_samples_repeatably(tmp_path, services) -> None:
+    from subnet.tests.world_pack_fixture import load_world_pack
+
+    pack = load_world_pack(tmp_path)
+
+    assert local.select_tasks(pack) == ["t1", "t2"]
+    picks = {tuple(local.select_tasks(pack, problem_count=1, seed=seed)) for seed in range(20)}
+    assert picks == {("t1",), ("t2",)}
+    assert local.select_tasks(pack, problem_count=1, seed=3) == local.select_tasks(
+        pack, problem_count=1, seed=3
     )
-    original_run = local_generated_validator.subprocess.run
-    sandbox_environment: dict[str, str] = {}
-
-    def capture_environment(command: list[str], **kwargs: object) -> object:
-        environment = kwargs.get("env")
-        if isinstance(environment, dict):
-            sandbox_environment.update(environment)
-        return original_run(command, **kwargs)
-
-    monkeypatch.setattr(
-        local_generated_validator.subprocess,
-        "run",
-        capture_environment,
-    )
-
-    run_local_generated_validator(_config(tmp_path))
-
-    sandbox_command = commands[0]
-    assert all("test-token" not in argument for argument in sandbox_command)
-    assert not any("CHUTES_ACCESS_TOKEN" in argument for argument in sandbox_command)
-    assert ["-e", "INFERENCE_ACCESS_TOKEN"] == sandbox_command[
-        sandbox_command.index("INFERENCE_ACCESS_TOKEN") - 1 : sandbox_command.index(
-            "INFERENCE_ACCESS_TOKEN"
-        )
-        + 1
-    ]
-    assert "CHUTES_ACCESS_TOKEN" not in sandbox_environment
-    assert sandbox_environment["INFERENCE_ACCESS_TOKEN"] == "test-token"
-    assert sandbox_environment["SANDBOX_MODEL"] == "vendor/test-model"
-    assert ["-e", "SANDBOX_MODEL"] == sandbox_command[
-        sandbox_command.index("SANDBOX_MODEL") - 1 : sandbox_command.index(
-            "SANDBOX_MODEL"
-        )
-        + 1
-    ]
+    with pytest.raises(ValueError, match="between 1 and 2"):
+        local.select_tasks(pack, problem_count=3)
 
 
-def test_summary_ignores_sandbox_inference_failure_claims(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_sampled_run_reports_its_seed(tmp_path, services, sandbox) -> None:
+    result = local.run_local_generated_validator(_config(tmp_path, problem_count=1, seed=5))
+
+    assert result.summary["selection_mode"] == "random_sample"
+    assert result.summary["selection_seed"] == 5
+    assert result.summary["task_count"] == 1
+
+
+def test_sandbox_failure_is_infrastructure_and_keeps_episodes(tmp_path, services, sandbox) -> None:
+    sandbox.returncode = 3
+
+    error = _failure(_config(tmp_path))
+
+    assert error.classification == "infrastructure"
+    assert str(error) == "sandbox exited with code 3"
+    assert len((error.artifact_dir / "episode_results.jsonl").read_text().splitlines()) == 2
+    assert error.report_path is not None
+
+
+def test_sandbox_timeout_removes_the_container(tmp_path, services, sandbox) -> None:
+    sandbox.raise_ = subprocess.TimeoutExpired("docker", 1)
+
+    error = _failure(_config(tmp_path, timeout=1))
+
+    assert error.classification == "infrastructure"
+    assert "timed out after 1 seconds" in str(error)
+
+
+def test_missing_sandbox_output_fails(tmp_path, services, sandbox) -> None:
+    sandbox.write_output = False
+
+    error = _failure(_config(tmp_path))
+
+    assert (error.classification, str(error)) == ("infrastructure", "sandbox did not produce output")
+
+
+def test_quarantined_episodes_beyond_the_threshold_fail_as_environment(
+    tmp_path, services, sandbox, monkeypatch
 ) -> None:
-    families = _ROSTER
-    results = [
-        _episode(0, families[0], outcome="agent_error"),
-        _episode(1, families[1], outcome="agent_error"),
-        *[_episode(index, family) for index, family in enumerate(families[2:], 2)],
-    ]
-    _pack_value, _registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    original_run = local_generated_validator.subprocess.run
+    def broken_step(self, tool, args):
+        raise RuntimeError("world crashed")
 
-    def run_with_inference_failure(command: list[str], **kwargs: object) -> object:
-        completed = original_run(command, **kwargs)
-        run_dir = next((tmp_path / "runs").glob("local-*"))
-        rows = [
-            json.loads(line)
-            for line in (run_dir / "sandbox" / "sandbox_output.jsonl")
-            .read_text()
-            .splitlines()
-        ]
-        rows[0]["inference_failure_count"] = 1
-        (run_dir / "sandbox" / "sandbox_output.jsonl").write_text(
-            "".join(json.dumps(row) + "\n" for row in rows),
-            encoding="utf-8",
-        )
-        return completed
+    monkeypatch.setattr(session_registry.Session, "step", broken_step)
 
-    monkeypatch.setattr(
-        local_generated_validator.subprocess, "run", run_with_inference_failure
-    )
+    error = _failure(_config(tmp_path))
 
-    completed = run_local_generated_validator(_config(tmp_path))
-
-    summary = json.loads(completed.summary_path.read_text())
-    assert summary["tasks"][0]["error_classification"] == "agent"
-    assert summary["tasks"][1]["error_classification"] == "agent"
-    assert completed.aggregate_score == pytest.approx(5 / 7)
+    assert error.classification == "environment"
+    assert "infrastructure failure: 2 of 2" in str(error)
+    summary = json.loads(error.summary_path.read_text())
+    assert [t["outcome"] for t in summary["tasks"]] == ["environment_error"] * 2
 
 
-@pytest.mark.parametrize(
-    "outcome,classification",
-    [("verifier_error", "verifier"), ("environment_error", "environment")],
-)
-def test_isolated_harness_failure_scores_local_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    outcome: str,
-    classification: str,
+def test_search_url_defaults_from_the_environment(monkeypatch) -> None:
+    monkeypatch.delenv("E2E_SEARCH_URL", raising=False)
+    monkeypatch.delenv("SEARCH_SERVER_URL", raising=False)
+    assert local._default_search_url() == "http://localhost:5632"
+    monkeypatch.setenv("SEARCH_SERVER_URL", "http://search-server:5632")
+    assert local._default_search_url() == "http://search-server:5632"
+    monkeypatch.setenv("E2E_SEARCH_URL", "http://e2e:1")
+    assert local._default_search_url() == "http://e2e:1"
+
+
+def test_sandbox_mounts_evaluator_artifacts_read_only_and_keeps_tokens_out_of_argv(
+    tmp_path, services, sandbox
 ) -> None:
-    """A subset of harness failures no longer rejects the run — the completed
-    episodes are scored (env/verifier errors count as 0 reward alongside
-    agent errors), matching production `aggregate_results` semantics."""
-    families = _ROSTER
-    results = [
-        _episode(0, families[0], outcome=outcome),
-        *[_episode(index, family) for index, family in enumerate(families[1:], 1)],
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
+    local.run_local_generated_validator(_config(tmp_path))
 
-    completed = run_local_generated_validator(_config(tmp_path))
-    # 6 completed with reward=1.0 (via _episode default), 1 harness failure at 0
-    assert completed.aggregate_score == pytest.approx(6 / 7)
-    summary = json.loads(completed.summary_path.read_text())
-    assert summary["tasks"][0]["error_classification"] == classification
-    assert len(summary["tasks"]) == len(families)
-
-
-def test_multiple_verifier_failures_below_threshold_score_local_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Multiple harness failures below the 30% infra threshold still score
-    partially — 2 verifier errors + 5 completed = 2/7 = 28.6% < 30%."""
-    families = _ROSTER
-    results = [
-        *[
-            _episode(index, family, outcome="verifier_error")
-            for index, family in enumerate(families[:2])
-        ],
-        *[_episode(index, family) for index, family in enumerate(families[2:], 2)],
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-
-    completed = run_local_generated_validator(_config(tmp_path))
-    assert completed.aggregate_score == pytest.approx(5 / 7)
-    summary = json.loads(completed.summary_path.read_text())
-    assert summary["tasks"][0]["error_classification"] == "verifier"
-
-
-def test_missing_finalized_task_is_an_infrastructure_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER[:-1])
-    ]
-    _install_runtime_fakes(monkeypatch, tmp_path, results=results)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "infrastructure"
-    assert "one finalized result per pack task" in str(caught.value)
-    _failure_summary(caught.value)
-
-
-@pytest.mark.parametrize("failure_point", ["session_start", "problem_write"])
-def test_preinstall_failure_closes_registry_and_pack(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_point: str,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    pack, registry, _commands, runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    if failure_point == "session_start":
-        registry.start.side_effect = RuntimeError("session creation failed")
-    else:
-        monkeypatch.setattr(
-            local_generated_validator,
-            "write_problem_file",
-            MagicMock(side_effect=OSError("problem write failed")),
-        )
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert runtime.ready is False
-    registry.close.assert_called_once_with()
-    pack.close.assert_called_once_with()
-    assert caught.value.classification == "infrastructure"
-    _failure_summary(caught.value)
-
-
-def test_problem_execution_budget_does_not_cut_off_finalization(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _pack_value, registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    original_run = local_generated_validator.subprocess.run
-
-    def finish_sandbox(command: list[str], **kwargs: object) -> object:
-        completed = original_run(command, **kwargs)
-        time.sleep(0.02)
-        return completed
-
-    monkeypatch.setattr(
-        local_generated_validator.subprocess,
-        "run",
-        finish_sandbox,
-    )
-
-    completed = run_local_generated_validator(_config(tmp_path, timeout=0.01))
-
-    registry.finalized_results.assert_called_once_with()
-    assert completed.aggregate_score == pytest.approx(1.0)
-
-
-def test_finalization_and_cleanup_complete_synchronously_before_return(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    pack, registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    lifecycle: list[str] = []
-
-    def finalize() -> list[dict]:
-        lifecycle.append("finalization-started")
-        time.sleep(0.03)
-        lifecycle.append("finalization-finished")
-        return results
-
-    def close() -> None:
-        lifecycle.append("cleanup-started")
-        time.sleep(0.03)
-        pack.close()
-        lifecycle.append("cleanup-finished")
-
-    registry.finalized_results.side_effect = finalize
-    registry.close.side_effect = close
-    started_at = time.monotonic()
-    completed = run_local_generated_validator(_config(tmp_path, timeout=0.01))
-    elapsed = time.monotonic() - started_at
-
-    assert completed.aggregate_score == pytest.approx(1.0)
-    assert lifecycle == [
-        "finalization-started",
-        "finalization-finished",
-        "cleanup-started",
-        "cleanup-finished",
-    ]
-    assert elapsed >= 0.06
-    registry.close.assert_called_once_with()
-    pack.close.assert_called_once_with()
-
-
-def test_interrupted_sandbox_run_cleans_up_before_propagating_interrupt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    pack, registry, _commands, _runtime, server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    commands: list[list[str]] = []
-
-    def interrupt(command: list[str], **_kwargs: object) -> SimpleNamespace:
-        commands.append(command)
-        if command[:2] == ["docker", "run"]:
-            raise KeyboardInterrupt()
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", interrupt)
-
-    with pytest.raises(KeyboardInterrupt):
-        run_local_generated_validator(_config(tmp_path))
-
-    registry.finalized_results.assert_called_once_with()
-    server.stop.assert_called_once_with()
-    registry.close.assert_called_once_with()
-    pack.close.assert_called_once_with()
-    assert commands[1][:3] == ["docker", "rm", "--force"]
-
-
-def test_registry_cleanup_failure_fails_run_and_writes_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _pack_value, registry, _commands, _runtime, _server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    registry.close.side_effect = [RuntimeError("registry cleanup failed"), None]
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "infrastructure"
-    assert "registry cleanup failed" in str(caught.value)
-    _failure_summary(caught.value)
-
-
-@pytest.mark.parametrize(
-    ("failure_point", "expected_message"),
-    [
-        ("server", "session server failed"),
-        ("sandbox_launch", "docker executable failed"),
-        ("sandbox_nonzero", "sandbox exited with code 17"),
-        ("missing_output", "sandbox did not produce output"),
-        ("malformed_output", "could not read sandbox output"),
-        ("finalization", "finalization failed"),
-    ],
-)
-def test_started_run_failures_write_classified_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure_point: str,
-    expected_message: str,
-) -> None:
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    _pack_value, registry, _commands, _runtime, server = _install_runtime_fakes(
-        monkeypatch,
-        tmp_path,
-        results=results,
-    )
-    original_run = local_generated_validator.subprocess.run
-    if failure_point == "server":
-        server.start.side_effect = RuntimeError("session server failed")
-    elif failure_point == "sandbox_launch":
-        monkeypatch.setattr(
-            local_generated_validator.subprocess,
-            "run",
-            MagicMock(side_effect=OSError("docker executable failed")),
-        )
-    elif failure_point == "sandbox_nonzero":
-        monkeypatch.setattr(
-            local_generated_validator.subprocess,
-            "run",
-            lambda command, **kwargs: SimpleNamespace(returncode=17),
-        )
-    elif failure_point == "missing_output":
-        monkeypatch.setattr(
-            local_generated_validator.subprocess,
-            "run",
-            lambda command, **kwargs: SimpleNamespace(returncode=0),
-        )
-    elif failure_point == "malformed_output":
-
-        def malformed(command: list[str], **kwargs: object) -> object:
-            completed = original_run(command, **kwargs)
-            run_dir = next((tmp_path / "runs").glob("local-*"))
-            (run_dir / "sandbox" / "sandbox_output.jsonl").write_text("not-json\n")
-            return completed
-
-        monkeypatch.setattr(local_generated_validator.subprocess, "run", malformed)
-    else:
-        registry.finalized_results.side_effect = RuntimeError("finalization failed")
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert expected_message in str(caught.value)
-    assert caught.value.classification == (
-        "verifier" if failure_point == "finalization" else "infrastructure"
-    )
-    _failure_summary(caught.value)
-
-
-def test_session_server_construction_failure_writes_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        local_generated_validator,
-        "SessionServer",
-        MagicMock(side_effect=RuntimeError("session server construction failed")),
-    )
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "infrastructure"
-    assert "session server construction failed" in str(caught.value)
-    _failure_summary(caught.value)
-
-
-def test_pack_search_failure_writes_search_classified_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        local_generated_validator,
-        "load_local_pack",
-        MagicMock(
-            side_effect=PackValidationError(
-                "sealed epoch validation failed: search identity mismatch"
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        local_generated_validator,
-        "SessionServer",
-        lambda *_args, **_kwargs: MagicMock(),
-    )
-    sandbox_run = MagicMock()
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", sandbox_run)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path))
-
-    assert caught.value.classification == "search"
-    sandbox_run.assert_not_called()
-    summary = _failure_summary(caught.value)
-    assert summary["aggregate_score"] is None
-
-
-def test_problem_execution_timeout_uses_one_budget_across_worker_batches(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(local_generated_validator, "QUALIFYING_TASKS_PER_FAMILY", 1)
-    results = [
-        _episode(index, family)
-        for index, family in enumerate(_ROSTER)
-    ]
-    pack = _pack(_ROSTER)
-    registry = MagicMock()
-    registry.start.side_effect = [
-        {
-            "session_id": f"session-{index}",
-            "policy_view": {"query": family},
-        }
-        for index, family in enumerate(_ROSTER)
-    ]
-    registry.finalized_results.return_value = results
-
-    def load_pack(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        return pack
-
-    monkeypatch.setattr(local_generated_validator, "load_local_pack", load_pack)
-    monkeypatch.setattr(local_generated_validator, "SessionRuntime", MagicMock)
-    monkeypatch.setattr(
-        local_generated_validator, "SessionServer", lambda *_a, **_k: MagicMock()
-    )
-    monkeypatch.setattr(
-        local_generated_validator, "SessionRegistry", lambda *_a, **_k: registry
-    )
-    calls: list[tuple[list[str], dict[str, object]]] = []
-
-    def time_out(command: list[str], **kwargs: object) -> SimpleNamespace:
-        calls.append((command, kwargs))
-        if command[:2] == ["docker", "run"]:
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(local_generated_validator.subprocess, "run", time_out)
-
-    with pytest.raises(LocalGeneratedValidatorError) as caught:
-        run_local_generated_validator(_config(tmp_path, timeout=10.0))
-
-    sandbox_command, sandbox_kwargs = calls[0]
-    timeout_index = sandbox_command.index("--timeout")
-    assert float(sandbox_command[timeout_index + 1]) == pytest.approx(10.0)
-    assert sandbox_kwargs["timeout"] == pytest.approx(70.0)
-    assert calls[1][0][:3] == ["docker", "rm", "--force"]
-    assert calls[1][1]["timeout"] == 30
-    assert caught.value.classification == "infrastructure"
-    _failure_summary(caught.value)
+    ((command, kwargs),) = sandbox.commands
+    assert "or-test-token" not in " ".join(command)
+    assert kwargs["env"]["INFERENCE_ACCESS_TOKEN"] == "or-test-token"
+    assert any(arg.endswith(":/app/logs:ro") for arg in command)

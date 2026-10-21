@@ -15,17 +15,15 @@ FIXTURES = VIEWER_DIR / "tests" / "fixtures" / "oro-episodes"
 EMBED_TAG = '<script id="oro-episodes" type="application/json">'
 
 
-def _task(task_id: str, family: str, reward: float, outcome: str = "completed") -> dict:
+def _task(task_id: str, score: float, category: str | None = None, flags=()) -> dict:
     return {
         "task_id": task_id,
-        "family": family,
-        "outcome": outcome,
-        "correct": outcome == "completed" and reward > 0,
-        "reward": reward,
-        "error_classification": None if outcome == "completed" else "environment",
-        "error_detail": None
-        if outcome == "completed"
-        else "tool call exceeded 10.000s",
+        "score": score,
+        "category": category,
+        "flags": list(flags),
+        "outcome": "completed",
+        "error_classification": None,
+        "error_detail": None,
     }
 
 
@@ -33,18 +31,14 @@ def _summary() -> dict:
     return {
         "run_id": "local-abc123",
         "pack_sha256": "9e5d11c6" + "0" * 52 + "c73a",
-        "models": {
-            "user_simulator": "mistralai/mistral-small-2603",
-            "judge": "deepseek/deepseek-v4-flash-0731",
-            "solver": "nvidia/nemotron-3-ultra-550b-a55b",
-        },
+        "world_id": "w-fd064ac905a6",
         "tasks": [
-            _task("TF1-intent_decomposition-1", "intent_decomposition", 1.0),
-            _task("TF1-intent_decomposition-2", "intent_decomposition", 0.0),
-            _task("TF2-retrieval_recall-1", "retrieval_recall", 0.5),
-            _task("TF6-recovery-1", "recovery", 0.0, outcome="environment_error"),
+            _task("t-1", 1.0),
+            _task("t-2", 0.0, "request not met"),
+            _task("t-3", 0.44, "not the best option"),
+            _task("t-4", 0.0, "did not finish", ["possible_world_defect"]),
         ],
-        "aggregate_score": 0.375,
+        "aggregate_score": 0.36,
         "pack_task_count": 35,
         "agent_file": "my_agent.py",
         "agent_sha256": "c" * 64,
@@ -65,17 +59,14 @@ def _report(**overrides: object) -> str:
     return local_report.render_console_report(_summary(), **kwargs)
 
 
-def test_console_report_names_run_models_and_versions() -> None:
+def test_console_report_names_run_world_and_versions() -> None:
     report = _report()
     assert "local-abc123" in report
     assert "9e5d11c6" in report
+    assert "world       w-fd064ac905a6" in report
     assert "runtime" in report
     assert "openrouter" in report
     assert "deepseek-ai/DeepSeek-V3.2-TEE" in report
-    assert "mistralai/mistral-small-2603" in report
-    assert "deepseek/deepseek-v4-flash-0731" in report
-    # The generator's solver is not a model the miner's run used.
-    assert "nemotron" not in report
 
 
 def _render(summary: dict) -> str:
@@ -94,25 +85,10 @@ def test_console_report_names_the_sample_and_how_to_repeat_it() -> None:
 
     full = _summary()
     full["pack_task_count"] = len(full["tasks"])
-    full["selection_mode"] = "qualifying_roster"
+    full["selection_mode"] = "all_tasks"
     full["selection_seed"] = None
     report = _render(full)
     assert "problems    all 4" in report
-    assert "--seed" not in report
-
-
-def test_console_report_does_not_call_the_qualifying_roster_a_sample() -> None:
-    # A larger override pack still runs the deterministic qualifying roster; it
-    # has no seed, so calling it "sampled" would be untrue and unreplayable.
-    summary = _summary()
-    summary["pack_task_count"] = 525
-    summary["selection_mode"] = "qualifying_roster"
-    summary["selection_seed"] = None
-
-    report = _render(summary)
-
-    assert "problems    4 of 525, qualifying roster" in report
-    assert "sampled" not in report
     assert "--seed" not in report
 
 
@@ -130,54 +106,14 @@ def test_console_report_names_the_agent_that_ran() -> None:
     assert "agent       my_agent.py  sha256 cccccccccccc…" in report
 
 
-def test_console_report_groups_tasks_by_family_with_means() -> None:
-    report = _report()
-    lines = report.splitlines()
-    intent = next(
-        i for i, line in enumerate(lines) if line.startswith("intent_decomposition")
-    )
-    assert "0.50" in lines[intent] and "1/2" in lines[intent]
-    assert "TF1-intent_decomposition-1" in lines[intent + 1]
-    assert "TF1-intent_decomposition-2" in lines[intent + 2]
-    # A graded reward below 1.0 on a correct verdict still counts as passed.
-    retrieval = next(line for line in lines if line.startswith("retrieval_recall"))
-    assert "0.50" in retrieval and "1/1" in retrieval
-    recovery = next(line for line in lines if line.startswith("recovery"))
-    assert "0.00" in recovery and "0/1" in recovery
-    assert "environment: tool call exceeded 10.000s" in report
-    assert "Aggregate score  0.375000" in report
-    assert (
-        report.index("intent_decomposition")
-        < report.index("retrieval_recall")
-        < report.index("recovery")
-    )
-
-
-def test_console_report_names_each_failure_category() -> None:
-    summary = _summary()
-    task = _task("TF8-composed-1", "composed", 0.0)
-    task["failure"] = {
-        "primary": "needs_not_found",
-        "categories": ["needs_not_found", "process_issue"],
-    }
-    summary["tasks"] = [task, _task("TF8-composed-2", "composed", 1.0)]
-    failed, passed = (line for line in _render(summary).splitlines() if "TF8-composed-" in line)
-    assert failed.endswith("0.00  needs_not_found (needs_not_found, process_issue)")
-    assert passed.endswith("1.00")
-
-
-def test_console_report_keeps_a_gap_after_a_long_family_name() -> None:
-    summary = _summary()
-    summary["tasks"] = [_task("t1", "intent_decomposition", 1.0)]
-    report = local_report.render_console_report(
-        summary,
-        artifact_dir=Path("/x"),
-        report_path=None,
-        provider="openrouter",
-        agent_model="m",
-        color=False,
-    )
-    assert "intent_decomposition    mean 1.00  1/1 passed" in report
+def test_console_report_groups_tasks_by_category() -> None:
+    lines = _report().splitlines()
+    header = {line.split("  ")[0]: i for i, line in enumerate(lines) if "task(s)" in line}
+    assert list(header) == ["correct", "did not finish", "not the best option", "request not met"]
+    assert lines[header["correct"] + 1].split() == ["t-1", "1.00"]
+    assert lines[header["not the best option"] + 1].split() == ["t-3", "0.44"]
+    assert lines[header["did not finish"] + 1].endswith("0.00  possible_world_defect")
+    assert "Aggregate score  0.360000" in _report()
 
 
 def test_console_report_shows_host_paths_when_run_under_compose(monkeypatch) -> None:
@@ -195,8 +131,9 @@ def test_console_report_shows_host_paths_when_run_under_compose(monkeypatch) -> 
 def test_console_report_colour_is_opt_in() -> None:
     assert "\x1b[" not in _report(color=False)
     coloured = _report(color=True)
-    assert "\x1b[32m" in coloured  # a full-reward task
-    assert "\x1b[31m" in coloured  # a zero-reward task
+    assert "\x1b[32m" in coloured  # a full score
+    assert "\x1b[33m" in coloured  # partial credit
+    assert "\x1b[31m" in coloured  # a zero score
 
 
 def test_console_report_omits_report_line_when_report_was_not_written() -> None:
