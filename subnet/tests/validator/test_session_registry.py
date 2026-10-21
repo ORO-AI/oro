@@ -189,6 +189,23 @@ def test_a_runtime_failure_quarantines_the_session_without_a_verdict(registry, m
     assert "worker died" not in json.dumps(record)
 
 
+def test_deeply_nested_arguments_are_an_invalid_step_not_a_voided_episode(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    deep: object = "x"
+    for _ in range(950):  # parses as JSON, but would overflow the runtime's recursive check
+        deep = {"q": deep}
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "find", "args": deep}})
+    buy = registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "invalid_arguments" and result["finished"] is False
+    assert buy["finished"] is True
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    action = next(r for r in record["ledger"]["episode"] if r["kind"] == "action")
+    assert action["args"] == session_registry.TOO_DEEP
+
+
 def test_an_exhausted_inference_key_stops_calls(registry) -> None:
     sid = registry.start("t1")["session_id"]
     registry.key_exhausted.set()

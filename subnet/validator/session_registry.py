@@ -40,6 +40,21 @@ VALIDATOR_CALLER_SECRET = secrets.token_urlsafe(32)
 DEFAULT_SEARCH_SERVER_URL = "http://search-server:5632"
 # One envelope may carry several tool calls; each runs as its own step.
 MAX_ACTIONS_PER_CALL = 16
+# Arguments nested deeper than this would overflow recursive JSON handling in the
+# runtime and void the episode; they run as a non-object, an invalid-arguments step.
+MAX_ARG_DEPTH = 32
+TOO_DEEP = "arguments nested too deeply"
+
+
+def _too_deep(value: object) -> bool:
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (dict, list)):
+            if depth > MAX_ARG_DEPTH:
+                return True
+            stack.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return False
 
 
 class InferenceProviderError(RuntimeError):
@@ -274,7 +289,10 @@ class SessionRegistry:
         for item in actions:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
                 raise ValueError("each action must be an object with a string name")
-        return [{"name": item["name"], "args": item.get("args", {})} for item in actions]
+        return [
+            {"name": item["name"], "args": TOO_DEEP if _too_deep(args := item.get("args", {})) else args}
+            for item in actions
+        ]
 
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
         """Run (or replay) one envelope; grouped actions run as consecutive steps."""
