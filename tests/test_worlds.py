@@ -110,9 +110,16 @@ def test_default_and_custom_bm25(store, tmp_path):
     assert store.get(wid2).searcher.bm25 == (0.9, 0.4)
 
 
+def test_zero_bm25_weights_rank_by_term_rarity_alone(store):
+    # Worlds that sort by query-word overlap draw k1 = b = 0; Lucene accepts any finite k1 >= 0.
+    wid, body = world()
+    store.install(wid, {"bm25": {"k1": 0.0, "b": 0.0}}, io.BytesIO(body))
+    assert store.get(wid).searcher.bm25 == (0.0, 0.0)
+
+
 @pytest.mark.parametrize(
     "bm25",
-    [{"k1": "1"}, {"k1": 0}, {"k1": 10.5}, {"k1": float("nan")}, {"k1": float("inf")},
+    [{"k1": "1"}, {"k1": -0.1}, {"k1": 10.5}, {"k1": float("nan")}, {"k1": float("inf")},
      {"b": -0.1}, {"b": 1.1}, {"b": True}, {"k1": False}, 5, [1]],
 )  # fmt: skip
 def test_bad_bm25_settings(store, bm25):

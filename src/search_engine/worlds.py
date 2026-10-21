@@ -165,14 +165,14 @@ def _close(world: World) -> None:
 
 
 def _bm25(settings: dict) -> tuple[float, float]:
-    """The (k1, b) weights of ``settings``: k1 in (0, 10], b in [0, 1]."""
+    """The (k1, b) weights of ``settings``: k1 in [0, 10] (Lucene takes any finite k1 >= 0), b in [0, 1]."""
     weights = settings.get("bm25") or {}
     if not isinstance(weights, dict):
         raise ValueError("bad bm25 settings")
     k1, b = (BM25 | weights)["k1"], (BM25 | weights)["b"]
     if not all(
         isinstance(x, (int, float)) and not isinstance(x, bool) for x in (k1, b)
-    ) or not (0 < k1 <= 10 and 0 <= b <= 1):  # also rejects NaN and infinities
+    ) or not (0 <= k1 <= 10 and 0 <= b <= 1):  # also rejects NaN and infinities
         raise ValueError("bad bm25 settings")
     return float(k1), float(b)
 
