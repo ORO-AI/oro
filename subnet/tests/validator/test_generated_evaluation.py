@@ -28,6 +28,9 @@ from validator.generated_evaluation import (
 )
 from validator.main import Validator
 
+REAL_FETCH_PACK = env_pack_loader.fetch_and_validate_pack
+REAL_FETCH_RACE_PACK = env_pack_loader.fetch_and_validate_race_pack
+
 NONCES = {"t1": "nonce-1", "t2": "nonce-2"}
 
 
@@ -320,6 +323,33 @@ def test_race_claim_loads_the_race_delivery(tmp_path, delivery_fetch) -> None:
     registry.close()
 
     assert delivery_fetch.calls == [("race", "00000000-0000-0000-0000-000000000001", "qual-1")]
+
+
+@pytest.mark.parametrize("race_id", [None, "00000000-0000-0000-0000-000000000001"])
+def test_claims_reach_the_real_fetch_signatures(tmp_path, delivery_fetch, monkeypatch, race_id) -> None:
+    """The public fetch functions run as written; only the backend download is stubbed."""
+
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_pack", REAL_FETCH_PACK)
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_race_pack", REAL_FETCH_RACE_PACK)
+    archive = archive_pack(
+        build_world_pack(tmp_path / "real-world", delivery_id="qual-1", delivery_kind="qualifying"),
+        tmp_path / "real.tar.gz",
+    )
+    seen = []
+
+    async def fetch_delivery(label, binding, fetch, backend_url, keypair, *, expected_delivery_id, **kwargs):
+        seen.append((label, binding, backend_url))
+        return env_pack_loader.load_delivery(archive, expected_delivery_id=expected_delivery_id, cache_root=tmp_path / "c")
+
+    monkeypatch.setattr(env_pack_loader, "_fetch_delivery", fetch_delivery)
+    validator = _validator(tmp_path)
+
+    registry, *_ = validator._create_environment_sessions(_work(race_id=race_id), inference_access_token="token")
+    registry.close()
+
+    [(label, binding, backend_url)] = seen
+    assert binding["pack_sha256"] == "a" * 64 and backend_url == validator.config.backend_url
+    assert binding.get("race_id") == race_id
 
 
 @pytest.mark.parametrize(

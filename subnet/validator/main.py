@@ -1026,7 +1026,11 @@ class Validator:
         if race_id is not None:
             loaded = asyncio.run(
                 env_pack_loader.fetch_and_validate_race_pack(
-                    race_id, self.config.backend_url, self.wallet.hotkey, **fetch_kwargs
+                    race_id,
+                    pack_sha256,
+                    self.config.backend_url,
+                    self.wallet.hotkey,
+                    **fetch_kwargs,
                 )
             )
         else:
