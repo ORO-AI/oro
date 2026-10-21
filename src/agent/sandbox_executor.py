@@ -245,8 +245,9 @@ def open_regular_file(
     cannot create links itself; on agent-written output it would let one extra
     link block every read.
     """
+    parent_path = os.path.realpath(os.path.dirname(path) or ".")
     parent_fd = os.open(
-        os.path.dirname(path) or ".", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     )
     try:
         fd = os.open(

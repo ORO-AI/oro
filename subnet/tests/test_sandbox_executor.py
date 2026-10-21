@@ -335,11 +335,27 @@ def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
 def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
     path = tmp_path / "output.jsonl"
     path.mkdir()
-    before = len(os.listdir("/proc/self/fd"))
+    fd_dir = "/proc/self/fd" if os.path.exists("/proc/self/fd") else "/dev/fd"
+    before = len(os.listdir(fd_dir))
     for _ in range(20):
         with pytest.raises((OSError, ValueError)):
             read_regular_file(path, max_bytes=1024)
-    assert len(os.listdir("/proc/self/fd")) == before
+    assert len(os.listdir(fd_dir)) == before
+
+
+def test_open_regular_file_supports_symlinked_parent_directory(tmp_path):
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    sym_dir = tmp_path / "sym"
+    sym_dir.symlink_to(real_dir)
+    file_path = sym_dir / "output.jsonl"
+    file_path.write_bytes(b"content")
+    assert read_regular_file(file_path, max_bytes=1024) == b"content"
+
+    sym_file = sym_dir / "sym_output.jsonl"
+    sym_file.symlink_to(file_path)
+    with pytest.raises((OSError, ValueError)):
+        read_regular_file(sym_file, max_bytes=1024)
 
 
 def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monkeypatch):
