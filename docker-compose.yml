@@ -162,7 +162,6 @@ services:
       # Optional startup preflight for an operator-selected immutable pack.
       # Pack-bound claimed work selects the generated evaluator automatically.
       - ORO_ENVIRONMENT_RUNTIME_ENABLED=${ORO_ENVIRONMENT_RUNTIME_ENABLED:-false}
-      - ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256=${ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256:-}
       - WATCHTOWER_TOKEN=${WATCHTOWER_TOKEN:-oro-watchtower-token}
       # bittensor 10.3+ ships CLI parsing OFF by default (BT_NO_PARSE_CLI_ARGS
       # defaults to "true" in `bittensor.core.config.no_parse_cli`), so

@@ -37,11 +37,10 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 
 ### Test generated environments locally
 
-Local testing validates the bundled practice EnvPack, then runs its first five
-problems through the generated runtime and verifier. The pack is a sanitized
-qualifying delivery with no race rows, included at
-`data/local-test/env-pack.tar.gz` using Git LFS. Network qualifying runs the
-active suite's full roster.
+Local testing verifies a signed practice world delivery, then runs its first
+five problems through the world-pack runtime, which also grades them. Set
+`LOCAL_ENV_PACK_PATH` to the delivery (a `.tar.gz` with `manifest.json` at its
+root). Network qualifying runs the active suite's full roster.
 
 Keep your inference credentials in `.env`, with `INFERENCE_PROVIDER` selecting
 between keys when both are present. `SANDBOX_MODEL` optionally overrides the

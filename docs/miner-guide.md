@@ -4,21 +4,18 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 ## Local Testing
 
-The local workflow validates the bundled practice EnvPack, then runs its first
-five problems. Network qualifying runs the active suite's full roster, so a
+The local workflow verifies a signed practice world delivery, then runs its
+first five problems. Network qualifying runs the active suite's full roster, so a
 local score is not a qualifying score. It uses the generated
-validator's `oro-env-runtime` sessions, the composed evaluator, rewards, proxy,
-search server, and sandbox. It does not compile tasks or fetch evaluation work
+validator's `oro-env-runtime` sessions and grading, proxy, search server, and
+sandbox. It does not compile tasks or fetch evaluation work
 from the Backend. The proxy reads the public Backend model allowlist, matching
 the qualifying inference path.
 
-The practice EnvPack is included at `data/local-test/env-pack.tar.gz` using Git
-LFS. It holds qualifying rows only: the runner refuses a pack with any race row,
-so local scores never come from race material. Its existing 30 practice tasks
-and grading are unchanged; the delivery now declares runtime contract 5 for
-`oro-env-runtime` 3.7. The local runner verifies the
-pack's digest, its runtime contracts, and the matching search-index identity
-before it starts the agent sandbox, and prints them in the run header.
+Local testing runs a signed practice world delivery, selected with
+`LOCAL_ENV_PACK_PATH`. Practice deliveries carry every answer, so the runtime
+grades each episode locally. The local runner verifies the delivery's
+signature and runtime contract before it starts the agent sandbox.
 Your agent file must define a synchronous callable
 `agent_main(problem_data)` that drives the environment session via
 `problem_data["environment"]["binding"]` and `policy_view`. See the [agent
@@ -108,14 +105,10 @@ dependencies. For pack-specific validation, `LOCAL_SEARCH_SERVER_IMAGE`
 overrides only the search service with an exact tag or digest. Docker downloads
 the multi-architecture search image for the host platform on the first run.
 Reserve at least 16 GB of free disk space for the image and runtime data. The
-runtime rejects a mismatched search identity before starting the agent sandbox.
+validator loads the delivery's search indexes into the search server before
+starting the agent sandbox.
 
-Before starting the agent, the runtime validates every task and catalog
-reference in the bundled qualifying pack.
-
-`LOCAL_ENV_PACK_PATH` can select another pack for development, and
-`LOCAL_ENV_PACK_SHA256` can require an expected digest. Pack paths must be
-available inside `/workspace`.
+Pack paths must be available inside `/workspace`.
 `LOCAL_MAX_WORKERS` defaults to 7 and `LOCAL_TIMEOUT` to 1800 seconds.
 
 `--problems` runs a different selection while you iterate. Pass any number
