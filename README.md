@@ -40,8 +40,8 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 Local testing verifies a signed practice world delivery, then runs all its
 tasks through the network's runtime, which also grades them. Set
 `LOCAL_ENV_PACK_PATH` to the delivery (a `.tar.gz` with `manifest.json` at its
-root, inside the checkout). Practice worlds use one fixed configuration that
-race worlds never share, so a local score does not predict a race score.
+root, inside the checkout). Practice worlds are compiled separately from race
+worlds, so a local score does not predict a race score.
 
 Set `OPENROUTER_API_KEY` in `.env`. `SANDBOX_MODEL` optionally overrides the
 included reference agent. Custom agents may use any models permitted by the

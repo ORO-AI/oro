@@ -6,10 +6,8 @@ For the full miner documentation — prerequisites, agent interface, submission,
 
 Each race runs on its own world, compiled fresh for that race: a product
 catalog, the world's tools and that race's tasks. Only the agent contract stays
-fixed; anything else can differ from one world to the next, for example the
-tools and how they behave, the wording, how the catalog is presented, the
-procedure a request asks for, the budgets and what changes during a task. None
-of a race world is published before the race.
+fixed; anything else can differ from one world to the next, including the
+tools. None of a race world is published before the race.
 
 Each task is one shopper's request. Your agent reads the world's tools from
 `problem_data["environment"]["policy_view"]["tools"]`, makes one tool call per
@@ -20,8 +18,8 @@ things can change while the agent works.
 
 Each task scores **1** only if the finish is fully correct and within the
 world's stated budgets: every stated and hidden requirement met, the cheapest
-or best choice where the request asks for it, and the stated procedure
-followed, including how to decline. Anything else scores **0**. There is no
+or best choice where the request asks for it, and any procedure the request
+states followed, including a rule for declining. Anything else scores **0**. There is no
 partial credit and no deduction for cost. See [how a task is
 graded](https://docs.oroagents.com/docs/oro-bench#how-a-task-is-graded) and
 [scoring](https://docs.oroagents.com/docs/miners/scoring).
@@ -41,7 +39,8 @@ observation, the world's `tools` in OpenAI function format, `max_steps` and
 `step` starts at 1 and goes up by one with each call. The response is
 `{"observation", "finished", "step", "replayed"}`; continue until `finished` is
 true. Every call uses a step, including one to an unknown tool, with invalid
-arguments or over a stated budget; those return an error observation. See the
+arguments or over a stated budget; those return an error observation and don't
+run, so keep room in the budgets for the finish. See the
 [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface)
 for the full contract. `src/agent/environment_agent.py` is the reference.
 
@@ -53,8 +52,9 @@ answer included, so the runtime grades each episode locally. The runner refuses
 any delivery that is not a practice world. By default it runs every task in the
 world.
 
-Practice worlds, like the qualifying world, use one fixed configuration that
-race worlds never share. They check your agent's protocol handling and general
+Practice worlds, like the qualifying world, are compiled separately from race
+worlds, and race worlds include situations, tools and rules no public world
+shows. They check your agent's protocol handling and general
 behaviour, not how it will do on a race world. **A local score does not predict
 a race score.** Don't tune an agent to a practice world's tools, wording or
 catalog.
@@ -139,13 +139,13 @@ The failure categories:
 | request not met | The finish doesn't meet the request: an order misses a stated requirement, or the agent ordered when it should have declined, or declined when it should have ordered. |
 | needs not found | The order misses something the shopper held back and would have told the agent if asked. |
 | changes missed | The finish fit the task as it was earlier, but not after a change during the task. |
-| process requirement missed | The finish was otherwise right, but the agent didn't follow the procedure the request states, including how to decline. |
+| process requirement missed | The finish was otherwise right, but the agent didn't follow a procedure the request states, including a rule for declining. |
 | not the best option | The order met every requirement, but the request asked for the cheapest or the best and a better acceptable option was available. |
 
 On the network, each episode that scores 0 shows one of these categories, never
-the individual checks. A fault in the world or the evaluation infrastructure is
-not scored: the episode is run again, and it is never charged to the agent as a
-result.
+the individual checks. A fault in the world or the evaluation infrastructure
+during an episode is not scored: the episode is run again, and a fault that
+persists makes the run an infrastructure failure that is evaluated again.
 
 Open `trajectories.html` in any browser to step through every episode: the
 request, your agent's tool calls, the observations, the shopper's replies, the
