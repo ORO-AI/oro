@@ -196,3 +196,28 @@ test("agents cannot use the reader models, and readers never reach decisions or 
   assert.equal(r.status, 200);
   assert.equal(JSON.parse(calls.at(-1).options.body).provider, undefined);
 });
+
+test("agent requests lose OpenRouter server-side tools; validator requests keep them", () => {
+  const fn = { type: "function", function: { name: "lookup", parameters: { type: "object" } } };
+  const search = { type: "openrouter:web_search" };
+  const fields = {
+    plugins: [{ id: "web" }], web_search_options: { search_context_size: "high" }, tools: [fn, search],
+  };
+  for (const provider of ["openrouter", "chutes"]) {
+    const model = provider === "openrouter" ? openrouterId : chutesId;
+    const catalogs = { [provider]: { models: [model], aliases: {} } };
+    for (const [caller, tools] of [[undefined, [fn]], ["agent", [fn]], ["validator", [fn, search]]]) {
+      shared.clear();
+      const { r, calls } = request(model, provider, catalogs, {}, undefined, caller, fields);
+      assert.equal(r.status, 200);
+      const forwarded = JSON.parse(calls.at(-1).options.body);
+      const kept = caller === "validator";
+      assert.equal("plugins" in forwarded, kept);
+      assert.equal("web_search_options" in forwarded, kept);
+      assert.deepEqual(forwarded.tools, tools);
+    }
+    shared.clear();
+    const { calls } = request(model, provider, catalogs, {}, undefined, undefined, { tools: [search] });
+    assert.equal("tools" in JSON.parse(calls.at(-1).options.body), false);
+  }
+});

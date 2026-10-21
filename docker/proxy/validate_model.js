@@ -297,6 +297,30 @@ function _validatedRequest(r) {
       stripped.push(f);
     }
   });
+  // OpenRouter server-side tools (web search plugins, `openrouter:*` tools) run outside the
+  // validated model and bill the run; agents get only their own function tools.
+  if (r._oroCaller !== "validator") {
+    ["plugins", "web_search_options"].forEach(function (f) {
+      if (parsed[f] !== undefined) {
+        delete parsed[f];
+        stripped.push(f);
+      }
+    });
+    if (Array.isArray(parsed.tools)) {
+      var tools = parsed.tools.filter(function (tool) {
+        return !(tool && typeof tool.type === "string" && tool.type.indexOf("openrouter:") === 0);
+      });
+      if (tools.length !== parsed.tools.length) {
+        stripped.push("tools:openrouter");
+        if (tools.length > 0) {
+          parsed.tools = tools;
+        } else {
+          delete parsed.tools;
+          delete parsed.tool_choice;
+        }
+      }
+    }
+  }
   if (stripped.length > 0) {
     r.error("stripped inference routing fields: " + stripped.join(","));
   }
