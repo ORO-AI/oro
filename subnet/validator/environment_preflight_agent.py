@@ -8,45 +8,29 @@ from typing import Any
 import requests
 
 
-POLICY_PROTOCOL_VERSION = "oro.environment_preflight_policy.v1"
-
-
 def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Execute validator-supplied actions through the sandbox's public proxy."""
+    """Execute validator-supplied actions, one environment step each, through the sandbox's proxy."""
 
     environment = problem_data["environment"]
     binding = environment["binding"]
+    actions = environment["actions"]
     proxy_url = os.environ.get("SANDBOX_PROXY_URL", "http://proxy:80").rstrip("/")
     dialogue: list[dict[str, Any]] = []
-    problem_id = str(problem_data["problem_id"])
 
-    for turn, actions in enumerate(environment["action_groups"], start=1):
-        group_id = f"{problem_id}-{turn}"
+    for step, action in enumerate(actions, start=1):
         response = requests.post(
             f"{proxy_url}/environment/call",
-            json={
-                **binding,
-                "call_id": group_id,
-                "idempotency_key": group_id,
-                "turn": turn,
-                "calls": [
-                    {
-                        "call_id": f"{group_id}-{index}",
-                        "action": action,
-                    }
-                    for index, action in enumerate(actions, start=1)
-                ],
-            },
+            json={**binding, "step": step, "action": action},
             timeout=70,
         )
         response.raise_for_status()
         result = response.json()
-        if turn == 1 and not result.get("user_message", {}).get("content"):
-            raise RuntimeError("environment preflight did not receive a shopper reply")
+        if bool(result["finished"]) != (step == len(actions)):
+            raise RuntimeError(f"environment preflight step {step} finished={result['finished']}")
         dialogue.append(
             {
                 "role": "assistant",
-                "content": f"completed environment preflight turn {turn}",
+                "content": f"completed environment preflight step {step}",
                 "environment_result": result,
             }
         )
@@ -54,4 +38,4 @@ def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
     return dialogue
 
 
-__all__ = ["POLICY_PROTOCOL_VERSION", "agent_main"]
+__all__ = ["agent_main"]

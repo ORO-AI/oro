@@ -1,25 +1,15 @@
-"""Emit and replay complete episode results.
+"""Emit and replay complete world-pack episode results.
 
-Ships a terminated ``TaskSession`` through the Backend's episode-result
-receiver (``POST /v1/validator/episode-results``). The
-validator holds the truth end-to-end: session termination produces a
-verdict + trace + ledger, orchestration uploads one content-addressed
-artifact through a Backend-issued URL, then posts the existing searchable
-``EpisodeResultEntry`` summary. Replay verifies the stored artifact's hash,
-terminal state, and deterministic verdict offline.
+Ships the terminal records of ``SessionRegistry.terminal_results()`` through
+the Backend's episode-result receiver (``POST /v1/validator/episode-results``):
+orchestration uploads one content-addressed artifact (the runtime ledger,
+verdict and call trace) through a Backend-issued URL, then posts the
+searchable ``EpisodeResultEntry`` summary carrying the verdict's score,
+category, flags, canonical digests and the claim's episode nonce.
 
-The emitter is intentionally **standalone**:
-
-- Takes the dict output of ``SessionRegistry.finalized_results()``
-  rather than importing the registry — session termination wiring
-  belongs to the orchestration layer, not the transport layer.
-- Uses the published SDK for Backend request/response models and signing.
-  Content-addressed object-store uploads use a separate unsigned client.
-
-Payload shape must match ``EpisodeResultEntry`` in
-``ORO-AI/Backend:app/models/schemas/env_pack.py``. See constants below
-for the outcome taxonomy — Backend's Literal ``_OUTCOME_LITERAL`` is
-the source of truth.
+Replay re-grades a recorded ledger with the runtime's public
+``grade_episode`` and a reader that serves the ledger's recorded grading
+readings in order, so it never queries a model or the search server.
 """
 
 from __future__ import annotations
@@ -31,16 +21,16 @@ import json
 import logging
 import re
 from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 import httpx
-from oro_env_runtime.schema import LedgerEntry, TaskSpec, VerifierResult
-from oro_env_runtime.verify import verify
+from oro_env_runtime import canonical
+from oro_env_runtime.pack import Pack
+from oro_env_runtime.session import grade_episode
 from oro_sdk import Client
 from oro_sdk.api.validator import presign_episode_artifact, submit_episode_results
 from oro_sdk.models.episode_artifact_presign_request import (
@@ -74,16 +64,12 @@ _URL = re.compile(r"https?://[^\s\"'<>]+")
 logger = logging.getLogger(__name__)
 
 
-# Backend requires terminal_state_hash for these outcomes (state exists).
-# `_OUTCOMES_WITH_STATE` at Backend/app/models/schemas/env_pack.py:273.
-# MVP emits only `completed | environment_error | verifier_error` —
-# widening to `partial | leakage | exploit` is additive when the
-# verifier + admission gates start surfacing those signals.
-_OUTCOMES_WITH_STATE = frozenset({"completed", "partial", "leakage", "exploit"})
-
-
 class EpisodeEmitError(RuntimeError):
     """Episode artifact or summary emission failed."""
+
+
+class ReplayMismatch(RuntimeError):
+    """A recorded reading is missing, unused or different from the replayed request."""
 
 
 async def _request(
@@ -228,21 +214,36 @@ def load_inference_transcripts(
     return transcripts
 
 
-def build_episode_artifact(
-    result: dict[str, Any], *, inference_transcript: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Wrap existing runtime snapshots without inventing a parallel trace model."""
+def episode_artifact(record: dict[str, Any]) -> dict[str, Any]:
+    """The replayable core of a terminal record: ledger, verdict and call trace."""
 
-    if not isinstance(result.get("bootstrap"), dict):
-        raise EpisodeEmitError("finalized result is missing session bootstrap")
-    if not isinstance(result.get("call_trace"), list):
-        raise EpisodeEmitError("finalized result is missing ordered call trace")
-    if not isinstance(result.get("ledger"), list):
-        raise EpisodeEmitError("finalized result is missing environment ledger")
-    artifact = {
-        "schema_version": EPISODE_ARTIFACT_SCHEMA_VERSION,
-        "episode": result,
+    for key, kind in (("ledger", dict), ("verdict", dict), ("call_trace", list)):
+        if not isinstance(record.get(key), kind):
+            raise EpisodeEmitError(f"terminal result is missing its {key}")
+    return {key: record[key] for key in ("ledger", "verdict", "call_trace")}
+
+
+def build_episode_artifact(
+    record: dict[str, Any],
+    *,
+    eval_run_id: str,
+    family: str,
+    env_pack_sha256: str,
+    inference_transcript: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Wrap a terminal record with the identity the Backend checks on read."""
+
+    episode = {
+        "evaluation_run_id": eval_run_id,
+        "task_id": record["task_id"],
+        "family": family,
+        "pack_sha256": env_pack_sha256,
+        "session_id": record.get("session_id"),
+        "episode_nonce": record.get("episode_nonce"),
+        "steps": record.get("steps"),
+        **episode_artifact(record),
     }
+    artifact = {"schema_version": EPISODE_ARTIFACT_SCHEMA_VERSION, "episode": episode}
     if inference_transcript is not None:
         artifact["inference_transcript"] = inference_transcript
     return artifact
@@ -287,106 +288,40 @@ def load_episode_artifact(
 
 
 # ---------------------------------------------------------------------------
-# verdict() -> EpisodeResultEntry payload
+# Terminal record -> EpisodeResultEntry payload
 # ---------------------------------------------------------------------------
 
 
-def _classify_outcome(verdict: dict[str, Any]) -> str:
-    """Prefer the finalized outcome, retaining legacy verdict compatibility."""
-    explicit = verdict.get("outcome")
-    if explicit in {
-        "completed",
-        "partial",
-        "agent_error",
-        "environment_error",
-        "verifier_error",
-        "leakage",
-        "exploit",
-    }:
-        return str(explicit)
-    if verdict.get("environment_error"):
-        return "environment_error"
-    if verdict.get("verifier_error"):
-        return "verifier_error"
-    return "completed"
+def episode_payload(record: dict[str, Any], *, delivery_id: str) -> dict[str, Any]:
+    """The verdict fields of an ``EpisodeResultEntry`` for one terminal record.
 
-
-def build_episode_payload(
-    verdict: dict[str, Any],
-    *,
-    eval_run_id: str,
-    env_pack_sha256: str,
-    ledger_uri: str | None,
-) -> dict[str, Any]:
-    """Map ``SessionRegistry.verdict()`` output to an ``EpisodeResultEntry``.
-
-    ``env_pack_sha256`` comes from the claim response (frozen
-    at work-item creation), NOT from ``verdict['pack_sha256']``. The two
-    should agree, but the frozen claim binding is authoritative — the
-    pack the session loaded is verified by the pack loader
-    against the claim binding separately.
-
-    Reward vs telemetry split — Backend rejects a paid reward attached
-    to a failed hard gate as a cheating attempt:
-
-    - ``aggregate_reward`` is the on-chain payment. Populated ONLY when
-      ``verdict_correct=True``.
-    - ``reward_components`` is the full ``reward_record`` telemetry; it
-      never influences the on-chain payment.
-
-    Enforces two Backend invariants at the emitter boundary so a bad
-    verdict fails fast with a specific error instead of coming back as
-    a per-item 422:
-
-    - ``terminal_state_hash`` is set iff the outcome is in
-      ``_OUTCOMES_WITH_STATE`` (else Backend rejects).
-    - Required verdict fields (``task_id``, ``family``) must be present;
-      absence bubbles as ``EpisodeEmitError`` rather than a bare KeyError.
+    Fails fast when the record is not bound to the claimed delivery, its
+    nonce differs from the ledger's, or the verdict does not hash the ledger.
     """
-    try:
-        task_id = str(verdict["task_id"])
-        family = str(verdict["family"])
-    except KeyError as exc:
-        raise EpisodeEmitError(
-            f"verdict missing required field {exc.args[0]!r} (run={eval_run_id})"
-        ) from exc
 
-    outcome = _classify_outcome(verdict)
-    verifier_result = verdict.get("verdict") or {}
-    verdict_correct = bool(verifier_result.get("correct"))
-
-    paid_reward = verifier_result.get("paid_reward")
-    if verdict_correct and paid_reward is not None:
-        # Serialize through Decimal to keep the string exact (Backend
-        # accepts str/Decimal, 6 decimal places max).
-        aggregate_reward: str | None = format(Decimal(str(paid_reward)), "f")
-    else:
-        aggregate_reward = None
-
-    terminal_state_hash = verdict.get("terminal_state_hash")
-    if outcome in _OUTCOMES_WITH_STATE:
-        if not terminal_state_hash:
-            raise EpisodeEmitError(
-                f"outcome={outcome} requires terminal_state_hash but verdict "
-                f"provided none (run={eval_run_id}, task={task_id})"
-            )
-    else:
-        terminal_state_hash = None
-
+    core = episode_artifact(record)
+    ledger, verdict = core["ledger"], core["verdict"]
+    episode = ledger.get("episode") or []
+    header = episode[0] if episode and isinstance(episode[0], dict) else {}
+    task_id = str(record.get("task_id"))
+    if header.get("kind") != "open" or header.get("task_id") != task_id:
+        raise EpisodeEmitError(f"ledger does not open task {task_id}")
+    if (header.get("delivery") or {}).get("id") != delivery_id:
+        raise EpisodeEmitError(f"task {task_id} ran outside delivery {delivery_id}")
+    if header.get("episode_nonce") != record.get("episode_nonce"):
+        raise EpisodeEmitError(f"task {task_id} ran with another episode nonce")
+    ledger_sha256 = canonical.digest(episode)
+    if verdict.get("ledger_sha256") != ledger_sha256 or verdict.get("task_id") != task_id:
+        raise EpisodeEmitError(f"verdict for task {task_id} does not grade its ledger")
     return {
-        "eval_run_id": eval_run_id,
-        "env_pack_sha256": env_pack_sha256,
         "task_id": task_id,
-        "family": family,
-        "outcome": outcome,
-        "verdict_correct": verdict_correct,
-        "verdict_checks": dict(verifier_result.get("checks") or {}),
-        "reward_components": dict(verifier_result.get("reward_record") or {}),
-        "aggregate_reward": aggregate_reward,
-        "wall_seconds": verdict.get("wall_seconds"),
-        "terminal_state_hash": terminal_state_hash,
-        "ledger_uri": ledger_uri,
-        "step_count": int(verdict.get("step_count") or 0),
+        # Backend accepts at most six decimal places.
+        "score": format(Decimal(repr(float(verdict["score"]))).quantize(Decimal("0.000001")), "f"),
+        "category": verdict["category"],
+        "flags": list(verdict["flags"]),
+        "ledger_sha256": ledger_sha256,
+        "verdict_sha256": canonical.digest(verdict),
+        "episode_nonce": record["episode_nonce"],
     }
 
 
@@ -394,22 +329,17 @@ async def upload_episode_artifact(
     client: httpx.AsyncClient,
     *,
     backend: Client,
-    result: dict[str, Any],
-    inference_transcript: dict[str, Any] | None = None,
+    artifact: dict[str, Any],
     download_url_rewriter: Callable[[str], str] | None = None,
 ) -> str:
     """Presign and upload one content-addressed episode artifact."""
 
-    artifact = build_episode_artifact(
-        result,
-        inference_transcript=inference_transcript,
-    )
     body = serialize_episode_artifact(artifact)
     artifact_sha256 = episode_artifact_sha256(body)
     request = EpisodeArtifactPresignRequest.from_dict(
         {
-            "eval_run_id": result.get("evaluation_run_id"),
-            "env_pack_sha256": result.get("pack_sha256"),
+            "eval_run_id": artifact["episode"]["evaluation_run_id"],
+            "env_pack_sha256": artifact["episode"]["pack_sha256"],
             "artifact_sha256": artifact_sha256,
             "content_length": len(body),
         }
@@ -503,6 +433,9 @@ async def emit_finalized_results(
     backend_url: str,
     validator_keypair: Any,
     env_pack_sha256: str,
+    eval_run_id: str,
+    delivery_id: str,
+    task_families: Mapping[str, str],
     results: list[dict[str, Any]],
     inference_transcripts: dict[str, dict[str, Any]] | None = None,
     download_url_rewriter: Callable[[str], str] | None = None,
@@ -520,26 +453,40 @@ async def emit_finalized_results(
             backend_url, validator_keypair, transport=backend_transport
         ) as backend:
             payloads = []
-            for result in results:
+            for record in results:
+                payload = episode_payload(record, delivery_id=delivery_id)
+                family = task_families.get(payload["task_id"])
+                if family is None:
+                    raise EpisodeEmitError(f"task {payload['task_id']} is not on the run roster")
                 transcript = (
-                    inference_transcripts.get(str(result.get("session_id")))
+                    inference_transcripts.get(str(record.get("session_id")))
                     if inference_transcripts is not None
                     else None
                 )
                 artifact_uri = await upload_episode_artifact(
                     client,
                     backend=backend,
-                    result=result,
-                    inference_transcript=transcript,
+                    artifact=build_episode_artifact(
+                        record,
+                        eval_run_id=eval_run_id,
+                        family=family,
+                        env_pack_sha256=env_pack_sha256,
+                        inference_transcript=transcript,
+                    ),
                     download_url_rewriter=download_url_rewriter,
                 )
                 payloads.append(
-                    build_episode_payload(
-                        result,
-                        eval_run_id=str(result["evaluation_run_id"]),
-                        env_pack_sha256=env_pack_sha256,
-                        ledger_uri=artifact_uri,
-                    )
+                    {
+                        "eval_run_id": eval_run_id,
+                        "env_pack_sha256": env_pack_sha256,
+                        "family": family,
+                        # A world-pack verdict always grades a closed episode;
+                        # Backend reads failure from the score and category.
+                        "outcome": "completed",
+                        "ledger_uri": artifact_uri,
+                        "step_count": int(record.get("steps") or 0),
+                        **payload,
+                    }
                 )
             submitted = await submit_episode_batch(
                 backend,
@@ -564,97 +511,61 @@ async def emit_finalized_results(
 
 
 # ---------------------------------------------------------------------------
-# Replay — cross-validator parity check
+# Replay from recorded readings
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class ReplayResult:
-    """Outcome of a ledger replay against a locally-loaded pack.
+def _recorded_reader(readings: list[dict[str, Any]]) -> tuple[Callable[[str, dict], dict], list]:
+    """Serve recorded readings in order; the returned queue holds the unused ones."""
 
-    ``terminal_hash_matches`` is the parity anchor Backend + audits
-    compare across validators. ``verdict_matches`` is the deeper
-    check: independently re-running the verifier on the same ledger
-    should give the same VerifierResult (correct + reward + checks).
-    """
+    queue = list(readings)
 
-    terminal_hash_matches: bool
-    verdict_matches: bool
-    expected_terminal_hash: str | None
-    replayed_terminal_hash: str | None
-    expected_verdict: dict[str, Any] | None
-    replayed_verdict: dict[str, Any] | None
+    def read(service: str, request: dict) -> dict:
+        if not queue:
+            raise ReplayMismatch("a needed reading is missing")
+        reading = queue.pop(0)
+        if reading.get("service") != service or canonical.dumps(reading.get("request")) != canonical.dumps(request):
+            raise ReplayMismatch("the replayed request differs from the recorded one")
+        return reading["result"]
+
+    return read, queue
 
 
-def replay_ledger(
-    *,
-    ledger: list[LedgerEntry],
-    task: TaskSpec,
-    catalog: Any,
-    expected_terminal_hash: str | None,
-    expected_verdict: dict[str, Any] | None,
-    render_budget: int | None,
-) -> ReplayResult:
-    """Re-run the verifier on a fetched ledger and compare.
+def regrade(pack: Pack, ledger: dict[str, Any]) -> dict[str, Any]:
+    """Re-grade a recorded ledger offline; raise ReplayMismatch on a reading divergence."""
 
-    ``render_budget`` is REQUIRED (no default) — pass the same value
-    the original session used. ``verify.py`` uses it to reconstruct the
-    solver-visible surface for observed-candidate metrics; a wrong
-    value silently changes efficiency scoring and the replay reports
-    ``verdict_matches=False`` for a faithfully-recorded ledger,
-    defeating the cross-validator parity check. When SessionRegistry starts
-    persisting the render budget in the verdict / ledger metadata,
-    callers should thread it through from there.
+    if ledger["episode"][0].get("manifest_sha256") != pack.manifest_sha256:
+        raise ReplayMismatch("the ledger was recorded on another pack")
+    read, unused = _recorded_reader(ledger.get("grading") or [])
+    verdict = grade_episode(pack, {**ledger, "grading": []}, read)
+    if unused:
+        raise ReplayMismatch("recorded readings were not all used")
+    return verdict
 
-    ``catalog`` is the pack's ``env.catalog.Catalog`` (same instance
-    the session used). Caller owns pack loading — this function stays
-    pure so it's cheap to run in a batch parity job.
 
-    ``verdict_matches`` compares the semantically-important fields
-    (``correct``, ``paid_reward``, ``efficiency``, ``checks``) rather
-    than the full dict; the deterministic core is what must match.
-    """
-    replayed_terminal_hash = ledger[-1].state_hash if ledger else None
-    terminal_hash_matches = (
-        expected_terminal_hash is not None
-        and expected_terminal_hash == replayed_terminal_hash
-    )
+def replay_matches(pack: Pack, record: dict[str, Any]) -> bool:
+    """True iff re-grading the record's ledger reproduces its verdict exactly."""
 
-    replayed_verifier: VerifierResult = verify(
-        task,
-        ledger,
-        catalog,
-        reference_count=task.reference_action_count,
-        render_budget=render_budget,
-    )
-    replayed_verdict = replayed_verifier.model_dump(mode="json")
-
-    verdict_matches = expected_verdict is not None and all(
-        expected_verdict.get(k) == replayed_verdict.get(k)
-        for k in ("correct", "paid_reward", "efficiency")
-    ) and (expected_verdict.get("checks") or {}) == (replayed_verdict.get("checks") or {})
-
-    return ReplayResult(
-        terminal_hash_matches=terminal_hash_matches,
-        verdict_matches=verdict_matches,
-        expected_terminal_hash=expected_terminal_hash,
-        replayed_terminal_hash=replayed_terminal_hash,
-        expected_verdict=expected_verdict,
-        replayed_verdict=replayed_verdict,
-    )
+    try:
+        verdict = regrade(pack, record["ledger"])
+    except (ReplayMismatch, KeyError, IndexError, TypeError):
+        return False
+    return canonical.dumps(verdict) == canonical.dumps(record["verdict"])
 
 
 __all__ = [
     "EPISODE_ARTIFACT_SCHEMA_VERSION",
     "EpisodeEmitError",
-    "ReplayResult",
+    "ReplayMismatch",
     "build_episode_artifact",
-    "build_episode_payload",
     "emit_finalized_results",
+    "episode_artifact",
     "episode_artifact_sha256",
+    "episode_payload",
     "load_episode_artifact",
     "load_inference_transcripts",
-    "replay_ledger",
+    "regrade",
+    "replay_matches",
     "serialize_episode_artifact",
     "submit_episode_batch",
     "upload_episode_artifact",
