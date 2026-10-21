@@ -1,4 +1,9 @@
-"""Minimal agent example for validator-owned generated environments."""
+"""Minimal agent example for validator-owned world sessions.
+
+Each tool call is one environment step. Its observation is the tool result,
+including the shopper's reply to a message. The episode ends when a step
+reports ``finished``.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,6 @@ from os import getenv
 from typing import Any
 
 from src.agent.proxy_client import ProxyClient
-
 
 _DEFAULT_MODELS = {
     "chutes": "deepseek-ai/DeepSeek-V3.2-TEE",
@@ -32,113 +36,78 @@ def _arguments(tool_call: dict[str, Any]) -> dict[str, Any]:
 
 
 def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Let the model choose actions from the environment's dynamic tool list."""
+    """Let the model choose actions from the environment's tool list, one step per call."""
 
     environment = problem_data["environment"]
     binding = environment["binding"]
     policy = environment["policy_view"]
-    problem_id = str(problem_data.get("problem_id", problem_data.get("id", "problem")))
-    max_calls = int(policy.get("max_calls_per_turn", 1))
 
+    request = policy["query"]
+    if policy.get("opening") is not None:
+        request += "\n\n" + json.dumps(policy["opening"])
     messages: list[dict[str, Any]] = [
         {
             "role": "system",
             "content": (
-                "Use the supplied shopping tools to satisfy the shopper. "
-                "Continue until an observation reports done=true."
+                "Use the supplied tools to serve the shopper. Message the shopper "
+                "through its tool; the reply comes back as the tool result. "
+                "Continue until a result reports finished=true."
             ),
         },
-        {"role": "user", "content": policy["query"]},
+        {"role": "user", "content": request},
     ]
     dialogue: list[dict[str, Any]] = []
+    step = idle = 0
+    finished = bool(policy.get("finished"))
 
-    for turn in range(1, int(policy["max_steps"]) + 1):
-        for _attempt in range(2):
-            inference = _proxy.post(
-                "/inference/chat/completions",
-                json_data={
-                    "model": _model(),
-                    "messages": messages,
-                    "tools": policy["tools"],
-                    "tool_choice": "required",
-                    "temperature": 0,
-                },
-            )
-            if inference is None:
-                raise RuntimeError("inference request failed")
-            assistant = inference["choices"][0]["message"]
-            assistant_content = assistant.get("content") or ""
-            tool_calls = (assistant.get("tool_calls") or [])[:max_calls]
-            if tool_calls:
-                break
-            dialogue.append(
-                {"role": "assistant", "content": assistant_content}
-            )
-            messages.extend(
-                [
-                    {"role": "assistant", "content": assistant_content},
-                    {
-                        "role": "user",
-                        "content": (
-                            "The environment has not reported done=true. "
-                            "Choose one of the supplied tools to continue."
-                        ),
-                    },
-                ]
-            )
-        else:
-            raise RuntimeError("model returned no tool call before completion")
-
-        messages.append(
-            {
-                "role": "assistant",
-                "content": assistant_content,
-                "tool_calls": tool_calls,
-            }
+    while not finished and step < int(policy["max_steps"]):
+        inference = _proxy.post(
+            "/inference/chat/completions",
+            json_data={
+                "model": _model(),
+                "messages": messages,
+                "tools": policy["tools"],
+                "tool_choice": "required",
+                "temperature": 0,
+            },
         )
-        group_id = f"{problem_id}-turn-{turn}"
-        envelope = {
-            **binding,
-            "call_id": group_id,
-            "idempotency_key": group_id,
-            "turn": turn,
-            "calls": [
-                {
-                    "call_id": f"{group_id}-{index}",
-                    "action": {
-                        "name": call["function"]["name"],
-                        "args": _arguments(call),
+        if inference is None:
+            raise RuntimeError("inference request failed")
+        assistant = inference["choices"][0]["message"]
+        content = assistant.get("content") or ""
+        tool_calls = assistant.get("tool_calls") or []
+        if not tool_calls:
+            idle += 1
+            if idle > 2:
+                raise RuntimeError("model returned no tool call before the episode finished")
+            messages += [
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": "Choose one of the supplied tools to continue."},
+            ]
+            dialogue.append({"role": "assistant", "content": content})
+            continue
+        idle = 0
+        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        for tool_call in tool_calls:
+            if finished:
+                result = {"observation": {"error": "the episode has finished"}}
+            else:
+                step += 1
+                result = _proxy.post(
+                    "/environment/call",
+                    json_data={
+                        **binding,
+                        "step": step,
+                        "action": {"name": tool_call["function"]["name"], "args": _arguments(tool_call)},
                     },
-                }
-                for index, call in enumerate(tool_calls, start=1)
-            ],
-        }
-        result = _proxy.post("/environment/call", json_data=envelope)
-        if result is None:
-            raise RuntimeError("environment call failed")
-        dialogue.append(
-            {
-                "role": "assistant",
-                "content": assistant_content,
-                "tool_calls": tool_calls,
-                "environment_result": result,
-            }
-        )
-
-        for tool_call, call_result in zip(tool_calls, result["calls"], strict=True):
+                )
+                if result is None:
+                    raise RuntimeError("environment call failed")
+                finished = bool(result["finished"])
+                dialogue.append({"role": "assistant", "content": content, "tool_call": tool_call, "environment_result": result})
             messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": json.dumps(call_result["observation"]),
-                }
+                {"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result["observation"])}
             )
-        if result.get("user_message"):
-            messages.append(
-                {"role": "user", "content": result["user_message"]["content"]}
-            )
-        if any(call["observation"]["done"] for call in result["calls"]):
-            break
 
     return dialogue
 
