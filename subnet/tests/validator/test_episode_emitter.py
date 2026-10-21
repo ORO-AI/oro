@@ -211,6 +211,7 @@ def test_payload_carries_verdict_digests_and_nonce(world):
 
     assert payload == {
         "task_id": "positive",
+        "outcome": "completed",
         "score": "1.000000",
         "category": None,
         "flags": [],
@@ -442,6 +443,46 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
         "step_count": 2,
         **episode_payload(record, delivery_id=_DELIVERY),
     }
+
+
+@_run_async
+async def test_unscored_episodes_are_infrastructure_rows_that_never_block_the_batch(world):
+    scored = _record(world)
+    environment = {**_record(world, "negative"), "verdict": None, "unscored": "environment",
+                   "error": "environment fault persisted after 2 re-runs"}
+    quarantined = {**_record(world, "negative"), "task_id": "negative", "verdict": None,
+                   "error": "runtime step failed: OSError"}
+    submitted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/episode-artifacts/presign"):
+            digest = json.loads(request.content)["artifact_sha256"]
+            return httpx.Response(200, json={"upload_url": "https://objects.test/upload",
+                                             "artifact_uri": f"s3://episodes/{digest}.json", "artifact_sha256": digest})
+        if request.url.host == "objects.test":
+            return httpx.Response(200)
+        body = json.loads(request.content)
+        submitted.extend(body["results"])
+        return httpx.Response(200, json={"results": [{"eval_run_id": _EVAL_RUN_ID, "task_id": e["task_id"], "status": 201}
+                                                     for e in body["results"]], "counts": {"201": len(body["results"])}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        for unscored in (environment, quarantined):
+            await emit_finalized_results(
+                backend_url="https://api.example", validator_keypair=_keypair(), env_pack_sha256=_PACK_SHA,
+                eval_run_id=_EVAL_RUN_ID, delivery_id=_DELIVERY, task_families=_FAMILIES,
+                results=[scored, unscored], http_client=client, backend_transport=client._transport,
+            )
+
+    rows = {(e["task_id"], e["outcome"], e["category"]): e for e in submitted}
+    assert set(rows) == {("positive", "completed", None), ("negative", "environment_error", "environment fault"),
+                         ("negative", "environment_error", None)}
+    for key in [("negative", "environment_error", "environment fault"), ("negative", "environment_error", None)]:
+        row = rows[key]
+        assert row["score"] is None and "ledger_sha256" not in row and "verdict_sha256" not in row
+        assert row["ledger_uri"].startswith("s3://episodes/") and row["episode_nonce"] == _NONCE
+    assert rows[("negative", "environment_error", "environment fault")]["flags"] == ["environment_fault"]
+    assert rows[("negative", "environment_error", None)]["flags"] == []
 
 
 @_run_async

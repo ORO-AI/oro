@@ -218,7 +218,8 @@ def episode_artifact(record: dict[str, Any]) -> dict[str, Any]:
     """The replayable core of a terminal record: ledger, verdict and call trace."""
 
     for key, kind in (("ledger", dict), ("verdict", dict), ("call_trace", list)):
-        if not isinstance(record.get(key), kind):
+        unscored = key == "verdict" and record.get(key) is None and record.get("error")
+        if not isinstance(record.get(key), kind) and not unscored:
             raise EpisodeEmitError(f"terminal result is missing its {key}")
     return {key: record[key] for key in ("ledger", "verdict", "call_trace")}
 
@@ -310,11 +311,26 @@ def episode_payload(record: dict[str, Any], *, delivery_id: str) -> dict[str, An
         raise EpisodeEmitError(f"task {task_id} ran outside delivery {delivery_id}")
     if header.get("episode_nonce") != record.get("episode_nonce"):
         raise EpisodeEmitError(f"task {task_id} ran with another episode nonce")
+    if verdict is None:
+        # Unscored (an environment fault that persisted, or a validator-side
+        # quarantine): an infrastructure row, never a score.
+        environment = record.get("unscored") == "environment"
+        return {
+            "task_id": task_id,
+            "outcome": "environment_error",
+            "score": None,
+            "category": "environment fault" if environment else None,
+            "flags": ["environment_fault"] if environment else [],
+            "episode_nonce": record["episode_nonce"],
+        }
     ledger_sha256 = canonical.digest(episode)
     if verdict.get("ledger_sha256") != ledger_sha256 or verdict.get("task_id") != task_id:
         raise EpisodeEmitError(f"verdict for task {task_id} does not grade its ledger")
     return {
         "task_id": task_id,
+        # A world-pack verdict always grades a closed episode;
+        # Backend reads failure from the score and category.
+        "outcome": "completed",
         # Backend accepts at most six decimal places.
         "score": format(Decimal(repr(float(verdict["score"]))).quantize(Decimal("0.000001")), "f"),
         "category": verdict["category"],
@@ -480,9 +496,6 @@ async def emit_finalized_results(
                         "eval_run_id": eval_run_id,
                         "env_pack_sha256": env_pack_sha256,
                         "family": family,
-                        # A world-pack verdict always grades a closed episode;
-                        # Backend reads failure from the score and category.
-                        "outcome": "completed",
                         "ledger_uri": artifact_uri,
                         "step_count": int(record.get("steps") or 0),
                         **payload,
