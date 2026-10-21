@@ -46,6 +46,8 @@ _CHUNK_SIZE = 1024 * 1024
 MAX_ARTIFACT_SIZE_BYTES = 4 * 1024 * 1024 * 1024
 MAX_EXTRACTED_SIZE_BYTES = 4 * MAX_ARTIFACT_SIZE_BYTES
 DEFAULT_CACHE_ROOT = Path(tempfile.gettempdir()) / "oro-deliveries"
+# Extractions kept in the cache, most recently used first; older ones are removed.
+MAX_CACHED_DELIVERIES = 4
 
 
 class PackLoadError(ValueError):
@@ -109,6 +111,20 @@ def _safe_extract(archive_path: Path, destination: Path) -> None:
         raise PackLoadError("archive is empty")
 
 
+def _evict_older_extractions(cache_root: Path, current: Path) -> None:
+    """Mark ``current`` used and remove all but the most recently used extractions."""
+
+    try:  # a concurrent load may evict the same entries
+        current.touch()
+        extractions = [p for p in cache_root.iterdir() if _SHA256_RE.fullmatch(p.name) and p != current]
+        extractions.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError as exc:
+        logger.warning("Skipping delivery cache eviction: %s", type(exc).__name__)
+        return
+    for stale in extractions[MAX_CACHED_DELIVERIES - 1 :]:
+        shutil.rmtree(stale, ignore_errors=True)
+
+
 def load_delivery(
     archive: Path,
     *,
@@ -147,6 +163,7 @@ def load_delivery(
             f"delivery id {delivery_id!r} does not match the work item's "
             f"{expected_delivery_id!r}"
         )
+    _evict_older_extractions(cache_root, root)
     return LoadedDelivery(pack=pack, root=root, archive_sha256=archive_sha256)
 
 

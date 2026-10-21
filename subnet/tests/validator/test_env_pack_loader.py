@@ -45,6 +45,23 @@ def test_loads_a_delivery_with_the_manifest_at_the_archive_root(tmp_path: Path) 
     assert [p.name for p in (tmp_path / "cache").iterdir()] == [loaded.archive_sha256]
 
 
+def test_keeps_only_the_most_recently_used_extractions(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    keep = env_pack_loader.MAX_CACHED_DELIVERIES
+    archives = [
+        archive_pack(build_world_pack(tmp_path / f"b{i}", max_steps=6 + i), tmp_path / f"d{i}.tar.gz")
+        for i in range(keep + 2)
+    ]
+    first = load_delivery(archives[0], expected_delivery_id=None, cache_root=cache)
+    for archive in archives[1:]:
+        load_delivery(archives[0], expected_delivery_id=None, cache_root=cache)  # stays most recent
+        last = load_delivery(archive, expected_delivery_id=None, cache_root=cache)
+
+    cached = {p.name for p in cache.iterdir()}
+    assert len(cached) == keep and {first.archive_sha256, last.archive_sha256} <= cached
+    assert sorted(last.pack.tasks) == ["t1", "t2"]
+
+
 def test_refuses_a_pack_signed_by_an_untrusted_key(tmp_path: Path) -> None:
     archive = _delivery(tmp_path, private_key=Ed25519PrivateKey.generate())
     with pytest.raises(PackLoadError, match="pack refused"):
