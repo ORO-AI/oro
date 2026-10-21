@@ -49,8 +49,10 @@ def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "role": "system",
             "content": (
-                "Use the supplied tools to serve the shopper. Message the shopper "
-                "through its tool; the reply comes back as the tool result. "
+                "Use the supplied tools to serve the shopper. Every reply must be "
+                "exactly one call to one of the supplied tools; each tool call is "
+                "one environment step. Never answer in plain text. Message the "
+                "shopper through its tool; the reply comes back as the tool result. "
                 "Continue until a result reports finished=true."
             ),
         },
@@ -67,7 +69,7 @@ def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "model": _model(),
                 "messages": messages,
                 "tools": policy["tools"],
-                "tool_choice": "required",
+                "tool_choice": "auto",
                 "temperature": 0,
             },
         )
