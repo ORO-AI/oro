@@ -394,6 +394,36 @@ def test_generated_runner_scores_and_flushes_every_record(tmp_path, monkeypatch)
     assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
 
 
+def test_environment_faults_rerun_the_agent_and_keep_earlier_transcripts(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", 1.0), _record("t2", 0.5)]
+    validator, registry, _reporter, _ = _runner(tmp_path, monkeypatch, records)
+    output = validator._eval_dir(str(_work().eval_run_id)) / "output.jsonl"
+    rerun_session = {"session_id": "s-t2-rerun", "binding": {"session_id": "s-t2-rerun"}, "policy_view": {"query": "q"}}
+
+    def sandbox(*args, **kwargs):
+        output.write_text(json.dumps({"problem_id": f"run-{validator.run_sandbox.call_count}"}) + "\n")
+        return output, {}
+
+    validator.run_sandbox.side_effect = sandbox
+    registry.rerun_environment_faults.side_effect = lambda run: run([rerun_session])
+
+    assert _run(validator, tmp_path).score == pytest.approx(0.75)
+
+    assert validator.run_sandbox.call_count == 2
+    problems = validator.run_sandbox.call_args.args[2].read_text().splitlines()
+    assert [json.loads(row)["problem_id"] for row in problems] == ["s-t2-rerun"]
+    assert [json.loads(row)["problem_id"] for row in output.read_text().splitlines()] == ["run-1", "run-2"]
+
+
+def test_no_rerun_after_the_miner_key_runs_out(tmp_path, monkeypatch) -> None:
+    validator, registry, _reporter, _ = _runner(tmp_path, monkeypatch, [_record("t1", 1.0), _record("t2", 1.0)])
+    registry.key_exhausted.set()
+
+    _run(validator, tmp_path)
+
+    registry.rerun_environment_faults.assert_not_called()
+
+
 def test_generated_runner_fails_on_world_errors(tmp_path, monkeypatch) -> None:
     records = [_record("t1", flags=["world_error"]), _record("t2", 1.0)]
     validator, registry, reporter, _ = _runner(tmp_path, monkeypatch, records)

@@ -470,6 +470,27 @@ def run_local_generated_validator(
         finally:
             phase = "finalization"
             registry.finish_all()
+            if sandbox_failure is None and sandbox_exception is None:
+
+                def rerun(rerun_sessions: list[dict[str, Any]]) -> None:
+                    # The sandbox rewrites its output; keep the earlier episodes' rows.
+                    earlier = sandbox_output.read_bytes() if sandbox_output.exists() else b""
+                    write_problem_file(artifact_dir / "problems.jsonl", rerun_sessions)
+                    try:
+                        subprocess.run(
+                            command,
+                            env=sandbox_environment,
+                            timeout=config.timeout + SANDBOX_RESULT_GRACE_SECONDS,
+                            check=False,
+                        )
+                    except subprocess.TimeoutExpired:  # unfinished episodes are stopped
+                        subprocess.run(["docker", "rm", "--force", container_name], timeout=30, check=False)
+                    later = sandbox_output.read_bytes() if sandbox_output.exists() else b""
+                    if earlier and not earlier.endswith(b"\n"):
+                        earlier += b"\n"
+                    sandbox_output.write_bytes(earlier + later)
+
+                registry.rerun_environment_faults(rerun)
             records = registry.terminal_results()
             episodes = _episode_rows(
                 records,

@@ -206,6 +206,63 @@ def test_deeply_nested_arguments_are_an_invalid_step_not_a_voided_episode(regist
     assert action["args"] == session_registry.TOO_DEEP
 
 
+def _faulting_grader(monkeypatch, faults: int) -> None:
+    """The runtime's grader, returning an environment-fault verdict for the first ``faults`` gradings."""
+
+    real, left = session_registry.runtime_session.grade_episode, [faults]
+
+    def grade(pack, ledger, read):
+        verdict = real(pack, ledger, read)
+        if left[0]:
+            left[0] -= 1
+            verdict = {**verdict, "score": None, "category": "environment fault", "flags": ["environment_fault"]}
+        return verdict
+
+    monkeypatch.setattr(session_registry.runtime_session, "grade_episode", grade)
+
+
+def _play_buy(registry):
+    def run(sessions):
+        for started in sessions:
+            registry.call(_call(started["session_id"], 1, "buy", id="a"))
+        return sessions
+
+    return run
+
+
+def test_an_environment_fault_reruns_the_episode_with_the_same_nonce(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=1)
+    first = registry.start("t1")["session_id"]
+    registry.call(_call(first, 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.terminal_results() == []  # held back: never reported as a score
+    assert registry.environment_faults() == ["t1"]
+    reruns = []
+    registry.rerun_environment_faults(lambda sessions: reruns.append(_play_buy(registry)(sessions)))
+
+    [[rerun]] = reruns
+    [record] = registry.terminal_results()
+    assert rerun["session_id"] != first and record["session_id"] == rerun["session_id"]
+    assert record["episode_nonce"] == "nonce-1" and record["ledger"]["episode"][0]["episode_nonce"] == "nonce-1"
+    assert record["verdict"]["score"] == 1.0 and record["error"] is None
+    assert registry.environment_faults() == []
+
+
+def test_a_persistent_environment_fault_is_an_unscored_infrastructure_failure(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=99)
+    registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
+    registry.finish_all()
+    runs = []
+    registry.rerun_environment_faults(lambda sessions: runs.append(_play_buy(registry)(sessions)))
+
+    assert len(runs) == session_registry.MAX_ENVIRONMENT_RERUNS
+    [record] = registry.terminal_results()
+    assert record["verdict"] is None and "environment fault persisted" in record["error"]
+    with pytest.raises(InvalidSessionError, match="no environment fault"):
+        registry.restart("t1")
+
+
 def test_an_exhausted_inference_key_stops_calls(registry) -> None:
     sid = registry.start("t1")["session_id"]
     registry.key_exhausted.set()

@@ -183,6 +183,26 @@ def test_unfinished_episodes_are_finished_and_graded(tmp_path, services, sandbox
     assert [t["category"] for t in result.summary["tasks"]] == [None, "did not finish"]
 
 
+def test_an_environment_fault_reruns_the_episode_with_the_agent(tmp_path, services, sandbox, monkeypatch) -> None:
+    real, faults = session_registry.runtime_session.grade_episode, [1]
+
+    def grade(pack, ledger, read):
+        verdict = real(pack, ledger, read)
+        if faults[0]:
+            faults[0] -= 1
+            verdict = {**verdict, "score": None, "category": "environment fault", "flags": ["environment_fault"]}
+        return verdict
+
+    monkeypatch.setattr(session_registry.runtime_session, "grade_episode", grade)
+
+    result = local.run_local_generated_validator(_config(tmp_path))
+
+    assert len(sandbox.commands) == 2  # the run, then one re-run of the faulted episode
+    assert result.aggregate_score == 1.0
+    rows = (result.artifact_dir / "sandbox" / "sandbox_output.jsonl").read_text().splitlines()
+    assert len(rows) == 3  # the first run's rows are kept
+
+
 @pytest.mark.parametrize("kind", ["qualifying", "race", "full"])
 def test_only_a_practice_delivery_runs_locally(tmp_path, services, sandbox, kind) -> None:
     error = _failure(_config(tmp_path, pack_path=_delivery(tmp_path, delivery_kind=kind)))

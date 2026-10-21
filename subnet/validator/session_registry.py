@@ -11,7 +11,7 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import requests
@@ -42,8 +42,13 @@ DEFAULT_SEARCH_SERVER_URL = "http://search-server:5632"
 MAX_ACTIONS_PER_CALL = 16
 # Arguments nested deeper than this would overflow recursive JSON handling in the
 # runtime and void the episode; they run as a non-object, an invalid-arguments step.
-MAX_ARG_DEPTH = 32
+MAX_ARG_DEPTH = 64
 TOO_DEEP = "arguments nested too deeply"
+# A verdict for a fault of the validator's machine (wall clock, memory, worker crash),
+# never a score: the episode re-runs from the start with the same nonce, and a fault
+# that persists is the episode's infrastructure failure.
+ENVIRONMENT_FAULT = "environment fault"
+MAX_ENVIRONMENT_RERUNS = 2
 
 
 def _too_deep(value: object) -> bool:
@@ -191,6 +196,7 @@ class _SessionState:
     responses: dict[int, tuple[str, dict[str, Any]]] = field(default_factory=dict)
     quarantined_reason: str | None = None
     record: dict[str, Any] | None = None
+    retired: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -236,6 +242,7 @@ class SessionRegistry:
             search_client.ensure(index)
         self.read = models.live_reader(model_client, search_client, timeout, retries)
         self._sessions: dict[str, _SessionState] = {}
+        self._reruns: dict[str, int] = {}
         self._lock = threading.Lock()
         self._closed = False
         self._finalized = False
@@ -377,17 +384,68 @@ class SessionRegistry:
             }
         return copy.deepcopy(state.record)
 
-    def terminal_results(self) -> list[dict[str, Any]]:
-        """Records of every finished or quarantined episode, graded on first request."""
-
+    def _terminal(self) -> list[tuple[_SessionState, dict[str, Any]]]:
         with self._lock:
-            states = list(self._sessions.values())
-        results = []
+            states = [state for state in self._sessions.values() if not state.retired]
+        terminal = []
         for state in states:
             with state.lock:
                 if state.session.finished or state.quarantined_reason is not None:
-                    results.append(self._record(state))
+                    terminal.append((state, self._record(state)))
+        return terminal
+
+    def _may_rerun(self, record: dict[str, Any]) -> bool:
+        verdict = record["verdict"]
+        return (
+            verdict is not None
+            and verdict["category"] == ENVIRONMENT_FAULT
+            and self._reruns.get(record["task_id"], 0) < MAX_ENVIRONMENT_RERUNS
+        )
+
+    def terminal_results(self) -> list[dict[str, Any]]:
+        """Records of every finished or quarantined episode, graded on first request.
+
+        An environment fault awaiting its re-run is held back; one that persisted
+        past the re-runs has no verdict, like a quarantined episode.
+        """
+
+        results = []
+        for _state, record in self._terminal():
+            if self._may_rerun(record):
+                continue
+            if record["verdict"] is not None and record["verdict"]["category"] == ENVIRONMENT_FAULT:
+                record["verdict"] = None
+                record["error"] = f"environment fault persisted after {MAX_ENVIRONMENT_RERUNS} re-runs"
+            results.append(record)
         return results
+
+    def environment_faults(self) -> list[str]:
+        """Tasks whose latest episode ended in an environment fault and may re-run."""
+
+        return [record["task_id"] for _state, record in self._terminal() if self._may_rerun(record)]
+
+    def restart(self, task_id: str) -> dict[str, Any]:
+        """Retire the task's faulted episode and open a fresh one with the same nonce."""
+
+        faulted = [state for state, record in self._terminal() if record["task_id"] == task_id and self._may_rerun(record)]
+        if not faulted:
+            raise InvalidSessionError(f"task {task_id!r} has no environment fault to re-run")
+        with self._lock:
+            faulted[0].retired = True
+            self._reruns[task_id] = self._reruns.get(task_id, 0) + 1
+            self._finalized = False
+        return self.start(task_id)
+
+    def rerun_environment_faults(self, run: Callable[[list[dict[str, Any]]], object]) -> None:
+        """Re-run every environment-faulted episode with the agent until none may re-run.
+
+        ``run`` drives the agent over the new sessions' bootstraps.
+        """
+
+        while faulted := self.environment_faults():
+            logger.warning("Re-running %d episodes after an environment fault", len(faulted))
+            run([self.restart(task_id) for task_id in faulted])
+            self.finish_all()
 
     def close(self) -> None:
         """Reject new work and stop every episode's sandbox worker."""

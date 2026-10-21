@@ -1163,8 +1163,29 @@ class Validator:
                 )
             finally:
                 reporter.stop()
-            sandbox_finished = True
             registry.finish_all()
+
+            def rerun(rerun_sessions: list[dict[str, Any]]) -> None:
+                # The sandbox rewrites output.jsonl; keep the earlier episodes' transcripts.
+                earlier = output_path.read_bytes() if output_path.exists() else b""
+                write_problem_file(problem_file, rerun_sessions)
+                self.run_sandbox(
+                    agent_path,
+                    eval_run_id_str,
+                    problem_file,
+                    inference_access_token=inference_access_token,
+                    inference_provider=inference_provider,
+                    inference_base_url=inference_base_url,
+                    stop_event=registry.key_exhausted,
+                )
+                later = output_path.read_bytes() if output_path.exists() else b""
+                if earlier and not earlier.endswith(b"\n"):
+                    earlier += b"\n"
+                output_path.write_bytes(earlier + later)
+
+            if sandbox_output and not registry.key_exhausted.is_set():
+                registry.rerun_environment_faults(rerun)
+            sandbox_finished = True
             records = registry.terminal_results()
             try:
                 reporter.flush(records)
