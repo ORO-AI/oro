@@ -176,6 +176,14 @@ var DECISIONS = "/inference/alpha/decisions";
 // The one model the decisions route serves: the runtime's pinned disclosure reader. It is
 // checked here instead of against the agent allowlist, so it never becomes an agent model.
 var DECISIONS_MODEL = "typesafe/jev-1.13";
+// The disclosure reader's fallback models, after the decisions model. Validator calls on
+// OpenRouter only, checked here instead of against the agent allowlist, each pinned to the
+// OpenRouter providers named (no fallback to others), so the reader stays the one measured.
+var READER_PROVIDERS = {
+  "google/gemma-4-31b-it": ["deepinfra/fp8", "crusoe/bf16"],
+  "openai/gpt-oss-120b": ["groq", "together"],
+  "meta-llama/llama-4-maverick": ["parasail/fp8", "digitalocean"],
+};
 
 function _forbid(r) {
   _tag(r, "internal-forbidden");
@@ -293,9 +301,16 @@ function _validatedRequest(r) {
     r.error("stripped inference routing fields: " + stripped.join(","));
   }
 
+  var reader = r._oroCaller === "validator" && provider === "openrouter" && !decisions &&
+    Object.prototype.hasOwnProperty.call(READER_PROVIDERS, parsed.model);
   if (r._oroCaller === "validator" && provider === "openrouter" &&
       parsed.response_format && parsed.response_format.type === "json_schema") {
     parsed.provider = { require_parameters: true };
+  }
+  if (reader) {
+    parsed.provider = parsed.provider || {};
+    parsed.provider.order = READER_PROVIDERS[parsed.model];
+    parsed.provider.allow_fallbacks = false;
   }
 
   // OpenRouter only returns `usage.cost` (USD) on the response when the
@@ -350,12 +365,12 @@ function _validatedRequest(r) {
     if (provider === "chutes" && parsed.model === "mistralai/mistral-small-2603") {
       // The sealed shopper simulator requests this OpenRouter ID on Chutes-funded runs.
       parsed.model = "unsloth/Mistral-Nemo-Instruct-2407-TEE";
-    } else if (provider === "openrouter" && allowed.indexOf(parsed.model) === -1 &&
+    } else if (provider === "openrouter" && !reader && allowed.indexOf(parsed.model) === -1 &&
         aliases && Object.prototype.hasOwnProperty.call(aliases, parsed.model)) {
       parsed.model = aliases[parsed.model];
     }
 
-    if (decisions ? parsed.model !== DECISIONS_MODEL : allowed.indexOf(parsed.model) === -1) {
+    if (decisions ? parsed.model !== DECISIONS_MODEL : !reader && allowed.indexOf(parsed.model) === -1) {
       _tag(r, "internal-model-not-allowed");
       r.error("Model not allowed for " + provider + ": " + parsed.model);
       r.headersOut["Content-Type"] = "application/json";

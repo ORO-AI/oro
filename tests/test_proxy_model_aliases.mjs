@@ -152,3 +152,47 @@ test("the validator's Reader fallback fails over across models; agents' Gemini c
     assert.equal(proxy.details(r).includes(`served=${expected?.[1]}`), expected !== undefined);
   }
 });
+
+test("the validator's reader models skip the agent allowlist, pinned to their providers", () => {
+  const readers = {
+    "google/gemma-4-31b-it": ["deepinfra/fp8", "crusoe/bf16"],
+    "openai/gpt-oss-120b": ["groq", "together"],
+    "meta-llama/llama-4-maverick": ["parasail/fp8", "digitalocean"],
+  };
+  const schema = { type: "json_schema", json_schema: { name: "answer", schema: { type: "object" } } };
+  const catalogs = { openrouter: { models: [openrouterId], aliases: { "google/gemma-4-31b-it": openrouterId } } };
+  for (const [model, order] of Object.entries(readers)) {
+    shared.clear();
+    const { r, calls } = request(model, "openrouter", catalogs, {}, undefined, "validator", {
+      provider: { order: ["attacker"], allow_fallbacks: true }, response_format: schema,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(calls.at(-1).uri, "/_openrouter_proxy/chat/completions");
+    const forwarded = JSON.parse(calls.at(-1).options.body);
+    assert.equal(forwarded.model, model);
+    assert.deepEqual(forwarded.provider, { require_parameters: true, order, allow_fallbacks: false });
+  }
+});
+
+test("agents cannot use the reader models, and readers never reach decisions or Chutes", () => {
+  const catalogs = {
+    openrouter: { models: [openrouterId], aliases: {} },
+    chutes: { models: [chutesId] },
+  };
+  for (const model of ["google/gemma-4-31b-it", "openai/gpt-oss-120b", "meta-llama/llama-4-maverick"]) {
+    shared.clear();
+    for (const caller of [undefined, "agent", "Validator"]) {
+      const { r, calls } = request(model, "openrouter", catalogs, {}, undefined, caller);
+      assert.equal(r.status, 403);
+      assert.equal(calls.filter((call) => call.uri.startsWith("/_openrouter")).length, 0);
+    }
+    assert.equal(request(model, "chutes", catalogs, {}, undefined, "validator").r.status, 403);
+    assert.equal(request(model, "openrouter", catalogs, {}, "/inference/alpha/decisions", "validator").r.status, 403);
+  }
+  // A reader model an agent's allowlist does carry runs unpinned, like any agent model.
+  shared.clear();
+  const gemma = "google/gemma-4-31b-it";
+  const { r, calls } = request(gemma, "openrouter", { openrouter: { models: [gemma], aliases: {} } });
+  assert.equal(r.status, 200);
+  assert.equal(JSON.parse(calls.at(-1).options.body).provider, undefined);
+});
