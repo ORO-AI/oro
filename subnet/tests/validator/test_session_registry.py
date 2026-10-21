@@ -249,6 +249,32 @@ def test_an_environment_fault_reruns_the_episode_with_the_same_nonce(registry, m
     assert registry.environment_faults() == []
 
 
+@pytest.mark.skipif(
+    not hasattr(session_registry.runtime_session, "ENVIRONMENT_FAULT"), reason="runtime without environment faults"
+)
+def test_a_real_wall_clock_trip_is_rerun_not_scored(registry, monkeypatch) -> None:
+    from oro_env_runtime import sandbox
+
+    real, trips = sandbox.Sandbox.entry, [1]
+
+    def entry(self, name, args, counters):
+        if name == "call" and trips[0]:  # one slow handler call on the validator's machine
+            trips[0] -= 1
+            raise sandbox.BoundTrip("wall")
+        return real(self, name, args, counters)
+
+    monkeypatch.setattr(sandbox.Sandbox, "entry", entry)
+    first = registry.start("t1")["session_id"]
+    registry.call(_call(first, 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.environment_faults() == ["t1"] and registry.terminal_results() == []
+    registry.rerun_environment_faults(_play_buy(registry))
+    [record] = registry.terminal_results()
+    assert record["session_id"] != first and record["episode_nonce"] == "nonce-1"
+    assert record["verdict"]["score"] == 1.0
+
+
 def test_a_persistent_environment_fault_is_an_unscored_infrastructure_failure(registry, monkeypatch) -> None:
     _faulting_grader(monkeypatch, faults=99)
     registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
