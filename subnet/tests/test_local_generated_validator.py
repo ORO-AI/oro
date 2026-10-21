@@ -55,7 +55,7 @@ def sandbox(monkeypatch):
     """Fake the sandbox: an agent that buys each task's answer (or a chosen item)."""
 
     state = SimpleNamespace(runtime=None, buys=dict(ANSWERS), returncode=0, commands=[],
-                            write_output=True, raise_=None)
+                            write_output=True, raise_=None, output_listings=[])
 
     class FakeServer:
         def __init__(self, runtime, *, host, port):
@@ -74,6 +74,8 @@ def sandbox(monkeypatch):
         if state.raise_ is not None:
             raise state.raise_
         logs = Path(next(arg.split(":")[0] for arg in command if arg.endswith(":/app/logs:ro")))
+        state.output_listings.append(sorted(p.name for p in (logs / "sandbox").iterdir()))
+        (logs / "sandbox" / "left-by-the-agent.txt").write_text("attempt state")
         rows = [json.loads(line) for line in (logs / "problems.jsonl").read_text().splitlines()]
         for row in rows:
             task_id = row["environment"]["policy_view"]["query"].split()[-1].rstrip(".")
@@ -198,6 +200,7 @@ def test_an_environment_fault_reruns_the_episode_with_the_agent(tmp_path, servic
     result = local.run_local_generated_validator(_config(tmp_path))
 
     assert len(sandbox.commands) == 2  # the run, then one re-run of the faulted episode
+    assert sandbox.output_listings[1] == []  # nothing from the first attempt is visible
     assert result.aggregate_score == 1.0
     rows = (result.artifact_dir / "sandbox" / "sandbox_output.jsonl").read_text().splitlines()
     assert len(rows) == 3  # the first run's rows are kept

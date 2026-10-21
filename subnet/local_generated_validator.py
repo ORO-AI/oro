@@ -416,22 +416,26 @@ def run_local_generated_validator(
         server.start(timeout=5.0)
 
         phase = "sandbox"
-        command = build_sandbox_command(
-            agent_host_path=host_path(str(config.agent_path.resolve())),
-            logs_host_path=host_path(str(artifact_dir.resolve())),
-            output_host_path=host_path(str(sandbox_dir.resolve())),
-            problem_file_arg="/app/logs/problems.jsonl",
-            output_path="/app/output/sandbox_output.jsonl",
-            max_workers=config.max_workers,
-            timeout=config.timeout,
-            inference_access_token=config.inference_access_token,
-            inherit_inference_access_token=True,
-            inference_provider=config.inference_provider,
-            inference_base_url=config.inference_base_url,
-            inference_model=config.model,
-            inherit_inference_model=True,
-            container_name=container_name,
-        )
+
+        def sandbox_command(logs_dir: Path, output_dir: Path) -> list[str]:
+            return build_sandbox_command(
+                agent_host_path=host_path(str(config.agent_path.resolve())),
+                logs_host_path=host_path(str(logs_dir.resolve())),
+                output_host_path=host_path(str(output_dir.resolve())),
+                problem_file_arg="/app/logs/problems.jsonl",
+                output_path="/app/output/sandbox_output.jsonl",
+                max_workers=config.max_workers,
+                timeout=config.timeout,
+                inference_access_token=config.inference_access_token,
+                inherit_inference_access_token=True,
+                inference_provider=config.inference_provider,
+                inference_base_url=config.inference_base_url,
+                inference_model=config.model,
+                inherit_inference_model=True,
+                container_name=container_name,
+            )
+
+        command = sandbox_command(artifact_dir, sandbox_dir)
         sandbox_environment = dict(os.environ)
         sandbox_environment.update(
             {
@@ -472,23 +476,32 @@ def run_local_generated_validator(
             registry.finish_all()
             if sandbox_failure is None and sandbox_exception is None:
 
+                reruns = 0
+
                 def rerun(rerun_sessions: list[dict[str, Any]]) -> None:
-                    # The sandbox rewrites its output; keep the earlier episodes' rows.
-                    earlier = sandbox_output.read_bytes() if sandbox_output.exists() else b""
-                    write_problem_file(artifact_dir / "problems.jsonl", rerun_sessions)
+                    # Fresh input and output dirs: nothing the first attempt wrote is visible.
+                    nonlocal reruns
+                    reruns += 1
+                    rerun_dir = artifact_dir / f"rerun-{reruns}"
+                    rerun_output = rerun_dir / "sandbox"
+                    rerun_output.mkdir(parents=True)
+                    rerun_output.chmod(0o777)
+                    write_problem_file(rerun_dir / "problems.jsonl", rerun_sessions)
                     try:
                         subprocess.run(
-                            command,
+                            sandbox_command(rerun_dir, rerun_output),
                             env=sandbox_environment,
                             timeout=config.timeout + SANDBOX_RESULT_GRACE_SECONDS,
                             check=False,
                         )
                     except subprocess.TimeoutExpired:  # unfinished episodes are stopped
                         subprocess.run(["docker", "rm", "--force", container_name], timeout=30, check=False)
-                    later = sandbox_output.read_bytes() if sandbox_output.exists() else b""
-                    if earlier and not earlier.endswith(b"\n"):
-                        earlier += b"\n"
-                    sandbox_output.write_bytes(earlier + later)
+                    later = rerun_output / "sandbox_output.jsonl"
+                    if later.exists():
+                        earlier = sandbox_output.read_bytes() if sandbox_output.exists() else b""
+                        if earlier and not earlier.endswith(b"\n"):
+                            earlier += b"\n"
+                        sandbox_output.write_bytes(earlier + later.read_bytes())
 
                 registry.rerun_environment_faults(rerun)
             records = registry.terminal_results()

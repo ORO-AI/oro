@@ -424,25 +424,38 @@ def test_generated_runner_scores_and_flushes_every_record(tmp_path, monkeypatch)
     assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
 
 
-def test_environment_faults_rerun_the_agent_and_keep_earlier_transcripts(tmp_path, monkeypatch) -> None:
+def test_environment_fault_reruns_see_nothing_from_the_first_attempt(tmp_path, monkeypatch) -> None:
     records = [_record("t1", 1.0), _record("t2", 0.5)]
     validator, registry, _reporter, _ = _runner(tmp_path, monkeypatch, records)
-    output = validator._eval_dir(str(_work().eval_run_id)) / "output.jsonl"
-    rerun_session = {"session_id": "s-t2-rerun", "binding": {"session_id": "s-t2-rerun"}, "policy_view": {"query": "q"}}
 
-    def sandbox(*args, **kwargs):
-        output.write_text(json.dumps({"problem_id": f"run-{validator.run_sandbox.call_count}"}) + "\n")
-        return output, {}
+    def eval_dir(run_id: str) -> Path:
+        (tmp_path / f"eval_{run_id}").mkdir(exist_ok=True)
+        return tmp_path / f"eval_{run_id}"
+
+    validator._eval_dir = eval_dir
+    (tmp_path / "agent.py").write_text("AGENT = 1\n")
+    rerun_session = {"session_id": "s-t2-rerun", "binding": {"session_id": "s-t2-rerun"}, "policy_view": {"query": "q"}}
+    seen = []
+
+    def sandbox(agent_path, eval_run_id, problem_file, **kwargs):
+        run_dir = problem_file.parent
+        problems = [json.loads(row)["problem_id"] for row in problem_file.read_text().splitlines()]
+        seen.append((run_dir, sorted(p.name for p in run_dir.iterdir()), agent_path.read_text(), problems))
+        (run_dir / "left-by-the-agent.txt").write_text("attempt state")
+        (run_dir / "output.jsonl").write_text(json.dumps({"problem_id": f"run-{len(seen)}"}) + "\n")
+        return run_dir / "output.jsonl", {}
 
     validator.run_sandbox.side_effect = sandbox
     registry.rerun_environment_faults.side_effect = lambda run: run([rerun_session])
 
     assert _run(validator, tmp_path).score == pytest.approx(0.75)
 
-    assert validator.run_sandbox.call_count == 2
-    problems = validator.run_sandbox.call_args.args[2].read_text().splitlines()
-    assert [json.loads(row)["problem_id"] for row in problems] == ["s-t2-rerun"]
-    assert [json.loads(row)["problem_id"] for row in output.read_text().splitlines()] == ["run-1", "run-2"]
+    (dir1, *_), (dir2, files2, agent2, problems2) = seen
+    assert dir2 != dir1 and files2 == ["agent.py", "problems.jsonl"]  # nothing from attempt 1
+    assert agent2 == "AGENT = 1\n" and problems2 == ["s-t2-rerun"]
+    assert not dir2.exists()  # removed once its output is folded in
+    output = (dir1 / "output.jsonl").read_text().splitlines()
+    assert [json.loads(row)["problem_id"] for row in output] == ["run-1", "run-2"]
 
 
 def test_no_rerun_after_the_miner_key_runs_out(tmp_path, monkeypatch) -> None:

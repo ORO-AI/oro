@@ -1169,23 +1169,41 @@ class Validator:
                 reporter.stop()
             registry.finish_all()
 
+            reruns = 0
+
             def rerun(rerun_sessions: list[dict[str, Any]]) -> None:
-                # The sandbox rewrites output.jsonl; keep the earlier episodes' transcripts.
-                earlier = output_path.read_bytes() if output_path.exists() else b""
-                write_problem_file(problem_file, rerun_sessions)
-                self.run_sandbox(
-                    agent_path,
-                    eval_run_id_str,
-                    problem_file,
-                    inference_access_token=inference_access_token,
-                    inference_provider=inference_provider,
-                    inference_base_url=inference_base_url,
-                    stop_event=registry.key_exhausted,
-                )
-                later = output_path.read_bytes() if output_path.exists() else b""
-                if earlier and not earlier.endswith(b"\n"):
-                    earlier += b"\n"
-                output_path.write_bytes(earlier + later)
+                # A fresh eval dir holding only the agent and the new problems:
+                # nothing the first attempt wrote is visible to the re-run.
+                nonlocal reruns
+                reruns += 1
+                rerun_id = f"{eval_run_id_str}-rerun-{reruns}"
+                rerun_dir = self._eval_dir(rerun_id)
+                shutil.rmtree(rerun_dir)
+                rerun_dir = self._eval_dir(rerun_id)
+                rerun_agent = rerun_dir / "agent.py"
+                rerun_agent.write_bytes(agent_path.read_bytes())
+                write_problem_file(rerun_dir / "problems.jsonl", rerun_sessions)
+                try:
+                    self.run_sandbox(
+                        rerun_agent,
+                        rerun_id,
+                        rerun_dir / "problems.jsonl",
+                        inference_access_token=inference_access_token,
+                        inference_provider=inference_provider,
+                        inference_base_url=inference_base_url,
+                        stop_event=registry.key_exhausted,
+                    )
+                    # Keep every attempt's transcripts and usage in the run's own files.
+                    for name in ("output.jsonl", "inference_stats.jsonl"):
+                        later = rerun_dir / name
+                        if later.exists():
+                            earlier = self._eval_dir(eval_run_id_str) / name
+                            body = earlier.read_bytes() if earlier.exists() else b""
+                            if body and not body.endswith(b"\n"):
+                                body += b"\n"
+                            earlier.write_bytes(body + later.read_bytes())
+                finally:
+                    shutil.rmtree(rerun_dir, ignore_errors=True)
 
             if sandbox_output and not registry.key_exhausted.is_set():
                 registry.rerun_environment_faults(rerun)
