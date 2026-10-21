@@ -206,6 +206,36 @@ def test_deeply_nested_arguments_are_an_invalid_step_not_a_voided_episode(regist
     assert action["args"] == session_registry.TOO_DEEP
 
 
+@pytest.mark.parametrize("args", [{"query": "\ud800"}, {"q": [{"\udfff": 1}]}])
+def test_arguments_that_are_not_utf8_are_an_invalid_step_not_a_voided_episode(registry, args) -> None:
+    sid = registry.start("t1")["session_id"]
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "find", "args": args}})
+    buy = registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "invalid_arguments" and result["finished"] is False
+    assert buy["finished"] is True
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    action = next(r for r in record["ledger"]["episode"] if r["kind"] == "action")
+    assert action["args"] == session_registry.NOT_UTF8
+    json.dumps(record).encode()
+
+
+def test_a_tool_name_that_is_not_utf8_is_an_unknown_tool(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "buy\ud800", "args": {}}})
+    registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "unknown_tool" and result["finished"] is False
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    serialized = json.dumps(record, ensure_ascii=False)
+    assert "\ud800" not in serialized and "buy\\ud800" not in json.dumps(record)
+    serialized.encode()
+
+
 def _faulting_grader(monkeypatch, faults: int) -> None:
     """The runtime's grader, returning an environment-fault verdict for the first ``faults`` gradings."""
 

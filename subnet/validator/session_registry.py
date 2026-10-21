@@ -44,6 +44,10 @@ MAX_ACTIONS_PER_CALL = 16
 # runtime and void the episode; they run as a non-object, an invalid-arguments step.
 MAX_ARG_DEPTH = 64
 TOO_DEEP = "arguments nested too deeply"
+# A string with a lone surrogate cannot be canonically encoded and would void the
+# episode: such arguments run as an invalid-arguments step, such a name as an unknown tool.
+NOT_UTF8 = "arguments are not valid UTF-8"
+NOT_UTF8_TOOL = "tool name is not valid UTF-8"
 # A verdict for a fault of the validator's machine (wall clock, memory, worker crash),
 # never a score: the episode re-runs from the start with the same nonce, and a fault
 # that persists is the episode's infrastructure failure.
@@ -60,6 +64,29 @@ def _too_deep(value: object) -> bool:
                 return True
             stack.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
     return False
+
+
+def _not_utf8(value: object) -> bool:
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            stack.extend(item)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, str):
+            try:
+                item.encode()
+            except UnicodeEncodeError:
+                return True
+    return False
+
+
+def _checked_args(args: object) -> object:
+    if _too_deep(args):
+        return TOO_DEEP
+    return NOT_UTF8 if _not_utf8(args) else args
 
 
 class InferenceProviderError(RuntimeError):
@@ -297,7 +324,10 @@ class SessionRegistry:
             if not isinstance(item, dict) or not isinstance(item.get("name"), str):
                 raise ValueError("each action must be an object with a string name")
         return [
-            {"name": item["name"], "args": TOO_DEEP if _too_deep(args := item.get("args", {})) else args}
+            {
+                "name": NOT_UTF8_TOOL if _not_utf8(item["name"]) else item["name"],
+                "args": _checked_args(item.get("args", {})),
+            }
             for item in actions
         ]
 
