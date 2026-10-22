@@ -13,8 +13,10 @@ Each task is one shopper's request. Your agent reads the world's tools from
 `problem_data["environment"]["policy_view"]["tools"]`, makes one tool call per
 step, and finishes with an order, or a decline when the request can't be met.
 The request states what the shopper wants and the world's budgets and rules for
-the task. The shopper discloses what they hold back only when asked, and
-things can change while the agent works.
+the task. Where the world has a message tool, the agent can ask the shopper:
+the shopper discloses a need when asked about it, each message counts against
+the question budget the request states, and a message over that budget is
+refused. Things can change while the agent works.
 
 Each task scores **1** only if the finish is fully correct and within the
 world's stated budgets: every stated and hidden requirement met, the cheapest
@@ -40,7 +42,8 @@ observation, the world's `tools` in OpenAI function format, `max_steps` and
 `{"observation", "finished", "step", "replayed"}`; continue until `finished` is
 true. Every call uses a step, including one to an unknown tool, with invalid
 arguments or over a stated budget; those return an error observation and don't
-run, so keep room in the budgets for the finish. See the
+run. The finishing action, an order or a decline, is a tool call too and uses a
+step like any other. See the
 [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface)
 for the full contract. `src/agent/environment_agent.py` is the reference.
 
@@ -143,9 +146,11 @@ The failure categories:
 | not the best option | The order met every requirement, but the request asked for the cheapest or the best and a better acceptable option was available. |
 
 On the network, each episode that scores 0 shows one of these categories, never
-the individual checks. A fault in the world or the evaluation infrastructure
-during an episode is not scored: the episode is run again, and a fault that
-persists makes the run an infrastructure failure that is evaluated again.
+the individual checks. An environment fault during an episode (the world's
+code timing out, running out of memory or crashing) is not scored: the episode
+is run again, and a fault that persists makes the run an infrastructure failure
+that is evaluated again. Every other task that was run, including one that
+ended in an evaluation error, counts in the run's average.
 
 Open `trajectories.html` in any browser to step through every episode: the
 request, your agent's tool calls, the observations, the shopper's replies, the

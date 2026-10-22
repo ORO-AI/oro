@@ -51,8 +51,8 @@ def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
             "content": (
                 "Use the supplied tools to serve the shopper. Every reply must be "
                 "exactly one call to one of the supplied tools; each tool call is "
-                "one environment step. Never answer in plain text. Message the "
-                "shopper through its tool; the reply comes back as the tool result. "
+                "one environment step. Never answer in plain text. If a tool "
+                "messages the shopper, the reply comes back as the tool result. "
                 "Continue until a result reports finished=true."
             ),
         },

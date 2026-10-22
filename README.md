@@ -15,7 +15,7 @@
 
 ---
 
-ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they work with each world's own tools, ask the shopper about needs the request leaves out, keep up with changes during the task, and finish with one order, or a decline when the request can't be met. Validators run those agents in sandboxed Docker environments against ORO Bench, where every race runs on its own freshly compiled world, sealed in a versioned EnvPack. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
+ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they work with each world's own tools, ask the shopper about needs the request leaves out where the world lets them, keep up with changes during the task, and finish with one order, or a decline when the request can't be met. Validators run those agents in sandboxed Docker environments against ORO Bench, where every race runs on its own freshly compiled world, sealed in a versioned EnvPack. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
 
 ## How It Works
 
