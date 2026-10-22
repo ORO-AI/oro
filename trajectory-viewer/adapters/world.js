@@ -1,10 +1,29 @@
 // A world-pack episode (`oro.world_episode.v1`, runtime contract 8): the runtime's ledger records each
 // numbered step's action and observation, the shopper messages and replies, and the finish.
+// Local runs label it oro.world_episode.v1; network artifacts keep the oro.environment_episode.v1 label but carry
+// the same runtime ledger ({ledger_format, episode: [...]}), which is what tells the two formats apart.
+export function isWorldLedgerEpisode(input) {
+  return Array.isArray(input?.episode?.ledger?.episode);
+}
+
 function requireWorldEpisode(input, sourceName) {
-  if (!input || input.schema_version !== "oro.world_episode.v1" || !input.episode) {
-    throw new Error(`${sourceName}: expected schema_version oro.world_episode.v1 with an episode object`);
+  const label = input?.schema_version;
+  if (!(label === "oro.world_episode.v1" || (label === "oro.environment_episode.v1" && isWorldLedgerEpisode(input)))) {
+    throw new Error(`${sourceName}: expected a world-pack episode (oro.world_episode.v1)`);
   }
   return input.episode;
+}
+
+// The renderer's outcome contract: failure.primary with failure.categories.
+function worldFailure(episode, verdict) {
+  if (verdict?.category) {
+    const flags = Array.isArray(verdict.flags) ? verdict.flags : [];
+    return { primary: verdict.category, categories: flags.length ? flags : [verdict.category] };
+  }
+  if (!verdict && (episode.error || (episode.outcome && episode.outcome !== "completed"))) {
+    return { primary: episode.outcome ?? "no verdict", categories: [String(episode.error ?? "no verdict")] };
+  }
+  return null;
 }
 
 function worldTimeline(records) {
@@ -54,7 +73,7 @@ export function normalizeWorldEpisode(input, sourceName = "trajectory.json") {
     terminalReason: episode.terminal_reason ?? finish?.reason ?? episode.outcome ?? "unknown",
     timeline: worldTimeline(records),
     verdict: verdict ?? {},
-    failure: episode.error ? { message: episode.error, outcome: episode.outcome } : null,
+    failure: worldFailure(episode, verdict),
     provenance: {
       agent_version_id: episode.agent_version_id ?? null,
       evaluation_run_id: episode.evaluation_run_id ?? null,
