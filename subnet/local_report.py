@@ -27,6 +27,7 @@ VIEWER_DIR = Path(__file__).resolve().parents[1] / "trajectory-viewer"
 _VIEWER_MODULES = (
     "adapters/atif.js",
     "adapters/oro.js",
+    "adapters/world.js",
     "adapters/index.js",
     "loading.js",
     "render.js",
@@ -112,12 +113,17 @@ def render_console_report(
 
     by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for task in tasks:
-        by_category[str(task.get("category") or "correct")].append(task)
+        # No category means correct only for a completed episode; one without a verdict (a quarantine or a
+        # world error) is grouped under its outcome, with the error shown.
+        outcome = task.get("outcome") or "completed"
+        by_category[str(task.get("category") or ("correct" if outcome == "completed" else outcome))].append(task)
     width = max((len(str(task.get("task_id"))) for task in tasks), default=0)
     for category, rows in sorted(by_category.items()):
         lines.append(f"{paint(category, _BOLD)}  {len(rows)} task(s)")
         for row in rows:
             flags = row.get("flags") or []
+            if row.get("error_detail"):
+                flags = [*flags, str(row["error_detail"])]
             detail = f"  {paint(', '.join(flags), _YELLOW)}" if flags else ""
             lines.append(
                 f"  {str(row.get('task_id')):<{width}}  "

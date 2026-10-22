@@ -116,6 +116,24 @@ def test_console_report_groups_tasks_by_category() -> None:
     assert "Aggregate score  0.360000" in _report()
 
 
+def test_an_episode_without_a_verdict_is_grouped_by_its_outcome_not_as_correct() -> None:
+    """An ungraded task (a quarantine or a world error, allowed below the 30% threshold) scores 0 with no category;
+    it must not appear under "correct", and its error is shown."""
+    summary = _summary()
+    summary["tasks"] = [
+        _task("t-1", 1.0),
+        {**_task("t-5", 0.0), "outcome": "world_error", "error_detail": "grading failed"},
+    ]
+    lines = local_report.render_console_report(
+        summary, artifact_dir=Path("/x"), report_path=None, provider="openrouter",
+        agent_model="m", color=False,
+    ).splitlines()
+    header = {line.split("  ")[0]: i for i, line in enumerate(lines) if "task(s)" in line}
+    assert header.keys() == {"correct", "world_error"}
+    assert lines[header["correct"] + 1].split() == ["t-1", "1.00"]
+    assert lines[header["world_error"] + 1].endswith("0.00  grading failed")
+
+
 def test_console_report_shows_host_paths_when_run_under_compose(monkeypatch) -> None:
     monkeypatch.setattr(sandbox, "HOST_PROJECT_DIR", None)
     assert "/app/logs/environment-runs/local-abc123/trajectories.html" in _report()

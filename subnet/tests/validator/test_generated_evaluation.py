@@ -685,7 +685,7 @@ def test_generated_runner_retains_agent_inference_summary(
 
 
 
-def test_a_pack_refused_at_session_start_fails_the_run_as_ours(tmp_path, monkeypatch) -> None:
+def test_a_pack_refused_at_session_start_fails_the_run_as_ours(tmp_path, delivery_fetch, monkeypatch) -> None:
     """Runtime 4.0.1 refuses a delivery whose catalog file changed on the host before any worker starts; the run must
     fail with the Backend's pack-failure text, never as the agent's failure."""
     from oro_env_runtime.pack import PackRefused
@@ -695,6 +695,21 @@ def test_a_pack_refused_at_session_start_fails_the_run_as_ours(tmp_path, monkeyp
         raise PackRefused("the pack's catalog file is missing or changed since it was verified")
 
     monkeypatch.setattr(session_registry.SessionRegistry, "start", refuse)
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)
+
+
+
+def test_a_search_index_install_failure_fails_the_run_as_ours(tmp_path, delivery_fetch, monkeypatch) -> None:
+    """Review of #384: the registry installs each index on the search server; a search outage must not count
+    against the agent."""
+    import requests
+
+    def down(index):
+        raise requests.ConnectionError("search server unreachable")
+
+    monkeypatch.setattr(delivery_fetch.search, "ensure", down)
     with pytest.raises(RuntimeError) as failed:
         _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
     assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)

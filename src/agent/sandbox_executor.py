@@ -303,10 +303,17 @@ def append_attempt(earlier: str | os.PathLike, later: str | os.PathLike, max_byt
     if body and not body.endswith(b"\n"):
         body += b"\n"
     merged = os.path.join(os.path.dirname(earlier) or ".", f".merge-{uuid.uuid4().hex}")
-    fd = os.open(merged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    with os.fdopen(fd, "wb") as out:
-        out.write(body + extra)
-    os.replace(merged, earlier)
+    try:
+        fd = os.open(merged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as out:
+            out.write(body + extra)
+        os.replace(merged, earlier)
+    except OSError:  # e.g. ``earlier`` is a directory: optional output must never change the evaluation
+        logger.warning("could not merge re-run output into %s", earlier)
+        try:
+            os.unlink(merged)
+        except OSError:
+            pass
 
 
 def read_inference_stats(

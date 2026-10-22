@@ -387,3 +387,8 @@ def test_append_attempt_appends_a_rerun_and_follows_no_planted_file(tmp_path: Pa
     before = earlier.read_bytes()
     append_attempt(earlier, big, 1024)
     assert earlier.read_bytes() == before
+
+    blocked = tmp_path / "stats.jsonl"
+    blocked.mkdir()  # a directory where the run's own file should be: kept, never an error
+    append_attempt(blocked, later, 1024)
+    assert blocked.is_dir() and not [p for p in tmp_path.iterdir() if p.name.startswith(".merge-")]

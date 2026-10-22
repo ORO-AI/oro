@@ -227,6 +227,7 @@ def _episode_rows(
             "episode": {
                 **record,
                 "step_count": record["steps"],
+                "request_text": loaded.pack.tasks.get(record["task_id"], {}).get("request_text"),
                 "terminal_reason": record["ledger"]["episode"][-1].get("reason"),
                 "outcome": _episode_outcome(record),
                 "evaluation_run_id": run_id,

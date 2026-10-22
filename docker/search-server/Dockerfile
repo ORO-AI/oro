@@ -1,6 +1,6 @@
 # The world search server: the /internal/worlds routes, with no baked catalog index. The validator
 # installs each world pack's Lucene indexes at runtime over PUT /internal/worlds/<sha>.
-FROM python:3.10-slim
+FROM python:3.10-slim@sha256:6ff506466f8b1e981719b468cc0023b8ef000b983cdec0eafe119d01f379e31d
 
 ENV JAVA_HOME=/opt/java/openjdk
 COPY --from=eclipse-temurin:21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d $JAVA_HOME $JAVA_HOME

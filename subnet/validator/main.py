@@ -995,7 +995,8 @@ class Validator:
         summary = run_environment_preflight(
             runtime=self.session_runtime,
             run_dir=self._eval_dir("environment-preflight"),
-            sandbox_runner=self.run_sandbox,
+            # run_sandbox mounts the eval dir of the id it is given: the one the preflight writes its inputs to.
+            sandbox_runner=lambda agent, _run_id, problems: self.run_sandbox(agent, "environment-preflight", problems),
         )
         logging.info(
             f"Environment preflight passed: {json.dumps(summary, sort_keys=True)}"
@@ -1046,19 +1047,26 @@ class Validator:
             raise RuntimeError(f"environment pack {pack_sha256} failed validation")
         roster = claim_roster(loaded.pack, delivery_id, _claim_episode_nonces(work))
 
-        # The registry uploads every pack index to the search server first.
-        registry = session_registry.SessionRegistry(
-            loaded.pack,
-            episode_nonces=roster,
-            search_client=session_registry.SearchServerClient(
-                self.config.search_server_url
-            ),
-            timeout=self.config.session_model_timeout,
-            inference_access_token=inference_access_token,
-            inference_stats_file=str(
-                self._simulator_inference_stats_file(str(work.eval_run_id))
-            ),
-        )
+        # The registry uploads every pack index to the search server first. A search server that is down
+        # or refuses an index is ours, never the agent's: fail with the Backend's pack-failure text.
+        try:
+            registry = session_registry.SessionRegistry(
+                loaded.pack,
+                episode_nonces=roster,
+                search_client=session_registry.SearchServerClient(
+                    self.config.search_server_url
+                ),
+                timeout=self.config.session_model_timeout,
+                inference_access_token=inference_access_token,
+                inference_stats_file=str(
+                    self._simulator_inference_stats_file(str(work.eval_run_id))
+                ),
+            )
+        except Exception as exc:
+            logging.error(f"Search index install failed for delivery {delivery_id}: {exc}")
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation") from exc
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation") from exc
         try:
             sessions = [registry.start(task_id) for task_id in roster]
             session_file = self._eval_dir(str(work.eval_run_id)) / (
