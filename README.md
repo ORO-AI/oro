@@ -37,11 +37,11 @@ See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the r
 
 ### Test generated environments locally
 
-Local testing verifies a signed practice world delivery, then runs all its
-tasks through the network's runtime, which also grades them. Set
-`LOCAL_ENV_PACK_PATH` to the delivery (a `.tar.gz` with `manifest.json` at its
-root, inside the checkout). Practice worlds are compiled separately from race
-worlds, so a local score does not predict a race score.
+Local testing verifies the public practice world, a signed delivery shipped in
+this repository as the Git LFS file `data/local-test/env-pack.tar.gz` (run
+`git lfs pull`), then runs all its tasks through the network's runtime, which
+also grades them. The practice world is compiled separately from race worlds,
+so a local score does not predict a race score.
 
 Set `OPENROUTER_API_KEY` in `.env`. `SANDBOX_MODEL` optionally overrides the
 included reference agent. Custom agents may use any models permitted by the

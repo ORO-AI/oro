@@ -49,17 +49,17 @@ for the full contract. `src/agent/environment_agent.py` is the reference.
 
 ## Local Testing
 
-Local testing runs a practice world through the same validator, runtime and
-grading as the network. A practice world is a signed public world with every
-answer included, so the runtime grades each episode locally. The runner refuses
-any delivery that is not a practice world. By default it runs every task in the
-world.
+Local testing runs the public practice world through the same validator,
+runtime and grading as the network. The practice world is a signed public world
+with every answer included, so the runtime grades each episode locally. The
+runner refuses any delivery that is not a practice world. By default it runs
+every task in the world.
 
-Practice worlds, like the qualifying world, are compiled separately from race
+The practice world, like the qualifying world, is compiled separately from race
 worlds, and race worlds include situations, tools and rules no public world
 shows. They check your agent's protocol handling and general
 behaviour, not how it will do on a race world. **A local score does not predict
-a race score.** Don't tune an agent to a practice world's tools, wording or
+a race score.** Don't tune an agent to the practice world's tools, wording or
 catalog.
 
 ### Setup
@@ -71,14 +71,17 @@ optionally overrides the model of the included reference agent; its default is
 the proxy checks every request against the live Backend allowlist used on the
 network.
 
-Download a practice world delivery (TBD-PRACTICE-URL), a `.tar.gz` with
-`manifest.json` at its root, into your checkout, and point the runner at it.
-The checkout is mounted at `/workspace`:
+The practice world ships in this repository as the Git LFS file
+`data/local-test/env-pack.tar.gz`, which the runner uses by default. Fetch it
+and build the local services:
 
 ```bash
-export LOCAL_ENV_PACK_PATH=/workspace/practice/practice-a.tar.gz
+git lfs pull
 docker compose build test test-proxy sandbox
 ```
+
+To run a different signed practice delivery, set `LOCAL_ENV_PACK_PATH` to its
+path inside the checkout, which is mounted at `/workspace`.
 
 Reserve at least 16 GB of free disk space; Docker downloads the search image on
 the first run. Before the agent starts, the runtime verifies the delivery's
