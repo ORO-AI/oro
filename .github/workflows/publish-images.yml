@@ -187,7 +187,7 @@ jobs:
 
       # The world search server: /health answers, the world routes are mounted (an
       # unknown world is a 404, not a missing route), and gunicorn runs sync workers
-      # (one JVM per process: gthread would share one JVM across threads, ORO-2244).
+      # (one JVM per process: gthread would share one JVM across threads).
       - name: Smoke test search-server image
         run: |
           set -euo pipefail

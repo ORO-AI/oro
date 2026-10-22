@@ -77,7 +77,7 @@ and build the local services:
 
 ```bash
 git lfs pull
-docker compose build test test-proxy sandbox
+docker compose build test test-proxy test-search-server sandbox
 ```
 
 To run a different signed practice delivery, set `LOCAL_ENV_PACK_PATH` to its
@@ -99,8 +99,8 @@ docker compose run test --agent-file my_agent.py
 `--problems N` runs a random sample of N tasks instead of all of them, and
 `--seed` repeats an earlier sample. Up to `LOCAL_MAX_WORKERS` (default 7) tasks
 run at once. `LOCAL_TIMEOUT` (default 1800 seconds) is the sandbox budget, and
-locally it also bounds each task; on the network each task has its own, much
-shorter time limit, so budget your agent's time per task yourself.
+locally it also bounds each task; on the network each task has its own limit of
+300 seconds, so budget your agent's time per task yourself.
 Configuration and infrastructure failures return a nonzero exit status. Run
 one local test at a time per Compose project, and stop the dependencies with
 `docker compose --profile test down` when finished.
@@ -153,8 +153,9 @@ On the network, each episode that scores 0 shows one of these categories, never
 the individual checks. An environment fault during an episode (the world's
 code timing out, running out of memory or crashing) is not scored: the episode
 is run again, and a fault that persists makes the run an infrastructure failure
-that is evaluated again. Every other task that was run, including one that
-ended in an evaluation error, counts in the run's average.
+that is evaluated again. So does a run where more than 30% of episodes end
+without a verdict (a validator-side quarantine or a world error). Every other task that was run,
+including one that ended in an evaluation error, counts in the run's average.
 
 Open `trajectories.html` in any browser to step through every episode: the
 request, your agent's tool calls, the observations, the shopper's replies, the

@@ -21,7 +21,7 @@ from uuid import uuid4
 from subnet import local_report
 from subnet.inference import resolve_inference_credentials
 from subnet.sandbox import build_sandbox_command, host_path
-from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
+from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, append_attempt, read_regular_file
 from subnet.validator import env_pack_loader, session_registry
 from subnet.validator.generated_evaluation import aggregate_results, write_problem_file
 from subnet.validator.session_service import SessionRuntime, SessionServer
@@ -496,12 +496,7 @@ def run_local_generated_validator(
                         )
                     except subprocess.TimeoutExpired:  # unfinished episodes are stopped
                         subprocess.run(["docker", "rm", "--force", container_name], timeout=30, check=False)
-                    later = rerun_output / "sandbox_output.jsonl"
-                    if later.exists():
-                        earlier = sandbox_output.read_bytes() if sandbox_output.exists() else b""
-                        if earlier and not earlier.endswith(b"\n"):
-                            earlier += b"\n"
-                        sandbox_output.write_bytes(earlier + later.read_bytes())
+                    append_attempt(sandbox_output, rerun_output / "sandbox_output.jsonl", MAX_SANDBOX_OUTPUT_BYTES)
 
                 registry.rerun_environment_faults(rerun)
             records = registry.terminal_results(final=True)

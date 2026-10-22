@@ -3,8 +3,6 @@ name: Validator Image Smoke
 # Builds the validator image from docker/validator/uv.lock and imports the
 # runtime and validator entry modules inside it, so lock drift against
 # pyproject.toml fails a PR instead of a publish.
-# Expected to fail until oro-env-runtime 4.0.x is on PyPI and
-# docker/validator/uv.lock is re-locked (the lock still resolves 3.7.1).
 on:
   pull_request:
     paths:

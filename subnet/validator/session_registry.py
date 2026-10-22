@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,6 +21,8 @@ from oro_env_runtime.session import Session
 from src.agent.proxy_client import ProxyClient
 
 from .session_errors import (
+    VALIDATOR_CALLER_HEADER,
+    VALIDATOR_CALLER_SECRET,
     AgentInferenceBudgetError,
     HarnessError,
     HarnessExecutionError,
@@ -30,12 +31,6 @@ from .session_errors import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Marks the validator's own proxy calls (model readings and decisions), which the
-# agent sandbox may not make. Minted per process and never given to the sandbox: the
-# agent holds the same provider key, so the key alone cannot tell the two apart.
-VALIDATOR_CALLER_HEADER = "X-ORO-Validator"
-VALIDATOR_CALLER_SECRET = secrets.token_urlsafe(32)
 
 DEFAULT_SEARCH_SERVER_URL = "http://search-server:5632"
 # One envelope may carry several tool calls; each runs as its own step.

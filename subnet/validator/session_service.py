@@ -16,7 +16,7 @@ from .session_errors import (
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .session_registry import VALIDATOR_CALLER_SECRET
+from .session_errors import VALIDATOR_CALLER_SECRET
 
 if TYPE_CHECKING:
     from .session_registry import SessionRegistry

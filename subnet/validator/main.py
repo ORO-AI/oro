@@ -26,6 +26,8 @@ from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from src.agent.sandbox_executor import (
+    MAX_SANDBOX_OUTPUT_BYTES,
+    append_attempt,
     merge_inference_stats,
     read_inference_stats,
 )
@@ -1036,7 +1038,11 @@ class Validator:
                 )
             )
         if loaded is None:
-            raise RuntimeError(f"world delivery {delivery_id} failed validation")
+            # The Backend classifies exactly these texts as ours, not the agent's (failure_classification
+            # _PACK_LOAD_FAILURE): a bad or unreachable delivery must never count against an agent.
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation")
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation")
         roster = claim_roster(loaded.pack, delivery_id, _claim_episode_nonces(work))
 
         # The registry uploads every pack index to the search server first.
@@ -1191,13 +1197,11 @@ class Validator:
                     )
                     # Keep every attempt's transcripts and usage in the run's own files.
                     for name in ("output.jsonl", "inference_stats.jsonl"):
-                        later = rerun_dir / name
-                        if later.exists():
-                            earlier = self._eval_dir(eval_run_id_str) / name
-                            body = earlier.read_bytes() if earlier.exists() else b""
-                            if body and not body.endswith(b"\n"):
-                                body += b"\n"
-                            earlier.write_bytes(body + later.read_bytes())
+                        append_attempt(
+                            self._eval_dir(eval_run_id_str) / name,
+                            rerun_dir / name,
+                            MAX_SANDBOX_OUTPUT_BYTES,
+                        )
                 finally:
                     shutil.rmtree(rerun_dir, ignore_errors=True)
 

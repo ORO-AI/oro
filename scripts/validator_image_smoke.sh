@@ -6,10 +6,8 @@
 # Usage: scripts/validator_image_smoke.sh [IMAGE]
 #   With no IMAGE, builds docker/validator/Dockerfile from the repo root first.
 #
-# Expected to FAIL until oro-env-runtime 4.0.x is published to PyPI and
-# docker/validator/uv.lock is re-locked: pyproject.toml pins 4.0.0, but
-# `uv sync --frozen` does not check the lock against it, so the image still
-# installs the locked 3.7.1. That failure is the point of this check.
+# `uv sync --frozen` does not check the lock against pyproject.toml, so an image
+# built from a stale lock installs the old runtime; this check catches that.
 set -euo pipefail
 
 image="${1:-}"

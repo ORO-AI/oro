@@ -8,13 +8,12 @@ services:
       dockerfile: docker/search-server/Dockerfile
     container_name: shoppingbench-search-server
     environment:
-      - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-5632}
-      # gunicorn sync worker processes (default nproc/2, floor 2). Keep
+      # gunicorn sync worker processes, one JVM each (image default 2). Keep
       # workers <= free cores so the extra JVMs don't oversubscribe.
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
       # Per-worker JVM heap. Must match the Dockerfile default (this compose var
-      # overrides the image ENV). Index is off-heap/mmap, so 1g/worker is plenty;
+      # overrides the image ENV). World indexes are off-heap/mmap, so 1g/worker is plenty;
       # keeps total heap modest across N workers on memory-constrained hosts.
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}
     # Loopback-only publish. The validator runtime reaches search-server over
@@ -273,11 +272,16 @@ services:
 
   # Local generated evaluation, using the existing miner command and .env.
   test-search-server:
-    image: ${LOCAL_SEARCH_SERVER_IMAGE:-ghcr.io/oro-ai/oro/search-server:${IMAGE_TAG:-stable}}
+    # Built from this checkout, like the other local-test services, so the local test always has the
+    # world routes this runner needs (no published tag to wait for).
+    image: ${LOCAL_SEARCH_SERVER_IMAGE:-oro-local-search:local}
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: docker/search-server/Dockerfile
     profiles:
       - test
     environment:
-      - HOST=0.0.0.0
       - PORT=5632
       - SEARCH_WORKERS=${SEARCH_WORKERS:-}
       - _JAVA_OPTIONS=${_JAVA_OPTIONS:--Xmx1g -Xms256m}

@@ -17,7 +17,7 @@ image is `docker/search-server/Dockerfile`: Python, the JDK and Pyserini, with n
 | --- | --- |
 | `GET /health` | `{"status": "healthy", "service": "search-worlds"}` |
 | `PUT /internal/worlds/<sha>` | Install a world index archive (the request body); its BM25 settings travel in `X-ORO-World-Settings`. `201` when new, `200` when already installed, `409` on conflicting settings. |
-| `POST /internal/worlds/<sha>/search` | `{"query": ..., "params": {...}}` → ranked `[id, score]` hits; `404` for a world not installed. |
+| `POST /internal/worlds/<sha>/search` | `{"query": ..., "params": {...}}` → `{"hits": [{"id": ..., "score": ...}]}`, ranked; `404` for a world not installed. |
 
 These routes are internal: agents reach search only through their world's tools, which the validator's
 session runtime serves.

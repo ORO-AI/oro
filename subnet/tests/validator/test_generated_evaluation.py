@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import re
+
 import pytest
 from oro_sdk.types import UNSET
 
@@ -392,14 +394,28 @@ def test_claim_without_pack_binding_fails_clearly(tmp_path) -> None:
         _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
 
 
-def test_rejected_delivery_fails_the_run(tmp_path, monkeypatch) -> None:
+# The Backend's pattern for a pack failure that is ours, never the agent's (platform
+# apps/backend/app/services/failure_classification.py, _PACK_LOAD_FAILURE).
+BACKEND_PACK_LOAD_FAILURE = re.compile(
+    r"(?:race pack race_id=[0-9a-f-]{36} pack=|environment (?:preflight )?pack )"
+    r"[0-9a-f]{64} failed validation"
+)
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_a_rejected_delivery_fails_the_run_as_ours_not_the_agents(tmp_path, monkeypatch, race) -> None:
     async def rejected(*args, **kwargs):
         return None
 
     monkeypatch.setattr(env_pack_loader, "fetch_and_validate_pack", rejected)
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_race_pack", rejected)
+    work = _work()
+    if race:
+        work.race_id = "4a7e0c5e-0000-4000-8000-000000000001"
 
-    with pytest.raises(RuntimeError, match="delivery qual-1 failed validation"):
-        _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)
 
 
 def _runner(tmp_path, monkeypatch, records, *, roster=("t1", "t2"), sandbox_output=True):

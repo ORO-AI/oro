@@ -356,3 +356,34 @@ def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monke
     )
 
     assert read_inference_stats(str(stats)) == {}
+
+
+def test_append_attempt_appends_a_rerun_and_follows_no_planted_file(tmp_path: Path) -> None:
+    """A re-run's output joins the run's own; an agent-planted symlink is replaced, never written
+    through, and a FIFO or oversized file reads as nothing instead of blocking or failing."""
+    from src.agent.sandbox_executor import append_attempt
+
+    earlier, later = tmp_path / "output.jsonl", tmp_path / "rerun.jsonl"
+    earlier.write_bytes(b'{"a": 1}')
+    later.write_bytes(b'{"b": 2}\n')
+    append_attempt(earlier, later, 1024)
+    assert earlier.read_bytes() == b'{"a": 1}\n{"b": 2}\n'
+
+    target = tmp_path / "site.pth"
+    target.write_bytes(b"untouched")
+    earlier.unlink()
+    earlier.symlink_to(target)
+    append_attempt(earlier, later, 1024)
+    assert target.read_bytes() == b"untouched"
+    assert not earlier.is_symlink() and earlier.read_bytes() == b'{"b": 2}\n'
+
+    fifo = tmp_path / "fifo.jsonl"
+    os.mkfifo(fifo)
+    append_attempt(earlier, fifo, 1024)  # returns at once: nothing to append
+    append_attempt(fifo, later, 1024)  # replaces the FIFO without opening it for writing
+    assert fifo.read_bytes() == b'{"b": 2}\n'
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(b"x" * 2048)
+    before = earlier.read_bytes()
+    append_attempt(earlier, big, 1024)
+    assert earlier.read_bytes() == before

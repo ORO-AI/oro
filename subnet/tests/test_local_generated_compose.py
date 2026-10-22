@@ -18,13 +18,13 @@ ROOT = Path(__file__).resolve().parents[2]
             "vendor/custom-model",
             "",
             "",
-            "ghcr.io/oro-ai/oro/search-server:stable",
+            "oro-local-search:local",
         ),
         (
             "",
             "latest",
             "",
-            "ghcr.io/oro-ai/oro/search-server:latest",
+            "oro-local-search:local",  # built from the checkout, whatever the published tag
         ),
         (
             "",
