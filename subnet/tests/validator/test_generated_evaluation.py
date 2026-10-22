@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from oro_sdk.types import UNSET
 
 from subnet.tests.world_pack_fixture import (
     StubModelClient,
@@ -266,7 +267,8 @@ def _work(**fields):
         "agent_version_id": "agent",
         "env_pack_sha256": "a" * 64,
         "race_id": None,
-        "additional_properties": {"delivery_id": "qual-1", "episode_nonces": dict(NONCES)},
+        "delivery_id": "qual-1",
+        "episode_nonces": SimpleNamespace(additional_properties=dict(NONCES)),
         **fields,
     })
 
@@ -372,12 +374,11 @@ def test_claims_reach_the_real_fetch_signatures(tmp_path, delivery_fetch, monkey
 
 
 @pytest.mark.parametrize(
-    "properties",
-    [{}, {"episode_nonces": NONCES}, {"delivery_id": "qual-1"}],
+    "unbound",
+    [{"delivery_id": UNSET, "episode_nonces": UNSET}, {"delivery_id": None}, {"episode_nonces": None}],
 )
-def test_unbound_claim_fails_clearly(tmp_path, delivery_fetch, properties) -> None:
-    work = _work()
-    work.additional_properties = properties
+def test_unbound_claim_fails_clearly(tmp_path, delivery_fetch, unbound) -> None:
+    work = _work(**unbound)
 
     with pytest.raises(ValueError, match="not bound to a world delivery"):
         _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
@@ -553,11 +554,9 @@ def test_progress_batches_emit_with_the_claim_binding(tmp_path, monkeypatch) -> 
     assert call["results"] == records
 
 
-def test_claim_episode_nonces_read_regenerated_and_old_sdk_models() -> None:
-    nonces = SimpleNamespace(additional_properties=dict(NONCES))
-
-    assert validator_main._claim_episode_nonces(SimpleNamespace(episode_nonces=nonces)) == NONCES
+def test_claim_episode_nonces_read_the_sdk_model() -> None:
     assert validator_main._claim_episode_nonces(_work()) == NONCES
+    assert validator_main._claim_episode_nonces(_work(episode_nonces=UNSET)) is None
 
 
 @pytest.mark.parametrize(

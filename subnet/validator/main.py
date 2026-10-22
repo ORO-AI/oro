@@ -166,12 +166,10 @@ def _rewrite_localhost_url(url: str) -> str:
 
 
 def _claim_string(work: ClaimWorkResponse, field_name: str) -> str | None:
-    """Read a nullable claim field across old and regenerated SDK models."""
+    """Read a nullable claim field."""
 
     value = getattr(work, field_name, None)
     if value is None or isinstance(value, Unset):
-        value = getattr(work, "additional_properties", {}).get(field_name)
-    if value is None:
         return None
     if isinstance(value, UUID):
         return str(value)
@@ -181,12 +179,10 @@ def _claim_string(work: ClaimWorkResponse, field_name: str) -> str | None:
 
 
 def _claim_episode_nonces(work: ClaimWorkResponse) -> Any:
-    """Read the claim's per-task episode nonces across old and new SDK models."""
+    """Read the claim's per-task episode nonces."""
 
-    value = getattr(work, "episode_nonces", None)
-    if value is None or isinstance(value, Unset):
-        value = getattr(work, "additional_properties", {}).get("episode_nonces")
-    return getattr(value, "additional_properties", value)
+    value = work.episode_nonces
+    return None if value is None or isinstance(value, Unset) else value.additional_properties
 
 
 def _claim_environment_binding(

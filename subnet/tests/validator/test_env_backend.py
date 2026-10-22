@@ -37,6 +37,7 @@ SHA = "a" * 64
 
 
 def _operation(kind):
+    # The contract-8 Backend's fetch replies, key for key as its routes serve them.
     pack = {
         "pack_sha256": SHA,
         "download_url": "https://objects.test/archive",
@@ -53,12 +54,6 @@ def _operation(kind):
         "world_id": "world-1",
         "result_schema_version": "1",
         "catalog_sha256": SHA,
-        # Deprecated 3.x keys the Backend still sends; the pinned SDK requires them.
-        "contract_version": "oro.world.contract.8",
-        "runtime_version": "4.0.0",
-        "catalog_epoch": "world-1",
-        "search_index_epoch": None,
-        "search_index_sha256": None,
     }
     if kind == "pack":
         return get_pack.asyncio_detailed, PackFetchResponse, {"pack_sha256": SHA}, pack
@@ -110,6 +105,12 @@ def _operation(kind):
             "counts": {"409": 1},
         },
     )
+
+
+@pytest.mark.parametrize("kind", ["pack", "race"])
+def test_pack_fetch_replies_parse_with_the_pinned_sdk(kind):
+    _api, model, _kwargs, reply = _operation(kind)
+    assert model.from_dict(reply).additional_properties == {}
 
 
 @pytest.mark.parametrize("kind", ["pack", "race", "presign", "results"])

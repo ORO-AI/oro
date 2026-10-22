@@ -124,7 +124,7 @@ class TestBackendClientClaimWork:
             assert getattr(body, key) == value
 
     def test_claim_work_reads_world_binding_fields(self, mock_wallet):
-        """The pinned SDK keeps fields it does not know as additional properties."""
+        """The SDK types the claim's world binding fields."""
         from oro_sdk.models.claim_work_response import ClaimWorkResponse
 
         client = BackendClient("https://api.example.com", mock_wallet)
@@ -146,8 +146,8 @@ class TestBackendClientClaimWork:
         ):
             result = client.claim_work()
 
-        assert result["delivery_id"] == "race-1"
-        assert result["episode_nonces"] == {"t1": "a" * 64}
+        assert result.delivery_id == "race-1"
+        assert result.episode_nonces.additional_properties == {"t1": "a" * 64}
 
     def test_claim_work_no_work_available(self, mock_wallet):
         client = BackendClient("https://api.example.com", mock_wallet)
