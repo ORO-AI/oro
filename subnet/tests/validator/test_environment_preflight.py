@@ -10,7 +10,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from oro_env_runtime import RUNTIME_CONTRACT
 from oro_env_runtime.pack import PackRefused, load_pack
-from oro_pack_tools.build import validate_pack
 from validator import environment_preflight, environment_preflight_agent
 from validator.environment_preflight import (
     POLICY_ACTIONS,
@@ -41,7 +40,7 @@ def test_preflight_world_is_a_valid_pack_signed_with_a_fresh_key(tmp_path: Path)
     with mock.patch.object(Ed25519PrivateKey, "generate", return_value=key):
         pack = build_preflight_pack(tmp_path / "a")
 
-    assert validate_pack(tmp_path / "a", {"validator-preflight": key.public_key()}).pack_id == pack.pack_id
+    assert load_pack(tmp_path / "a", {"validator-preflight": key.public_key()}).pack_id == pack.pack_id
     assert pack.manifest["runtime_contract"] == RUNTIME_CONTRACT
     with pytest.raises(PackRefused):
         load_pack(tmp_path / "a")  # never trusted by the pinned keyring

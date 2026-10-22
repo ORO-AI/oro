@@ -385,7 +385,7 @@ def test_route_settings_errors(client):
     put = lambda bm25: client.put(f"/internal/worlds/{wid}", data=body,  # noqa: E731
                                   headers={"X-ORO-World-Settings": f'{{"bm25": {bm25}}}'})  # fmt: skip
     assert [
-        put(x).status_code for x in ('{"k1": 0}', '{"b": 2}', '{"k1": NaN}', "5")
+        put(x).status_code for x in ('{"k1": 11}', '{"b": 2}', '{"k1": NaN}', "5")
     ] == [400] * 4
     assert put('{"k1": 1.2}').status_code == 201
     assert put('{"k1": 1.2}').status_code == 200

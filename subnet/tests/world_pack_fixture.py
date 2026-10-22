@@ -13,6 +13,7 @@ the task's answer, "request not met" otherwise and "did not finish" without an o
 
 from __future__ import annotations
 
+import base64
 import importlib
 import importlib.metadata
 import io
@@ -22,8 +23,7 @@ from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from oro_env_runtime import RUNTIME_CONTRACT, pack as runtime_pack
-from oro_pack_tools import build as pack_build
+from oro_env_runtime import RUNTIME_CONTRACT, canonical, pack as runtime_pack
 
 KEY_ID = "validator-test-key"
 PRIVATE_KEY = Ed25519PrivateKey.generate()
@@ -120,29 +120,37 @@ def build_world_pack(
     private_key: Ed25519PrivateKey = PRIVATE_KEY,
     key_id: str = KEY_ID,
 ) -> Path:
-    """Write the test world's source under ``dest/src`` and its signed pack at ``dest/pack``."""
+    """Write the test world's signed pack at ``dest/pack``, signed with the public runtime's ``signed_bytes``
+    (as ``validator.environment_preflight.build_preflight_pack`` does), and return that directory."""
 
-    src = Path(dest) / "src"
-    (src / "world/code").mkdir(parents=True)
-    (src / "world/index").mkdir()
-    (src / "manifest.json").write_text(
-        json.dumps(manifest(delivery_id=delivery_id, delivery_kind=delivery_kind, max_steps=max_steps))
-    )
-    (src / "world/code/main.star").write_text(CODE)
-    (src / "world/tools.json").write_text(json.dumps({"tools": TOOLS}))
-    (src / "world/catalog.jsonl").write_text("".join(json.dumps(row) + "\n" for row in CATALOG))
-    (src / "world/index/title.archive").write_text(json.dumps({row["id"]: row["title"] for row in CATALOG}))
-    (src / "world/index/title.json").write_text(
-        json.dumps({"archive": "world/index/title.archive", "settings": SEARCH_SETTINGS})
-    )
+    files = {
+        "world/code/main.star": CODE.encode(),
+        "world/tools.json": json.dumps({"tools": TOOLS}).encode(),
+        "world/catalog.jsonl": "".join(json.dumps(row) + "\n" for row in CATALOG).encode(),
+        "world/index/title.archive": json.dumps({row["id"]: row["title"] for row in CATALOG}).encode(),
+        "world/index/title.json": json.dumps(
+            {"archive": "world/index/title.archive", "settings": SEARCH_SETTINGS}
+        ).encode(),
+    }
     for kind, docs, key in (("tasks", TASKS, "params"), ("answers", ANSWERS, "answer")):
-        (src / kind).mkdir()
         for task_id, body in docs.items():
-            doc = {"task_id": task_id, key: body}
+            doc = {"task_id": task_id, key: body, "sha256": canonical.digest(body)}
             if kind == "tasks":
                 doc["request_text"] = f"Buy the item for {task_id}."
-            (src / kind / f"{task_id}.json").write_text(json.dumps(doc))
-    return pack_build.build_pack(src, Path(dest) / "pack", private_key, key_id, check=False)
+            files[f"{kind}/{task_id}.json"] = canonical.dumps(doc)
+    out = Path(dest) / "pack"
+    for rel, data in files.items():
+        (out / rel).parent.mkdir(parents=True, exist_ok=True)
+        (out / rel).write_bytes(data)
+    signed = manifest(delivery_id=delivery_id, delivery_kind=delivery_kind, max_steps=max_steps)
+    signed["parts"] = {rel: canonical.sha256_hex(data) for rel, data in files.items()}
+    signed["signature"] = {
+        "algorithm": "ed25519",
+        "key_id": key_id,
+        "value": base64.b64encode(private_key.sign(runtime_pack.signed_bytes(signed))).decode(),
+    }
+    (out / "manifest.json").write_bytes(canonical.dumps(signed))
+    return out
 
 
 def archive_pack(pack_dir: Path, archive: Path, *, extra: dict[str, bytes] | None = None) -> Path:

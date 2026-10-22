@@ -83,8 +83,9 @@ docker compose build test test-proxy sandbox
 To run a different signed practice delivery, set `LOCAL_ENV_PACK_PATH` to its
 path inside the checkout, which is mounted at `/workspace`.
 
-Reserve at least 16 GB of free disk space; Docker downloads the search image on
-the first run. Before the agent starts, the runtime verifies the delivery's
+Reserve at least 16 GB of free disk space for the images Docker downloads on the
+first run. The search image holds no catalog of its own (about 1.3 GB); it serves
+each world's indexes, which ship inside the delivery. Before the agent starts, the runtime verifies the delivery's
 signature and contract version and loads its search indexes into the local
 search server.
 
