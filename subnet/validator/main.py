@@ -25,6 +25,7 @@ from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
+from oro_env_runtime.pack import PackRefused
 from src.agent.sandbox_executor import (
     MAX_SANDBOX_OUTPUT_BYTES,
     append_attempt,
@@ -1072,6 +1073,13 @@ class Validator:
             )
             os.chmod(session_file, 0o444)
             self.session_runtime.install(registry)
+        except PackRefused as exc:
+            # The runtime refused the verified delivery's files (e.g. the catalog changed on this host):
+            # ours, never the agent's, so fail with the text the Backend classifies as a pack failure.
+            registry.close()
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation") from exc
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation") from exc
         except Exception:
             registry.close()
             raise

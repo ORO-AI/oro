@@ -682,3 +682,19 @@ def test_generated_runner_retains_agent_inference_summary(
         assert usage["inference_cost_status"] == "complete"
         assert usage["inference_cost_usd"] == expected_cost
     assert usage["inference_requests"] == expected_requests
+
+
+
+def test_a_pack_refused_at_session_start_fails_the_run_as_ours(tmp_path, monkeypatch) -> None:
+    """Runtime 4.0.1 refuses a delivery whose catalog file changed on the host before any worker starts; the run must
+    fail with the Backend's pack-failure text, never as the agent's failure."""
+    from oro_env_runtime.pack import PackRefused
+    from validator import session_registry
+
+    def refuse(self, task_id, **kwargs):
+        raise PackRefused("the pack's catalog file is missing or changed since it was verified")
+
+    monkeypatch.setattr(session_registry.SessionRegistry, "start", refuse)
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)

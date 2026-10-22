@@ -1426,14 +1426,14 @@ wheels = [
 
 [[package]]
 name = "oro-env-runtime"
-version = "4.0.0"
+version = "4.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "starlark-pyo3" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/6a/d9/a346aefd86443632f4218e2391ffea39b8e3c3486f1e90d9aaaa84c0d619/oro_env_runtime-4.0.0-py3-none-any.whl", hash = "sha256:d3075a4953d02e1f05ff34464f08c300c60a35b377114a0978a959e2e02a09c3", size = 16241, upload-time = "2026-10-22T05:44:04.58Z" },
+    { url = "https://files.pythonhosted.org/packages/12/05/b4f8a1e9a9b0db4fdf1f24b54943bf47c7377b7c4bcc95df53be3cafc073/oro_env_runtime-4.0.1-py3-none-any.whl", hash = "sha256:ceb5b2e14fac2392f76676c8f37a9c7fe720966e122f2189586179831e997f14", size = 17277, upload-time = "2026-10-22T07:53:07.42Z" },
 ]
 
 [[package]]
@@ -1506,8 +1506,8 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-local-test = [{ name = "oro-env-runtime", specifier = "==4.0.0" }]
-validator = [{ name = "oro-env-runtime", specifier = "==4.0.0" }]
+local-test = [{ name = "oro-env-runtime", specifier = "==4.0.1" }]
+validator = [{ name = "oro-env-runtime", specifier = "==4.0.1" }]
 
 [[package]]
 name = "packaging"
