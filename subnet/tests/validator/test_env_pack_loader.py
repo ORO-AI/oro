@@ -158,7 +158,8 @@ PACK_SHA = "c" * 64
 
 
 def _metadata(artifact: bytes, **updates: object) -> dict:
-    # The pinned SDK still parses the 3.x fetch response, so its fields are padded in.
+    # The Backend's contract-8 reply: the world-pack identity plus the deprecated 3.x
+    # keys, which the pinned SDK's from_dict still requires.
     metadata = {
         "pack_sha256": PACK_SHA,
         "race_id": RACE_ID,
@@ -167,14 +168,18 @@ def _metadata(artifact: bytes, **updates: object) -> dict:
         "download_url_sha256": hashlib.sha256(artifact).hexdigest(),
         "download_url_size_bytes": len(artifact),
         "artifact_signature": None,
-        "contract_version": "x",
-        "runtime_version": "x",
-        "result_schema_version": "x",
-        "catalog_epoch": "x",
+        "pack_format": 1,
+        "runtime_contract": 8,
+        "world_id": "world-1",
+        "contract_version": "oro.world.contract.8",
+        "runtime_version": "4.0.0",
+        "result_schema_version": "1",
+        "catalog_epoch": "world-1",
         "catalog_sha256": "1" * 64,
         "search_index_epoch": None,
         "search_index_sha256": None,
         "delivery_scope": "qualifying",
+        "delivery_id": "practice-1",
         "delivery_task_ids": ["t1", "t2"],
         "task_count": 2,
         "family_counts": {"x": 2},

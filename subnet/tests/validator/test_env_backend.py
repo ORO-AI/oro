@@ -46,11 +46,17 @@ def _operation(kind):
         "delivery_task_ids": ["task"],
         "task_count": 1,
         "family_counts": {"test": 1},
-        "contract_version": "v1",
-        "runtime_version": "v1",
-        "result_schema_version": "v1",
-        "catalog_epoch": "test",
+        "delivery_scope": "qualifying",
+        "delivery_id": "qualifying-1",
+        "pack_format": 1,
+        "runtime_contract": 8,
+        "world_id": "world-1",
+        "result_schema_version": "1",
         "catalog_sha256": SHA,
+        # Deprecated 3.x keys the Backend still sends; the pinned SDK requires them.
+        "contract_version": "oro.world.contract.8",
+        "runtime_version": "4.0.0",
+        "catalog_epoch": "world-1",
         "search_index_epoch": None,
         "search_index_sha256": None,
     }
@@ -65,6 +71,7 @@ def _operation(kind):
                 **pack,
                 "race_id": str(RUN),
                 "delivery_scope": "race",
+                "delivery_id": "race-1",
             },
         )
     if kind == "presign":
