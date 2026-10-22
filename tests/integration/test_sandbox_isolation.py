@@ -357,7 +357,7 @@ class TestSandboxIsolation:
         assert chat.status_code == 400 and "model" in chat.json()["error"]
 
     def test_session_calls_route_only_through_proxy(self, sandbox_container):
-        """A grouped solver turn reaches the real SessionServer only through nginx."""
+        """A grouped step (several actions in one call) reaches the real SessionServer only through nginx."""
 
         result = exec_in_container(
             sandbox_container,
@@ -373,13 +373,11 @@ class TestSandboxIsolation:
                 "-d",
                 json.dumps(
                     {
-                        "session_id": "integration-session",
-                        "call_id": "integration-group-1",
-                        "idempotency_key": "integration-group-1",
-                        "turn": 1,
-                        "calls": [
-                            {"call_id": "search", "action": {"name": "search"}},
-                            {"call_id": "message", "action": {"name": "message"}},
+                        "session_id": "integration-route",
+                        "step": 1,
+                        "actions": [
+                            {"name": "search", "args": {"query": "shoes"}},
+                            {"name": "message", "args": {"content": "Continue?"}},
                         ],
                     }
                 ),
@@ -392,12 +390,8 @@ class TestSandboxIsolation:
         body, status = result.stdout.rsplit("\n", 1)
         assert status == "200"
         response = json.loads(body)
-        assert response["solver_turn_count"] == 1
-        assert response["action_count"] == 2
-        assert [call["call_id"] for call in response["calls"]] == [
-            "search",
-            "message",
-        ]
+        assert response["step"] == 2 and response["finished"] is False
+        assert [o["tool"] for o in response["observations"]] == ["search", "message"]
 
     def test_environment_preflight_agent_runs_through_proxy(self, tmp_path):
         """The owned policy runs in the real sandbox with no inference token."""
@@ -415,15 +409,10 @@ class TestSandboxIsolation:
                     "problem_id": "positive",
                     "query": "Run the deterministic environment preflight.",
                     "environment": {
-                        "binding": {"session_id": "integration-session"},
-                        "action_groups": [
-                            [
-                                {"name": "search", "args": {"query": "shoes"}},
-                                {
-                                    "name": "message",
-                                    "args": {"content": "Continue?"},
-                                },
-                            ]
+                        "binding": {"session_id": "integration-preflight"},
+                        "actions": [
+                            {"name": "search", "args": {"query": "shoes"}},
+                            {"name": "order", "args": {"id": "a"}},
                         ],
                     },
                 }
@@ -451,9 +440,8 @@ class TestSandboxIsolation:
         row = json.loads((tmp_path / "output.jsonl").read_text(encoding="utf-8"))
         assert row["status"] == "SUCCESS"
         assert row["inference_total"] == 0
-        environment_result = row["dialogue"][0]["environment_result"]
-        assert environment_result["action_count"] == 2
-        assert environment_result["user_message"]["content"]
+        results = [turn["environment_result"] for turn in row["dialogue"]]
+        assert [(r["step"], r["finished"]) for r in results] == [(1, False), (2, True)]
 
     def test_hostile_agent_cannot_reach_validator_private_state(self, tmp_path):
         """A real sandbox sees only the documented session and proxy surface."""
@@ -481,7 +469,7 @@ class TestSandboxIsolation:
                     "schema_version": "oro.session_bootstrap.v1",
                     "sessions": [
                         {
-                            "session_id": "integration-session",
+                            "session_id": "integration-hostile",
                             "policy_view": {
                                 "query": "Public shopper request",
                                 "max_steps": 10,
