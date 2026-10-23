@@ -34,19 +34,41 @@ jobs:
         include:
           - name: sandbox
             dockerfile: docker/sandbox/Dockerfile
+            published_image: ghcr.io/oro-ai/oro/sandbox:stable
           - name: search-server
             dockerfile: docker/search-server/Dockerfile
+            published_image: ghcr.io/oro-ai/oro/search-server:stable
           - name: index-builder
             dockerfile: docker/index-builder/Dockerfile
+            published_image: ''
           - name: session-runtime
             dockerfile: tests/integration/session-runtime.Dockerfile
+            published_image: ''
     steps:
       - uses: actions/checkout@v4
-      - name: Build isolated Python images and export installed versions
+      - name: Resolve image and export installed versions
+        env:
+          PUBLISHED_IMAGE: ${{ matrix.published_image }}
         run: |
           set -euo pipefail
-          image="oro-audit-${{ matrix.name }}:local"
-          docker build -f "${{ matrix.dockerfile }}" -t "$image" .
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$PUBLISHED_IMAGE" ]; then
+            image="$PUBLISHED_IMAGE"
+            docker pull "$image"
+            image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+            if [[ ! "$image_ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::No immutable repository digest found for $image"
+              exit 1
+            fi
+            echo "- ${{ matrix.name }}: $image_ref" >> "$GITHUB_STEP_SUMMARY"
+          else
+            image="oro-audit-${{ matrix.name }}:local"
+            docker build -f "${{ matrix.dockerfile }}" -t "$image" .
+            if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+              echo "- ${{ matrix.name }}: source build; unpublished, not a live-host inventory" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- ${{ matrix.name }}: PR source build" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
           docker run --rm --entrypoint python "$image" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions() if d.metadata.get("Name"))))' > "${{ matrix.name }}.txt"
       - uses: actions/upload-artifact@v4
         with:
@@ -77,8 +99,8 @@ jobs:
       upload-sarif: false
       fail-on-vuln: false
 
-  image-scan:
-    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+  pull-request-image-scan:
+    if: github.event_name == 'pull_request'
     needs: build-image-inventories
     strategy:
       fail-fast: false
@@ -87,7 +109,24 @@ jobs:
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
     with:
       download-artifact: python-image-inventory-${{ matrix.name }}
+      matrix-property: ${{ matrix.name }}-
       scan-args: |-
         --lockfile=requirements.txt:./${{ matrix.name }}.txt
       upload-sarif: false
-      fail-on-vuln: ${{ github.event_name == 'pull_request' }}
+      fail-on-vuln: true
+
+  scheduled-image-scan:
+    if: github.event_name == 'schedule'
+    needs: build-image-inventories
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [sandbox, search-server, index-builder, session-runtime]
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      download-artifact: python-image-inventory-${{ matrix.name }}
+      matrix-property: ${{ matrix.name }}-
+      scan-args: |-
+        --lockfile=requirements.txt:./${{ matrix.name }}.txt
+      upload-sarif: false
+      fail-on-vuln: false

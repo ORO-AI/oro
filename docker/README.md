@@ -50,6 +50,11 @@ index builder and integration test images. pip-based
 images bootstrap from [Python's incident notice](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)'s pip 26.2.2 wheel and verify
 its SHA-256 hash before installing dependencies. The validator image uses uv
 0.13.4 to install that same hash-checked wheel.
+Daily dependency scans inspect the published `stable` sandbox and search
+images by immutable image digest. The index-builder and integration
+session-runtime images are not published, so their daily inventories come from
+source builds and do not describe a running host. Rebuild local images after
+dependency changes before relying on their updated packages.
 After updating this repository, rebuild the source images, then recreate the
 long-running services. The local `test` image uses the validator Dockerfile and
 is one-shot; rebuilding it updates the next local test run, so rerun your usual
