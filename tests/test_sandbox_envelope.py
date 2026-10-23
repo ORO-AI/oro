@@ -1,6 +1,7 @@
 """Envelope format tests for ORO-907 sandbox->validator IPC."""
 
 import json
+import queue
 from unittest.mock import MagicMock, patch
 
 from src.agent import sandbox_executor
@@ -86,6 +87,39 @@ class TestExecuteSingleProblemStatus:
             )
         assert result.status == SandboxProblemStatus.FAILED
         assert result.success is False
+
+    def test_result_put_just_before_exit_is_not_lost(self, tmp_path, monkeypatch):
+        """The child can put its result and exit between a timed-out get()
+        and the liveness check. The result is already in the queue then, so
+        the problem must come back as SUCCESS, not "produced no result"."""
+        monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+
+        dialogue = [{"role": "assistant", "content": "done"}]
+
+        class _Queue(queue.Queue):
+            def close(self):
+                pass
+
+        result_queue = _Queue()
+        mock_proc = MagicMock()
+        mock_proc.pid = 4
+        mock_proc.exitcode = 0
+
+        def child_finishes_during_check():
+            if result_queue.empty():
+                result_queue.put(("success", dialogue))
+            return False
+
+        mock_proc.is_alive.side_effect = child_finishes_during_check
+        with patch.object(
+            sandbox_executor._MP_CTX, "Queue", return_value=result_queue
+        ), patch.object(sandbox_executor._MP_CTX, "Process", return_value=mock_proc):
+            result = sandbox_executor.execute_single_problem(
+                {"query": "q", "problem_id": "p4"}, timeout=5
+            )
+        assert result.status == SandboxProblemStatus.SUCCESS
+        assert result.success is True
+        assert result.result == dialogue
 
     def test_missing_problem_ids_use_stable_content_fallback(
         self, tmp_path, monkeypatch

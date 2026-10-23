@@ -499,6 +499,13 @@ def execute_single_problem(
             break
         except queue.Empty:
             if not process.is_alive():
+                # The child can put its result and exit after get() timed out
+                # but before this check. A process that has exited has already
+                # flushed its queue, so one non-blocking read picks it up.
+                try:
+                    queued_result = result_queue.get_nowait()
+                except queue.Empty:
+                    pass
                 break
 
     process.join(timeout=max(0.0, deadline - time.monotonic()))
