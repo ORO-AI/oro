@@ -112,6 +112,7 @@ jobs:
       download-artifact: python-image-inventory-${{ matrix.name }}
       matrix-property: ${{ matrix.name }}-
       scan-args: |-
+        --no-resolve
         --lockfile=requirements.txt:./${{ matrix.name }}.txt
       upload-sarif: false
       fail-on-vuln: true
@@ -128,6 +129,7 @@ jobs:
       download-artifact: python-image-inventory-${{ matrix.name }}
       matrix-property: ${{ matrix.name }}-
       scan-args: |-
+        --no-resolve
         --lockfile=requirements.txt:./${{ matrix.name }}.txt
       upload-sarif: false
       fail-on-vuln: false
