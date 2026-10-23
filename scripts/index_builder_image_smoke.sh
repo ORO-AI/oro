@@ -6,6 +6,7 @@ set -euo pipefail
 image="${1:-oro-index-builder-smoke:local}"
 if [ "$#" -eq 0 ]; then
   docker build -f docker/index-builder/Dockerfile -t "$image" .
+  docker build -f docker/search-server/Dockerfile -t oro-search-server-smoke:local .
 fi
 
 tmp="$(mktemp -d)"
