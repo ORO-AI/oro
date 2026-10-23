@@ -19,7 +19,7 @@ WORKDIR /app
 # duplicating the rest of the dependency graph.
 COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
 ARG RUNTIME_PROFILE=validator
-RUN uv pip install --system 'pip>=26.2.2' && \
+RUN uv pip install --system --only-binary :all: --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' && \
     uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}
 
 # Pre-cache the canonical sentence model (avoids runtime download).
