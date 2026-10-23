@@ -38,6 +38,30 @@ Settings (environment):
 Inside the compose network the service is `http://search-server:5632`; the validator reads
 `SEARCH_SERVER_URL`. Logs go to stderr (`docker compose logs -f search-server`).
 
+## CA bundle security updates
+
+The Python requirements and images require `certifi>=2026.10.19`; pip-based
+images also bootstrap with `pip==26.2.2`, and the validator image uses uv 0.13.4.
+After updating this repository, rebuild the source images, then recreate the
+long-running services. The local `test` image uses the validator Dockerfile and
+is one-shot; rebuilding it updates the next local test run, so rerun your usual
+local test command after the build.
+
+```bash
+docker compose build --pull validator sandbox search-server test
+docker compose --profile validator up -d --force-recreate validator search-server
+```
+
+For an existing host Python environment, upgrade pip and certifi, reinstall the
+project requirements, then restart Python processes using that environment:
+
+```bash
+python -m pip install --upgrade 'pip>=26.2.2' 'certifi>=2026.10.19'
+python -m pip install -r requirements.txt
+```
+
+For uv-managed environments, use uv 0.13.4 or later and resync the environment.
+
 ## Image Caching and Reuse
 
 Docker automatically caches image layers, which significantly speeds up rebuilds:

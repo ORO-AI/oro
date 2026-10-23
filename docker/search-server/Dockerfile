@@ -9,8 +9,9 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 WORKDIR /app
 
 COPY docker/search-server/requirements.txt .
-RUN pip install --no-cache-dir --no-deps pyserini==1.0.0 && \
-    pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2 && \
+    python -m pip install --no-cache-dir --no-deps pyserini==1.0.0 && \
+    python -m pip install --no-cache-dir -r requirements.txt
 
 COPY docker/search-server/patch_pyserini.py /tmp/patch_pyserini.py
 RUN python /tmp/patch_pyserini.py && \

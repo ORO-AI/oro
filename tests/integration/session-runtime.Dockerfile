@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
-RUN pip install --no-cache-dir fastapi==0.136.0 'uvicorn[standard]==0.45.0' requests==2.33.0
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2 && \
+    python -m pip install --no-cache-dir fastapi==0.136.0 'uvicorn[standard]==0.45.0' requests==2.33.0 'certifi>=2026.10.19'
 
 WORKDIR /app
 

@@ -55,7 +55,8 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          pip install requests pytest
+          python -m pip install --upgrade 'pip>=26.2.2'
+          python -m pip install 'certifi>=2026.10.19' requests pytest
 
       - name: Run sandbox isolation tests
         run: |

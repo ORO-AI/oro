@@ -11,7 +11,8 @@ WORKDIR /app
 # requests: agent HTTP calls
 # ujson: ProblemScorer per-problem scoring
 # fastapi/uvicorn/pydantic: sandbox_server.py HTTP mode
-RUN pip install --no-cache-dir requests ujson fastapi 'uvicorn[standard]' pydantic
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2 && \
+    python -m pip install --no-cache-dir requests 'certifi>=2026.10.19' ujson fastapi 'uvicorn[standard]' pydantic
 
 # Copy agent code and source structure
 COPY src /app/src

@@ -12,3 +12,4 @@ googlesearch-python==1.3.0
 bittensor==10.5.0
 prometheus-client>=0.20.0
 psutil>=5.9.0
+certifi>=2026.10.19

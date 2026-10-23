@@ -8,3 +8,4 @@ requests==2.34.2
 tqdm==4.70.0
 ujson==5.13.0
 waitress==3.0.2
+certifi>=2026.10.19

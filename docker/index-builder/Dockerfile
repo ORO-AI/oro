@@ -8,7 +8,8 @@ COPY --from=eclipse-temurin:21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Install pyserini for index building
-RUN pip install --no-cache-dir pyserini
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.2 && \
+    python -m pip install --no-cache-dir 'certifi>=2026.10.19' pyserini
 
 WORKDIR /data
 
