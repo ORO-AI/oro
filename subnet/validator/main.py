@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import gzip
 import json
 import os
 import random
@@ -10,7 +9,6 @@ import sys
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
@@ -23,7 +21,6 @@ from bittensor.utils.btlogging import logging
 from bittensor_wallet import Wallet
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
-from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
 from oro_env_runtime.pack import PackRefused
 from src.agent.sandbox_executor import (
@@ -43,7 +40,6 @@ from .bounded_io import (
 )
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
-from .output_split import split_output_by_problem
 from .metrics import (
     ACTIVE_RUNS,
     CLAIM_WORK_SECONDS,
@@ -56,7 +52,6 @@ from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
-from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
 from . import env_pack_loader, session_registry
@@ -88,13 +83,6 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
 # Hardcoded because the bundled prometheus.yml scrapes this exact port; an
 # operator-tunable arg adds surface area without buying anything.
 METRICS_PORT = 9100
-
-# Parallel uploads in _upload_logs. Each worker does a presign roundtrip +
-# an S3 PUT, both flowing through the BackendClient's persistent connection
-# pools, so 20 workers comfortably fan out an N-problem eval without
-# starving the auth-client httpx pool. The matching Backend per-IP cap on
-# /v1/validator/* sits comfortably above the resulting RPM.
-_UPLOAD_LOGS_WORKERS = 20
 
 
 @dataclass(frozen=True)
@@ -1445,122 +1433,6 @@ class Validator:
                 )
             except OSError as e:
                 logging.debug(f"Simulator stats cleanup failed: {e}")
-
-    def _upload_logs(
-        self,
-        eval_run_id: UUID,
-        output_file: Path,
-        problem_ids: list[UUID],
-        progress_reporter: "ProgressReporter",
-    ) -> str:
-        """Upload per-problem evaluation logs to S3.
-
-        The output JSONL file contains one line per problem, each being a JSON
-        array of trajectory steps with ``extra_info.problem_id``. This method
-        splits the file by problem and uploads each as a separate gzipped object
-        so the Frontend can fetch trajectories per-problem.
-
-        After uploading, reports the S3 keys back to the Backend via progress
-        update so the download endpoint can locate them.
-
-        Args:
-            eval_run_id: The evaluation run ID (UUID).
-            output_file: Path to the output JSONL file.
-            problem_ids: List of problem UUIDs from the suite.
-            progress_reporter: ProgressReporter with per-problem scoring results.
-
-        Returns:
-            S3 key of the last successfully uploaded log (stored on the run).
-        """
-        try:
-            if not output_file.exists():
-                logging.warning(f"Output file not found: {output_file}")
-                return ""
-
-            if not problem_ids:
-                logging.warning("No problem_ids available for log upload, skipping")
-                return ""
-
-            problem_lines = split_output_by_problem(output_file, problem_ids)
-
-            # Build (pid, compressed_bytes) tuples up front so the worker
-            # function is pure I/O. Invalid problem_ids are dropped here
-            # before they reach the executor.
-            jobs: list[tuple[UUID, bytes]] = []
-            for pid_str, line_data in problem_lines.items():
-                try:
-                    pid = UUID(pid_str)
-                except ValueError:
-                    logging.warning(
-                        f"Invalid problem_id in output: {pid_str}, skipping"
-                    )
-                    continue
-                jobs.append((pid, gzip.compress(line_data)))
-
-            def _upload_one(job: tuple[UUID, bytes]) -> tuple[UUID, str] | None:
-                pid, compressed = job
-                try:
-                    presign = self.backend_client.get_presigned_upload_url(
-                        content_length=len(compressed),
-                        eval_run_id=eval_run_id,
-                        problem_id=pid,
-                    )
-                    # Rewrite localhost URLs for Docker → host connectivity
-                    if hasattr(presign, "upload_url"):
-                        presign.upload_url = _rewrite_localhost_url(presign.upload_url)
-                    self.backend_client.upload_to_s3(presign, compressed)
-                    return pid, presign.results_s3_key
-                except Exception as e:
-                    logging.warning(f"Upload failed for problem {pid}: {e}")
-                    return None
-
-            # Parallel uploads. Sized to match the BackendClient S3 session's
-            # pool_connections so we don't queue inside urllib3. Each worker
-            # does one presign roundtrip + one S3 PUT; both calls reuse the
-            # connection pool, so per-problem wall time drops from ~600 ms
-            # to ~150-200 ms.
-            uploaded_keys: dict[UUID, str] = {}
-            last_s3_key = ""
-            if jobs:
-                with ThreadPoolExecutor(
-                    max_workers=_UPLOAD_LOGS_WORKERS,
-                    thread_name_prefix="upload-logs",
-                ) as pool:
-                    for result in pool.map(_upload_one, jobs):
-                        if result is None:
-                            continue
-                        pid, s3_key = result
-                        uploaded_keys[pid] = s3_key
-                        last_s3_key = s3_key
-                        logging.info(f"Uploaded logs to {s3_key}")
-
-            # Report S3 keys back to Backend so download endpoint can find them
-            if uploaded_keys:
-                progress_updates = [
-                    ProblemProgressUpdate(
-                        problem_id=pid,
-                        status=progress_reporter.get_problem_status(str(pid)),
-                        logs_s3_key=s3_key,
-                    )
-                    for pid, s3_key in uploaded_keys.items()
-                ]
-                try:
-                    self.backend_client.report_progress(eval_run_id, progress_updates)
-                    logging.info(
-                        f"Reported logs_s3_key for {len(uploaded_keys)} problems"
-                    )
-                except Exception as e:
-                    # ORO-702 removed the progress retry queue on purpose ("no
-                    # disk retry queue for progress reports"). This post-run
-                    # logs_s3_key report has no retry path; on failure we drop it
-                    # (the affected problems keep a broken download link) and let
-                    # the warning above surface the real error. See ORO-2315.
-                    logging.warning(f"Failed to report logs_s3_key: {e}")
-
-            return last_s3_key
-        except Exception as e:
-            logging.error(f"Failed to upload logs: {e}")
-            return ""
 
     def _complete_run(
         self,
