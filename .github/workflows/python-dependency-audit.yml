@@ -59,6 +59,7 @@ jobs:
               echo "::error::No immutable repository digest found for $image"
               exit 1
             fi
+            image="$image_ref"
             echo "- ${{ matrix.name }}: $image_ref" >> "$GITHUB_STEP_SUMMARY"
           else
             image="oro-audit-${{ matrix.name }}:local"
