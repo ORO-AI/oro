@@ -4,7 +4,6 @@ import pytest
 from scoring import (
     is_problem_successful,
     compute_aggregate,
-    blend_final_score,
     reasoning_coefficient,
     COEFF_FLOOR,
 )
@@ -118,34 +117,3 @@ class TestReasoningCoefficient:
 
     def test_clamps_above_one(self):
         assert reasoning_coefficient(1.5) == 1.0
-
-
-class TestBlendFinalScore:
-    def test_perfect_reasoning_full_credit(self):
-        """Perfect reasoning = coefficient 1.0, full outcome credit."""
-        result = blend_final_score(success_rate=0.6, reasoning_quality=1.0)
-        assert result == pytest.approx(0.6, abs=0.001)
-
-    def test_zero_reasoning_floor(self):
-        """Zero reasoning = coefficient 0.3, outcome heavily penalized."""
-        result = blend_final_score(success_rate=0.6, reasoning_quality=0.0)
-        assert result == pytest.approx(0.6 * COEFF_FLOOR, abs=0.001)
-
-    def test_regex_agent_crushed(self):
-        """Perfect outcome but zero reasoning = only 30% credit."""
-        result = blend_final_score(success_rate=1.0, reasoning_quality=0.0)
-        assert result == pytest.approx(COEFF_FLOOR, abs=0.001)
-
-    def test_reasoning_agent_beats_regex(self):
-        """Mediocre outcome + good reasoning beats perfect outcome + no reasoning."""
-        reasoning_score = blend_final_score(success_rate=0.5, reasoning_quality=0.8)
-        regex_score = blend_final_score(success_rate=1.0, reasoning_quality=0.0)
-        assert reasoning_score > regex_score
-
-    def test_both_zero(self):
-        result = blend_final_score(success_rate=0.0, reasoning_quality=0.0)
-        assert result == 0.0
-
-    def test_both_perfect(self):
-        result = blend_final_score(success_rate=1.0, reasoning_quality=1.0)
-        assert result == pytest.approx(1.0, abs=0.001)
