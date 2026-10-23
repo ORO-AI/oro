@@ -57,9 +57,12 @@ local test command after the build.
 
 ```bash
 docker compose build --pull validator sandbox search-server index-builder test
-docker build --pull -f tests/integration/session-runtime.Dockerfile -t oro-session-runtime:local .
+docker compose -f docker-compose.yml -f docker-compose.test.yml build --pull session-runtime
 docker compose --profile validator up -d --force-recreate validator search-server
 ```
+
+To recreate the integration-test session runtime after rebuilding it, run
+`docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --no-deps --force-recreate session-runtime`.
 
 For an existing host Python environment, upgrade pip and certifi, reinstall the
 project requirements, then restart Python processes using that environment:

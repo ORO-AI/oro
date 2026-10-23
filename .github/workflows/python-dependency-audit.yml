@@ -25,6 +25,36 @@ permissions:
   security-events: write
 
 jobs:
+  build-image-inventories:
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sandbox
+            dockerfile: docker/sandbox/Dockerfile
+          - name: search-server
+            dockerfile: docker/search-server/Dockerfile
+          - name: index-builder
+            dockerfile: docker/index-builder/Dockerfile
+          - name: session-runtime
+            dockerfile: tests/integration/session-runtime.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build isolated Python images and export installed versions
+        run: |
+          set -euo pipefail
+          image="oro-audit-${{ matrix.name }}:local"
+          docker build -f "${{ matrix.dockerfile }}" -t "$image" .
+          docker run --rm --entrypoint python "$image" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions() if d.metadata.get("Name"))))' > "${{ matrix.name }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-image-inventory-${{ matrix.name }}
+          path: ${{ matrix.name }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
   pull-request-scan:
     if: github.event_name == 'pull_request'
     uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
@@ -46,3 +76,18 @@ jobs:
         --lockfile=requirements.txt:./docker/search-server/requirements.txt
       upload-sarif: false
       fail-on-vuln: false
+
+  image-scan:
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    needs: build-image-inventories
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [sandbox, search-server, index-builder, session-runtime]
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      download-artifact: python-image-inventory-${{ matrix.name }}
+      scan-args: |-
+        --lockfile=requirements.txt:./${{ matrix.name }}.txt
+      upload-sarif: false
+      fail-on-vuln: ${{ github.event_name == 'pull_request' }}
