@@ -1,0 +1,48 @@
+name: Python Dependency Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-dependency-audit.yml'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'docker/validator/pyproject.toml'
+      - 'docker/validator/uv.lock'
+      - 'docker/validator/Dockerfile'
+      - 'docker/search-server/requirements.txt'
+      - 'docker/search-server/Dockerfile'
+      - 'docker/sandbox/Dockerfile'
+      - 'docker/index-builder/Dockerfile'
+      - 'tests/integration/session-runtime.Dockerfile'
+      - '.github/workflows/integration-tests.yml'
+  schedule:
+    - cron: '30 12 * * *'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  pull-request-scan:
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      scan-args: |-
+        --lockfile=./docker/validator/uv.lock
+        --lockfile=requirements.txt:./requirements.txt
+        --lockfile=requirements.txt:./docker/search-server/requirements.txt
+      upload-sarif: false
+      fail-on-vuln: true
+
+  scheduled-scan:
+    if: github.event_name == 'schedule'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      scan-args: |-
+        --lockfile=./docker/validator/uv.lock
+        --lockfile=requirements.txt:./requirements.txt
+        --lockfile=requirements.txt:./docker/search-server/requirements.txt
+      upload-sarif: false
+      fail-on-vuln: false

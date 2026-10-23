@@ -1,12 +1,12 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=84.1.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "oro"
 version = "0.0.0"
 description = "ORO subnet: agent template, validator, sandbox, and search engine."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = ["certifi>=2026.10.19"]
 
 [tool.setuptools.packages.find]

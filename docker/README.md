@@ -38,9 +38,15 @@ Settings (environment):
 Inside the compose network the service is `http://search-server:5632`; the validator reads
 `SEARCH_SERVER_URL`. Logs go to stderr (`docker compose logs -f search-server`).
 
-## CA bundle security updates
+## Python dependency security updates
 
-The Python requirements and images require `certifi>=2026.10.19`; pip-based
+The validator and root Python requirements set patched floors for aiohttp,
+sentence-transformers, fsspec, multidict, urllib3 and setuptools; each isolated
+image also updates the dependencies it installs. Python images and CI paths use
+supported Python 3.11. The search image pins the official multi-platform
+Python image index digest.
+Rebuild each isolated image after changing its dependencies, including the
+index builder and integration test images. pip-based
 images bootstrap from [Python's incident notice](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)'s pip 26.2.2 wheel and verify
 its SHA-256 hash before installing dependencies. The validator image uses uv
 0.13.4 to install that same hash-checked wheel.
@@ -50,7 +56,8 @@ is one-shot; rebuilding it updates the next local test run, so rerun your usual
 local test command after the build.
 
 ```bash
-docker compose build --pull validator sandbox search-server test
+docker compose build --pull validator sandbox search-server index-builder test
+docker build --pull -f tests/integration/session-runtime.Dockerfile -t oro-session-runtime:local .
 docker compose --profile validator up -d --force-recreate validator search-server
 ```
 
