@@ -109,20 +109,3 @@ def reasoning_coefficient(reasoning_quality: float) -> float:
     if quality >= COEFF_CEILING_THRESHOLD:
         return 1.0
     return round(COEFF_FLOOR + quality * (1.0 - COEFF_FLOOR) / COEFF_CEILING_THRESHOLD, 4)
-
-
-def blend_final_score(success_rate: float, reasoning_quality: float) -> float:
-    """Compute final score as success_rate * reasoning_coefficient.
-
-    A regex agent with zero reasoning gets at most success_rate * 0.3.
-    An agent with perfect reasoning gets full credit for its outcome score.
-
-    Args:
-        success_rate: Outcome-based success rate (0.0 - 1.0).
-        reasoning_quality: Aggregate reasoning quality (0.0 - 1.0).
-
-    Returns:
-        Final score (0.0 - 1.0).
-    """
-    coeff = reasoning_coefficient(reasoning_quality)
-    return round(success_rate * coeff, 4)
