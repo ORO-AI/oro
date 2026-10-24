@@ -202,6 +202,26 @@ class TestInferenceStats:
         credit = entry["requested_models"]["credit/b"]
         assert (credit["requests"], credit["byok_cost_usd"], credit["byok_requests"]) == (2, 0.0, 0)
 
+    @pytest.mark.parametrize(
+        ("is_byok", "expected_requests"),
+        [(True, 1), ("true", 0), (1, 0), (None, 0)],
+    )
+    def test_zero_charge_call_counts_as_byok_only_on_strict_is_byok(self, tmp_path, is_byok, expected_requests):
+        path = tmp_path / "stats.jsonl"
+        stats = InferenceStats(stats_file=str(path), problem_id="p-1")
+
+        stats.record_success(
+            {"is_byok": is_byok, "cost": 0, "cost_details": {"upstream_inference_cost": 0}},
+            requested_model="byok/free",
+            result_model="byok/free",
+        )
+
+        entry = json.loads(path.read_text().splitlines()[-1])
+        assert entry["inference_byok_cost_usd"] == 0.0
+        assert entry["inference_byok_requests"] == expected_requests
+        served = entry["served_models"]["byok/free"]
+        assert (served["byok_cost_usd"], served["byok_requests"]) == (0.0, expected_requests)
+
     @patch("src.agent.proxy_client.requests")
     def test_failed_post_logs_final_status_and_provider_body(
         self, mock_requests, tmp_path

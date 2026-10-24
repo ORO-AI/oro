@@ -181,6 +181,7 @@ class InferenceStats:
         completion_tokens: int | None = None,
         cost_usd: float | None = None,
         byok_cost_usd: float = 0.0,
+        byok: bool = False,
     ) -> None:
         totals = distribution.setdefault(
             model or "Unknown model",
@@ -206,7 +207,7 @@ class InferenceStats:
         else:
             totals["cost_usd"] += cost_usd
         totals["byok_cost_usd"] += byok_cost_usd
-        totals["byok_requests"] += int(byok_cost_usd > 0)
+        totals["byok_requests"] += int(byok)
 
     def record_success(
         self,
@@ -231,8 +232,11 @@ class InferenceStats:
                 )
                 or 0.0
             )
+            byok = byok_cost > 0 or (
+                isinstance(usage, dict) and usage.get("is_byok") is True
+            )
             self._byok_cost_usd += byok_cost
-            self._byok_requests += int(byok_cost > 0)
+            self._byok_requests += int(byok)
             prompt_tokens = self._tokens(usage, "prompt_tokens")
             cached_tokens = self._tokens(
                 usage.get("prompt_tokens_details") if isinstance(usage, dict) else None,
@@ -251,6 +255,7 @@ class InferenceStats:
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
                 byok_cost_usd=byok_cost,
+                byok=byok,
             )
             self._record_model(
                 self._served_models,
@@ -261,6 +266,7 @@ class InferenceStats:
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
                 byok_cost_usd=byok_cost,
+                byok=byok,
             )
             self._flush()
 
