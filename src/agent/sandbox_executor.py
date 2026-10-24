@@ -173,6 +173,8 @@ _INFERENCE_COUNTERS = (
     "inference_failed",
     "inference_cost_usd",
     "inference_cost_missing",
+    "inference_byok_cost_usd",
+    "inference_byok_requests",
     "prompt_tokens",
     "cached_tokens",
     "completion_tokens",
@@ -217,6 +219,8 @@ def _model_inference_counters(
                 "completion_tokens",
                 "cost_usd",
                 "cost_missing",
+                "byok_cost_usd",
+                "byok_requests",
             ),
         )
         if numeric:

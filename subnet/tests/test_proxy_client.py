@@ -5,6 +5,7 @@ import os
 import tempfile
 from unittest.mock import patch, MagicMock
 
+import pytest
 
 from src.agent.proxy_client import InferenceStats, ProxyClient, RequestLog
 
@@ -95,6 +96,8 @@ class TestInferenceStats:
                 "inference_total": 3,
                 "inference_cost_usd": 0.25,
                 "inference_cost_missing": 1,
+                "inference_byok_cost_usd": 0.0,
+                "inference_byok_requests": 0,
                 "prompt_tokens": 10,
                 "cached_tokens": 6,
                 "completion_tokens": 4,
@@ -107,6 +110,8 @@ class TestInferenceStats:
                         "completion_tokens": 4,
                         "cost_usd": 0.25,
                         "cost_missing": 1,
+                        "byok_cost_usd": 0.0,
+                        "byok_requests": 0,
                     }
                 },
                 "served_models": {
@@ -118,6 +123,8 @@ class TestInferenceStats:
                         "completion_tokens": 4,
                         "cost_usd": 0.25,
                         "cost_missing": 1,
+                        "byok_cost_usd": 0.0,
+                        "byok_requests": 0,
                     }
                 },
             }
@@ -149,9 +156,51 @@ class TestInferenceStats:
             "completion_tokens": 5,
             "cost_usd": 0.2,
             "cost_missing": 0,
+            "byok_cost_usd": 0.0,
+            "byok_requests": 0,
         }
         assert entry["requested_models"]["requested/a"]["requests"] == 1
         assert entry["requested_models"]["requested/b"]["failed_requests"] == 1
+
+    @pytest.mark.parametrize(
+        "malformed_cost_details",
+        ["bad", {"upstream_inference_cost": "0.5"}, {"upstream_inference_cost": True}, {"upstream_inference_cost": -1}],
+    )
+    def test_byok_upstream_cost_is_tracked_beside_credit_cost(self, tmp_path, malformed_cost_details):
+        """A BYOK call's ``usage.cost`` is only OpenRouter's fee; the provider charge is in ``cost_details``."""
+        path = tmp_path / "stats.jsonl"
+        stats = InferenceStats(stats_file=str(path), problem_id="p-1")
+
+        stats.record_success(
+            {"cost": 0.001, "cost_details": {"upstream_inference_cost": 0.25}},
+            requested_model="byok/a",
+            result_model="byok/a",
+        )
+        stats.record_success({"cost": 0.3}, requested_model="credit/b", result_model="credit/b")
+        stats.record_success(
+            {"cost": 0.1, "cost_details": malformed_cost_details},
+            requested_model="credit/b",
+            result_model="credit/b",
+        )
+
+        entry = json.loads(path.read_text().splitlines()[-1])
+        assert round(entry["inference_cost_usd"], 6) == 0.401
+        assert entry["inference_cost_missing"] == 0
+        assert entry["inference_byok_cost_usd"] == 0.25
+        assert entry["inference_byok_requests"] == 1
+        assert entry["served_models"]["byok/a"] == {
+            "requests": 1,
+            "failed_requests": 0,
+            "prompt_tokens": 0,
+            "cached_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.001,
+            "cost_missing": 0,
+            "byok_cost_usd": 0.25,
+            "byok_requests": 1,
+        }
+        credit = entry["requested_models"]["credit/b"]
+        assert (credit["requests"], credit["byok_cost_usd"], credit["byok_requests"]) == (2, 0.0, 0)
 
     @patch("src.agent.proxy_client.requests")
     def test_failed_post_logs_final_status_and_provider_body(

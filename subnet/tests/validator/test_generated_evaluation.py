@@ -155,7 +155,16 @@ def test_empty_roster_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("provider", "stats", "expected_status"),
     [
-        ("openrouter", {"inference_cost_usd": 0.25, "cached_tokens": 8}, "complete"),
+        (
+            "openrouter",
+            {
+                "inference_cost_usd": 0.25,
+                "cached_tokens": 8,
+                "inference_byok_cost_usd": 0.75,
+                "inference_byok_requests": 2,
+            },
+            "complete",
+        ),
         (
             "openrouter",
             {"inference_cost_usd": 0.25, "inference_cost_missing": 1},
@@ -177,6 +186,10 @@ def test_episode_inference_usage_status(provider, stats, expected_status) -> Non
     assert ("inference_cost_usd" in usage) is (
         stats is not None and provider == "openrouter"
     )
+    assert ("inference_byok_cost_usd" in usage) is ("inference_cost_usd" in usage)
+    if "inference_byok_cost_usd" in usage:
+        assert usage["inference_byok_cost_usd"] == stats.get("inference_byok_cost_usd", 0)
+        assert usage["inference_byok_requests"] == stats.get("inference_byok_requests", 0)
 
 
 def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
@@ -189,15 +202,22 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
                 "cached_tokens": 8,
                 "completion_tokens": 7,
                 "inference_cost_usd": 0.3,
+                "inference_byok_cost_usd": 0.25,
+                "inference_byok_requests": 1,
                 "requested_models": {"requested/a": {"requests": 2}},
-                "served_models": {"served/a": {"requests": 2, "cost_usd": 0.3}},
+                "served_models": {
+                    "served/a": {"requests": 2, "cost_usd": 0.3, "byok_cost_usd": 0.25, "byok_requests": 1}
+                },
             },
             "agent-2": {
                 "inference_total": 1,
                 "inference_failed": 1,
+                "inference_byok_cost_usd": 0.5,
+                "inference_byok_requests": 1,
                 "requested_models": {
                     "requested/b": {"requests": 1, "failed_requests": 1}
                 },
+                "served_models": {"served/a": {"byok_cost_usd": 0.5, "byok_requests": 1}},
             },
         },
         "openrouter",
@@ -211,10 +231,12 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
         "requested/b": {"requests": 1, "failed_requests": 1},
     }
     assert summary["served_models"] == {
-        "served/a": {"requests": 2, "cost_usd": 0.3},
+        "served/a": {"requests": 2, "cost_usd": 0.3, "byok_cost_usd": 0.75, "byok_requests": 2},
     }
     assert summary["inference_cost_status"] == "complete"
     assert summary["inference_cost_usd"] == 0.3
+    assert summary["inference_byok_cost_usd"] == 0.75
+    assert summary["inference_byok_requests"] == 2
 
 
 def test_episode_resource_usage_counts_tool_steps() -> None:

@@ -130,6 +130,12 @@ def summarize_episode_resource_usage(
             usage["inference_cost_usd"] = float(
                 stats.get("inference_cost_usd", 0)
             )
+            usage["inference_byok_cost_usd"] = float(
+                stats.get("inference_byok_cost_usd", 0)
+            )
+            usage["inference_byok_requests"] = int(
+                stats.get("inference_byok_requests", 0)
+            )
         episodes[str(result["task_id"])] = usage
     return episodes
 
@@ -150,6 +156,8 @@ def summarize_agent_inference_usage(
     }
     cost_usd = 0.0
     cost_missing = 0
+    byok_cost_usd = 0.0
+    byok_requests = 0
     for stats in stats_by_session.values():
         totals["inference_requests"] += int(stats.get("inference_total", 0))
         totals["inference_failed_requests"] += int(stats.get("inference_failed", 0))
@@ -158,6 +166,8 @@ def summarize_agent_inference_usage(
         totals["completion_tokens"] += int(stats.get("completion_tokens", 0))
         cost_usd += float(stats.get("inference_cost_usd", 0))
         cost_missing += int(stats.get("inference_cost_missing", 0))
+        byok_cost_usd += float(stats.get("inference_byok_cost_usd", 0))
+        byok_requests += int(stats.get("inference_byok_requests", 0))
         for distribution in ("requested_models", "served_models"):
             for model, counters in dict(stats.get(distribution) or {}).items():
                 model_total = totals[distribution].setdefault(model, {})
@@ -169,6 +179,8 @@ def summarize_agent_inference_usage(
     else:
         totals["inference_cost_status"] = "complete" if cost_missing == 0 else "partial"
         totals["inference_cost_usd"] = cost_usd
+        totals["inference_byok_cost_usd"] = byok_cost_usd
+        totals["inference_byok_requests"] = byok_requests
     return totals
 
 

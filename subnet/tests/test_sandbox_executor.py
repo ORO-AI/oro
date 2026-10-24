@@ -14,6 +14,7 @@ from src.agent.sandbox_executor import (
     _read_request_log,
     build_result_envelope,
     execute_single_problem,
+    merge_inference_stats,
     read_inference_stats,
     read_regular_file,
 )
@@ -104,6 +105,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
         "inference_total": 1,
         "inference_cost_usd": 0.25,
         "inference_cost_missing": 0,
+        "inference_byok_cost_usd": 0.0,
+        "inference_byok_requests": 0,
         "prompt_tokens": 10,
         "cached_tokens": 6,
         "completion_tokens": 2,
@@ -116,6 +119,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
                 "completion_tokens": 2,
                 "cost_usd": 0.25,
                 "cost_missing": 0,
+                "byok_cost_usd": 0.0,
+                "byok_requests": 0,
                 }
             },
             "served_models": {
@@ -127,6 +132,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
                     "completion_tokens": 2,
                     "cost_usd": 0.25,
                     "cost_missing": 0,
+                    "byok_cost_usd": 0.0,
+                    "byok_requests": 0,
                 }
             },
         }
@@ -269,6 +276,42 @@ class TestReadRequestLog:
             assert len(entries) == 2
         finally:
             os.unlink(path)
+
+
+def test_merge_sums_byok_cost_across_sources():
+    agent = {
+        "p1": {
+            "problem_id": "p1",
+            "inference_total": 2,
+            "inference_cost_usd": 0.301,
+            "inference_byok_cost_usd": 0.25,
+            "inference_byok_requests": 1,
+            "served_models": {"byok/a": {"requests": 2, "cost_usd": 0.301, "byok_cost_usd": 0.25, "byok_requests": 1}},
+        }
+    }
+    simulator = {
+        "p1": {
+            "problem_id": "p1",
+            "inference_total": 1,
+            "inference_cost_usd": 0.2,
+            "inference_byok_cost_usd": 0.5,
+            "inference_byok_requests": 1,
+            "served_models": {"byok/a": {"requests": 1, "cost_usd": 0.2, "byok_cost_usd": 0.5, "byok_requests": 1}},
+        }
+    }
+
+    usage = merge_inference_stats(agent, simulator)["p1"]
+
+    assert usage["inference_total"] == 3
+    assert round(usage["inference_cost_usd"], 6) == 0.501
+    assert usage["inference_byok_cost_usd"] == 0.75
+    assert usage["inference_byok_requests"] == 2
+    assert usage["served_models"]["byok/a"] == {
+        "requests": 3,
+        "cost_usd": 0.501,
+        "byok_cost_usd": 0.75,
+        "byok_requests": 2,
+    }
 
 
 def test_sums_counters_from_multiple_clients_for_one_problem(tmp_path):

@@ -129,6 +129,9 @@ class InferenceStats:
         self._failed = 0
         self._cost_usd = 0.0
         self._cost_missing = 0
+        # BYOK: the upstream provider's charge, reported separately from the credit cost.
+        self._byok_cost_usd = 0.0
+        self._byok_requests = 0
         self._prompt_tokens = 0
         self._cached_tokens = 0
         self._completion_tokens = 0
@@ -156,8 +159,8 @@ class InferenceStats:
         return max(value, 0)
 
     @staticmethod
-    def _cost(usage: object) -> float | None:
-        value = usage.get("cost") if isinstance(usage, dict) else None
+    def _cost(usage: object, key: str = "cost") -> float | None:
+        value = usage.get(key) if isinstance(usage, dict) else None
         if (
             not isinstance(value, (int, float))
             or isinstance(value, bool)
@@ -177,6 +180,7 @@ class InferenceStats:
         cached_tokens: int | None = None,
         completion_tokens: int | None = None,
         cost_usd: float | None = None,
+        byok_cost_usd: float = 0.0,
     ) -> None:
         totals = distribution.setdefault(
             model or "Unknown model",
@@ -188,6 +192,8 @@ class InferenceStats:
                 "completion_tokens": 0,
                 "cost_usd": 0.0,
                 "cost_missing": 0,
+                "byok_cost_usd": 0.0,
+                "byok_requests": 0,
             },
         )
         totals["requests"] += 1
@@ -199,6 +205,8 @@ class InferenceStats:
             totals["cost_missing"] += int(not failed)
         else:
             totals["cost_usd"] += cost_usd
+        totals["byok_cost_usd"] += byok_cost_usd
+        totals["byok_requests"] += int(byok_cost_usd > 0)
 
     def record_success(
         self,
@@ -214,6 +222,17 @@ class InferenceStats:
                 self._cost_usd += cost
             else:
                 self._cost_missing += 1
+            # OpenRouter reports the provider's charge for BYOK requests here; it is
+            # 0 or null otherwise, so absence is not a missing cost.
+            byok_cost = (
+                self._cost(
+                    usage.get("cost_details") if isinstance(usage, dict) else None,
+                    "upstream_inference_cost",
+                )
+                or 0.0
+            )
+            self._byok_cost_usd += byok_cost
+            self._byok_requests += int(byok_cost > 0)
             prompt_tokens = self._tokens(usage, "prompt_tokens")
             cached_tokens = self._tokens(
                 usage.get("prompt_tokens_details") if isinstance(usage, dict) else None,
@@ -231,6 +250,7 @@ class InferenceStats:
                 cached_tokens=cached_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
+                byok_cost_usd=byok_cost,
             )
             self._record_model(
                 self._served_models,
@@ -240,6 +260,7 @@ class InferenceStats:
                 cached_tokens=cached_tokens,
                 completion_tokens=completion_tokens,
                 cost_usd=cost,
+                byok_cost_usd=byok_cost,
             )
             self._flush()
 
@@ -273,6 +294,8 @@ class InferenceStats:
                 "inference_total": self._success + self._failed,
                 "inference_cost_usd": self._cost_usd,
                 "inference_cost_missing": self._cost_missing,
+                "inference_byok_cost_usd": self._byok_cost_usd,
+                "inference_byok_requests": self._byok_requests,
                 "prompt_tokens": self._prompt_tokens,
                 "cached_tokens": self._cached_tokens,
                 "completion_tokens": self._completion_tokens,
