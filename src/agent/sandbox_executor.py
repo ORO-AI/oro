@@ -504,6 +504,13 @@ def execute_single_problem(
             break
         except queue.Empty:
             if not process.is_alive():
+                # A normal exit flushes the queue; recover a result that arrived
+                # after the timed read. Abnormal exits may leave a partial item.
+                if process.exitcode == 0:
+                    try:
+                        queued_result = result_queue.get_nowait()
+                    except queue.Empty:
+                        pass
                 break
 
     process.join(timeout=max(0.0, deadline - time.monotonic()))

@@ -180,6 +180,9 @@ Scores come from the runtime's verdicts, not from anything the agent writes.
 Interrupted runs keep the episodes that were graded. The printed paths map to
 `./logs/` on your host:
 
+A completed sandbox task retains its result even if its child process exits
+immediately afterward; timeouts and exits without a result still fail the task.
+
 ```bash
 run_dir=./logs/environment-runs/local-...
 python3 -m json.tool "$run_dir/summary.json"
