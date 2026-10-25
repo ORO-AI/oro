@@ -167,27 +167,36 @@ class TestInferenceStats:
         ["bad", {"upstream_inference_cost": "0.5"}, {"upstream_inference_cost": True}, {"upstream_inference_cost": -1}],
     )
     def test_byok_upstream_cost_is_tracked_beside_credit_cost(self, tmp_path, malformed_cost_details):
-        """A BYOK call's ``usage.cost`` is only OpenRouter's fee; the provider charge is in ``cost_details``."""
+        """Only ``is_byok: true`` marks a BYOK call; OpenRouter fills ``upstream_inference_cost`` on credit calls too."""
         path = tmp_path / "stats.jsonl"
         stats = InferenceStats(stats_file=str(path), problem_id="p-1")
 
         stats.record_success(
-            {"cost": 0.001, "cost_details": {"upstream_inference_cost": 0.25}},
+            {"is_byok": True, "cost": 0.001, "cost_details": {"upstream_inference_cost": 0.25}},
             requested_model="byok/a",
             result_model="byok/a",
         )
-        stats.record_success({"cost": 0.3}, requested_model="credit/b", result_model="credit/b")
         stats.record_success(
-            {"cost": 0.1, "cost_details": malformed_cost_details},
+            {"is_byok": False, "cost": 0.3, "cost_details": {"upstream_inference_cost": 0.3}},
             requested_model="credit/b",
             result_model="credit/b",
         )
+        stats.record_success(
+            {"cost": 0.1, "cost_details": {"upstream_inference_cost": 0.1}},
+            requested_model="credit/b",
+            result_model="credit/b",
+        )
+        stats.record_success(
+            {"is_byok": True, "cost": 0.05, "cost_details": malformed_cost_details},
+            requested_model="byok/malformed",
+            result_model="byok/malformed",
+        )
 
         entry = json.loads(path.read_text().splitlines()[-1])
-        assert round(entry["inference_cost_usd"], 6) == 0.401
+        assert round(entry["inference_cost_usd"], 6) == 0.451
         assert entry["inference_cost_missing"] == 0
         assert entry["inference_byok_cost_usd"] == 0.25
-        assert entry["inference_byok_requests"] == 1
+        assert entry["inference_byok_requests"] == 2
         assert entry["served_models"]["byok/a"] == {
             "requests": 1,
             "failed_requests": 0,
@@ -201,17 +210,21 @@ class TestInferenceStats:
         }
         credit = entry["requested_models"]["credit/b"]
         assert (credit["requests"], credit["byok_cost_usd"], credit["byok_requests"]) == (2, 0.0, 0)
+        malformed = entry["requested_models"]["byok/malformed"]
+        assert (malformed["byok_cost_usd"], malformed["byok_requests"]) == (0.0, 1)
 
     @pytest.mark.parametrize(
-        ("is_byok", "expected_requests"),
-        [(True, 1), ("true", 0), (1, 0), (None, 0)],
+        ("is_byok", "upstream", "expected_requests"),
+        [(True, 0, 1), ("true", 0, 0), (1, 0, 0), (None, 0, 0), ("true", 0.5, 0), (False, 0.5, 0)],
     )
-    def test_zero_charge_call_counts_as_byok_only_on_strict_is_byok(self, tmp_path, is_byok, expected_requests):
+    def test_call_counts_as_byok_only_on_strict_is_byok(
+        self, tmp_path, is_byok, upstream, expected_requests
+    ):
         path = tmp_path / "stats.jsonl"
         stats = InferenceStats(stats_file=str(path), problem_id="p-1")
 
         stats.record_success(
-            {"is_byok": is_byok, "cost": 0, "cost_details": {"upstream_inference_cost": 0}},
+            {"is_byok": is_byok, "cost": upstream, "cost_details": {"upstream_inference_cost": upstream}},
             requested_model="byok/free",
             result_model="byok/free",
         )

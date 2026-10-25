@@ -223,17 +223,13 @@ class InferenceStats:
                 self._cost_usd += cost
             else:
                 self._cost_missing += 1
-            # OpenRouter reports the provider's charge for BYOK requests here; it is
-            # 0 or null otherwise, so absence is not a missing cost.
+            # OpenRouter also fills upstream_inference_cost (equal to cost) on non-BYOK
+            # calls, so only a strict is_byok identifies the miner's own provider key.
+            byok = isinstance(usage, dict) and usage.get("is_byok") is True
             byok_cost = (
-                self._cost(
-                    usage.get("cost_details") if isinstance(usage, dict) else None,
-                    "upstream_inference_cost",
-                )
-                or 0.0
-            )
-            byok = byok_cost > 0 or (
-                isinstance(usage, dict) and usage.get("is_byok") is True
+                self._cost(usage.get("cost_details"), "upstream_inference_cost") or 0.0
+                if byok
+                else 0.0
             )
             self._byok_cost_usd += byok_cost
             self._byok_requests += int(byok)
