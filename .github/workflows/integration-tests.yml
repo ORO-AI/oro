@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - 'docker/search-server/**'
+      - 'docker/index-builder/**'
       - 'docker/proxy/**'
       - 'docker/sandbox/**'
       - 'subnet/validator/session_registry.py'
@@ -15,6 +16,7 @@ on:
       - 'src/search_engine/**'
       - 'src/sandbox/**'
       - 'tests/integration/**'
+      - 'scripts/index_builder_image_smoke.sh'
       - 'docker-compose.yml'
       - 'docker-compose.test.yml'
       - '.github/workflows/integration-tests.yml'
@@ -32,7 +34,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+
+      - name: Build and import-smoke the production search image
+        run: |
+          docker build -f docker/search-server/Dockerfile -t oro-search-server-smoke:local .
+          docker run --rm --entrypoint python oro-search-server-smoke:local -c 'from pyserini.search.lucene import LuceneSearcher; from src.search_engine.worlds import app; print("search image imports passed")'
+
+      - name: Build and smoke the production index-builder image
+        run: |
+          docker build -f docker/index-builder/Dockerfile -t oro-index-builder-smoke:local .
+          scripts/index_builder_image_smoke.sh oro-index-builder-smoke:local
 
       - name: Build services
         run: |
@@ -55,7 +67,8 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          pip install requests pytest
+          python -m pip install --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70'
+          python -m pip install 'certifi>=2026.10.19' 'urllib3>=2.8.0' 'setuptools>=84.1.0' requests pytest
 
       - name: Run sandbox isolation tests
         run: |

@@ -48,7 +48,7 @@ from oro_sdk.models.progress_update_request import ProgressUpdateRequest
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.top_agent_response import TopAgentResponse
 from oro_sdk.types import UNSET, Unset, Response
-from oro_env_runtime.contracts import RUNTIME_CONTRACT
+from oro_env_runtime import RUNTIME_CONTRACT
 from oro_sdk import errors as sdk_errors
 
 from .types import ResourceMetrics
@@ -372,7 +372,7 @@ class BackendClient:
 
         Args:
             service_versions: Optional Docker image digests for validator stack services.
-            resource_metrics: Optional host metrics dict — keys cpu_pct, ram_pct,
+            resource_metrics: Optional resource metrics dict — keys cpu_pct, ram_pct,
                 disk_pct, docker_container_count. Each is independently optional.
 
         Returns:
@@ -411,7 +411,7 @@ class BackendClient:
         Args:
             eval_run_id: The evaluation run ID.
             service_versions: Optional Docker image digests for validator stack services.
-            resource_metrics: Optional host metrics dict — same keys as claim_work.
+            resource_metrics: Optional resource metrics dict — same keys as claim_work.
 
         Returns:
             HeartbeatResponse with updated lease expiration.
@@ -427,9 +427,10 @@ class BackendClient:
             "client": self._auth_client,
         }
 
-        fields = _heartbeat_fields(service_versions, resource_metrics)
-        if fields:
-            kwargs["body"] = SdkHeartbeatRequest(**fields)
+        body = SdkHeartbeatRequest(**_heartbeat_fields(service_versions, resource_metrics))
+        # The pinned SDK predates the heartbeat's runtime_contract field.
+        body.additional_properties["runtime_contract"] = RUNTIME_CONTRACT
+        kwargs["body"] = body
 
         return self._call_api(
             heartbeat.sync_detailed,

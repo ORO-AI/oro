@@ -8,6 +8,7 @@ copying it off a VPS.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
 import re
@@ -17,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from subnet.sandbox import host_path
-from subnet.validator.env_pack_loader import PACK_VERSION_IDENTITIES
 
 VIEWER_DIR = Path(__file__).resolve().parents[1] / "trajectory-viewer"
 
@@ -27,6 +27,7 @@ VIEWER_DIR = Path(__file__).resolve().parents[1] / "trajectory-viewer"
 _VIEWER_MODULES = (
     "adapters/atif.js",
     "adapters/oro.js",
+    "adapters/world.js",
     "adapters/index.js",
     "loading.js",
     "render.js",
@@ -62,13 +63,9 @@ def _agent_line(summary: dict[str, Any]) -> str:
 
 def _problem_line(summary: dict[str, Any], selected: int) -> str:
     available = int(summary.get("pack_task_count") or selected)
-    # Without --problems the roster is the qualifying selection, deterministic and
-    # seedless. Only call a run sampled when it actually was, otherwise a larger
-    # override pack reads as sampled when nothing was sampled.
+    # Without --problems every task runs. Only call a run sampled when it was.
     if summary.get("selection_mode") != "random_sample":
-        if selected >= available:
-            return f"all {available}"
-        return f"{selected} of {available}, qualifying roster"
+        return f"all {available}"
     seed = summary.get("selection_seed")
     repeat = "" if seed is None else f", repeat with --seed {seed}"
     return f"{selected} of {available}, sampled{repeat}"
@@ -86,22 +83,22 @@ def render_console_report(
     def paint(text: str, *codes: str) -> str:
         return f"{''.join(codes)}{text}{_RESET}" if color else text
 
-    def reward_paint(reward: float, outcome: str) -> str:
-        text = f"{reward:.2f}"
-        if outcome != "completed" or reward <= 0:
+    def score_paint(score: float) -> str:
+        text = f"{score:.2f}"
+        if score <= 0:
             return paint(text, _RED)
-        if reward >= 1:
+        if score >= 1:
             return paint(text, _GREEN)
         return paint(text, _YELLOW)
 
     tasks: list[dict[str, Any]] = summary["tasks"]
-    models: dict[str, str] = summary.get("models") or {}
     pack_sha256 = str(summary["pack_sha256"])
     lines = [
         f"{paint('ORO Bench local run', _BOLD)}  {paint(str(summary['run_id']), _CYAN)}",
         f"  pack        {pack_sha256[:8]}…{pack_sha256[-4:]}",
+        f"  world       {summary.get('world_id')}",
         f"  problems    {_problem_line(summary, len(tasks))}",
-        f"  runtime     {PACK_VERSION_IDENTITIES['runtime_version']}",
+        f"  runtime     {importlib.metadata.version('oro-env-runtime')}",
         f"  inference   {provider}",
         f"  agent       {_agent_line(summary)}",
         (
@@ -111,38 +108,26 @@ def render_console_report(
         (
             f"              {paint('agent and mapped per provider; custom agents choose in code)', _DIM)}"
         ),
-        f"  simulator   {models.get('user_simulator', 'not declared')}",
-        f"  judge       {models.get('judge', 'not declared')}",
         "",
     ]
 
-    by_family: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_category: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for task in tasks:
-        by_family[str(task.get("family") or "unknown")].append(task)
+        # No category means correct only for a completed episode; one without a verdict (a quarantine or a
+        # world error) is grouped under its outcome, with the error shown.
+        outcome = task.get("outcome") or "completed"
+        by_category[str(task.get("category") or ("correct" if outcome == "completed" else outcome))].append(task)
     width = max((len(str(task.get("task_id"))) for task in tasks), default=0)
-    label_width = max([width, *(len(family) for family in by_family)]) + 4
-    for family, rows in by_family.items():
-        rewards = [float(row.get("reward") or 0) for row in rows]
-        passed = sum(1 for row in rows if row.get("correct"))
-        mean = sum(rewards) / len(rewards)
-        lines.append(
-            f"{paint(f'{family:<{label_width}}', _BOLD)}"
-            f"mean {mean:.2f}  {passed}/{len(rows)} passed"
-        )
-        for row, reward in zip(rows, rewards):
-            outcome = str(row.get("outcome") or "")
-            detail = ""
-            if outcome != "completed":
-                classification = row.get("error_classification") or "error"
-                problem = f"{classification}: {row.get('error_detail') or outcome}"
-                detail = f"  {paint(problem, _RED)}"
-            failure = row.get("failure") or {}
-            if failure.get("primary"):
-                text = f"{failure['primary']} ({', '.join(failure['categories'])})"
-                detail += f"  {paint(text, _YELLOW)}"
+    for category, rows in sorted(by_category.items()):
+        lines.append(f"{paint(category, _BOLD)}  {len(rows)} task(s)")
+        for row in rows:
+            flags = row.get("flags") or []
+            if row.get("error_detail"):
+                flags = [*flags, str(row["error_detail"])]
+            detail = f"  {paint(', '.join(flags), _YELLOW)}" if flags else ""
             lines.append(
-                f"  {str(row.get('task_id')):<{width}}  {outcome:<18}"
-                f"{reward_paint(reward, outcome)}{detail}"
+                f"  {str(row.get('task_id')):<{width}}  "
+                f"{score_paint(float(row.get('score') or 0))}{detail}"
             )
         lines.append("")
 

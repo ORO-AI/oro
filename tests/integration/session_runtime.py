@@ -19,82 +19,54 @@ class _IntegrationRegistry:
     private_canary = "ORO_PRIVATE_RUNTIME_CANARY_1866"
 
     def __init__(self) -> None:
-        self._responses: dict[str, tuple[str, str, dict[str, Any]]] = {}
-        self._call_ids: dict[str, str] = {}
+        # Per session: {step: (action hash, response)}, the last step and whether it finished. Each test opens
+        # its own "integration-..." session; any other id is unknown.
+        self._sessions: dict[str, dict[str, Any]] = {}
 
     def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
-        if envelope.get("session_id") != "integration-session":
+        """The contract-8 call shape and rules of ``SessionRegistry.call``: one action (or a list) per step,
+        steps in sequence, a step replayed only with the same action, and an order or decline finishing."""
+        if not isinstance(envelope, dict):
+            raise ValueError("call envelope must be an object")
+        session_id = envelope.get("session_id")
+        if not isinstance(session_id, str) or not session_id.startswith("integration-"):
             raise InvalidSessionError("unknown session_id")
-        call_id = envelope.get("call_id")
-        idempotency_key = envelope.get("idempotency_key")
-        if not isinstance(call_id, str) or not call_id:
-            raise ValueError("call_id must be a non-empty string")
-        if not isinstance(idempotency_key, str) or not idempotency_key:
-            raise ValueError("idempotency_key must be a non-empty string")
-        calls = envelope.get("calls")
-        if not isinstance(calls, list) or not calls:
-            raise ValueError("calls must be a non-empty list")
+        state = self._sessions.setdefault(session_id, {"responses": {}, "steps": 0, "finished": False})
+        step = envelope.get("step")
+        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+            raise ValueError("step must be a positive integer")
+        action, actions = envelope.get("action"), envelope.get("actions")
+        if (action is None) == (actions is None):
+            raise ValueError("set exactly one of action or actions")
+        actions = [action] if action is not None else actions
+        if not isinstance(actions, list) or not actions or not all(
+            isinstance(a, dict) and isinstance(a.get("name"), str) for a in actions
+        ):
+            raise ValueError("each action must be an object with a string name")
         action_hash = hashlib.sha256(
-            json.dumps(
-                calls,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode()
+            json.dumps(actions, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         ).hexdigest()
-        cached = self._responses.get(idempotency_key)
+        cached = state["responses"].get(step)
         if cached is not None:
-            cached_call_id, cached_action_hash, cached_response = cached
-            if cached_call_id != call_id or cached_action_hash != action_hash:
-                raise InvalidSessionError(
-                    "idempotency key reused with a different call or action"
-                )
-            replayed = copy.deepcopy(cached_response)
-            replayed["replayed"] = True
-            return replayed
-
-        bound_call_ids = [call_id, *[str(call.get("call_id") or "") for call in calls]]
-        if any(not value for value in bound_call_ids):
-            raise ValueError("each call_id must be a non-empty string")
-        if len(bound_call_ids) != len(set(bound_call_ids)):
-            raise ValueError("call ids within one solver turn must be unique")
-        for bound_call_id in bound_call_ids:
-            previous_key = self._call_ids.get(bound_call_id)
-            if previous_key is not None:
-                raise InvalidSessionError(
-                    f"call_id already belongs to idempotency key {previous_key!r}"
-                )
-        public_calls = [
-            {
-                "call_id": str(call.get("call_id") or ""),
-                "observation": {
-                    "observation": {"ok": True},
-                    "done": False,
-                    "error": None,
-                },
-            }
-            for call in calls
-        ]
-        response = {
-            "session_id": "integration-session",
-            "call_id": call_id,
-            "turn": int(envelope.get("turn") or 1),
-            "solver_turn_count": int(envelope.get("turn") or 1),
-            "action_count": len(calls),
-            "calls": public_calls,
-            "user_message": {"content": "continue with the selected option"},
-            "provider_status": "complete",
-            "environment_error": False,
-            "replayed": False,
-        }
-        self._responses[idempotency_key] = (
-            call_id,
-            action_hash,
-            copy.deepcopy(response),
-        )
-        for bound_call_id in bound_call_ids:
-            self._call_ids[bound_call_id] = idempotency_key
-        return response
+            if cached[0] != action_hash:
+                raise InvalidSessionError("step reused with a different action")
+            return {**copy.deepcopy(cached[1]), "replayed": True}
+        if state["finished"]:
+            raise InvalidSessionError("the episode has finished")
+        if step != state["steps"] + 1:
+            raise InvalidSessionError(f"step does not match session sequence: expected {state['steps'] + 1}")
+        observations = []
+        for item in actions:
+            state["steps"] += 1
+            observations.append({"ok": True, "tool": item["name"]})
+            if item["name"] in ("order", "decline"):
+                state["finished"] = True
+                break
+        response: dict[str, Any] = {"observation": observations[-1], "finished": state["finished"], "step": state["steps"]}
+        if envelope.get("actions") is not None:
+            response["observations"] = observations
+        state["responses"][step] = (action_hash, copy.deepcopy(response))
+        return {**response, "replayed": False}
 
     def close(self) -> None:
         return None

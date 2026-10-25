@@ -171,6 +171,10 @@ def build_sandbox_command(
             "4g",
             "--pids-limit",
             "256",
+            # Leave a core for the validator's pack workers: an agent that saturates
+            # every core could push pack code into wall-clock trips.
+            "--cpus",
+            str(max(1, (os.cpu_count() or 2) - 1)),
             "--ulimit",
             # 4096 fds: at SANDBOX_MAX_WORKERS=60 a typical agent holds ~5 sockets
             # in flight per worker (HTTP + DNS + keepalive), pushing toward the

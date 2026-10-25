@@ -1,12 +1,16 @@
 """Feature-flagged, validator-owned environment startup preflight.
 
-The preflight uses a deterministic local policy and zero model inference. It
-proves the real sandbox -> proxy -> validator session path before the validator
-begins claiming work, without attaching experimental work to a miner run.
+The preflight builds a small neutral world in validator code, signs it with a
+key generated for this run only, and drives two scripted policies through the
+real sandbox -> proxy -> validator session path with stub model and search
+clients (zero inference). It checks both verdicts and that each re-grades from
+its recorded readings before the validator begins claiming work.
 """
 
 from __future__ import annotations
 
+import base64
+import importlib.metadata
 import json
 import time
 from collections.abc import Callable
@@ -14,25 +18,103 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid5
 
-from oro_env_runtime import loop
-from oro_env_runtime.pack import read_task_rows
-from oro_env_runtime.schema import CandidateRef
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from oro_env_runtime import PACK_FORMAT, RUNTIME_CONTRACT, canonical
+from oro_env_runtime.pack import Pack, load_pack, signed_bytes
 from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, read_regular_file
 
 from . import environment_preflight_agent
-from .env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
-from .session_registry import SessionRegistry, _deliver
+from .episode_emitter import replay_matches
+from .session_registry import SessionRegistry
 from .session_service import SessionRuntime
 
 
-POSITIVE_POLICY = "oro.reference_policy.v1.positive"
-NEGATIVE_POLICY = "oro.reference_policy.v1.negative"
+POSITIVE_POLICY = "positive"
+NEGATIVE_POLICY = "negative"
 INFERENCE_USD_CAP = "0.00"
 _PREFLIGHT_NAMESPACE = UUID("840c8091-3cd2-4dd0-9b7a-c7fd47d51c5c")
-_SIMULATOR_REPLY = {
-    "content": "Please continue with the in-stock option that meets the request.",
-    "action": "continue",
-    "reason": "deterministic environment preflight",
+_KEY_ID = "validator-preflight"
+_REQUEST = "Order one blue mug."
+_JUDGE = {"model": "preflight-judge", "prompt": "Answer PASS."}
+_CATALOG = [
+    {"id": "blue-mug", "title": "blue mug"},
+    {"id": "red-mug", "title": "red mug"},
+]
+_TOOLS = [
+    {
+        "name": "search",
+        "handler": "h_search",
+        "description": "Search items by words.",
+        "parameters": {
+            "type": "object",
+            "required": ["query"],
+            "additionalProperties": False,
+            "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 100}},
+        },
+    },
+    {
+        "name": "order",
+        "handler": "h_order",
+        "description": "Order one of an item.",
+        "parameters": {
+            "type": "object",
+            "required": ["id"],
+            "additionalProperties": False,
+            "properties": {"id": {"type": "string", "maxLength": 100}},
+        },
+    },
+]
+_WORLD_CODE = '''
+def start(task):
+    return None
+
+def h_search(args):
+    found = search("titles", args["query"], {"k": 5})
+    ids = [h["id"] for h in found["hits"]] if found["ok"] else []
+    return {"results": [{"id": i, "title": catalog_get(i)["title"]} for i in ids]}
+
+def h_order(args):
+    if catalog_get(args["id"]) == None:
+        return {"error": "no such item"}
+    basket_set(args["id"], 1)
+    request_order(basket_get())
+    return {"ordered": args["id"]}
+
+def call(handler, args):
+    if handler == "h_search":
+        return h_search(args)
+    return h_order(args)
+
+def message(text):
+    return ""
+
+def turn():
+    return None
+
+def can_finish(order):
+    return {"ok": True, "observation": {"status": "ordered"}}
+
+def grade(episode, answer):
+    end = episode[-1]
+    if end["reason"] != "order":
+        return {"score": 0.0, "category": "did not finish"}
+    if [line["id"] for line in end["order"]["lines"]] != [answer["id"]]:
+        return {"score": 0.0, "category": "request not met"}
+    check = model_call(answer["judge"]["model"], answer["judge"]["prompt"], {})
+    if check["ok"] and check["text"] == "PASS":
+        return {"score": 1.0, "category": None}
+    return {"score": 0.5, "category": "process requirement missed"}
+'''
+POLICY_ACTIONS: dict[str, list[dict[str, Any]]] = {
+    policy: [
+        {"name": "search", "args": {"query": "blue mug"}},
+        {"name": "order", "args": {"id": item}},
+    ]
+    for policy, item in ((POSITIVE_POLICY, "blue-mug"), (NEGATIVE_POLICY, "red-mug"))
+}
+EXPECTED_VERDICTS = {
+    POSITIVE_POLICY: (1.0, None),
+    NEGATIVE_POLICY: (0.0, "request not met"),
 }
 
 SandboxRunner = Callable[
@@ -45,204 +127,101 @@ class EnvironmentPreflightError(RuntimeError):
     """The feature-flagged environment path failed its startup gate."""
 
 
-class _DeterministicSimulator:
-    def __init__(self) -> None:
-        self._discloser = self  # loop.reword_utterances says each line through it
+class _StubModels:
+    """Answers every completion with PASS; the preflight world never decides."""
 
-    async def say(self, _tid: str, line: str) -> tuple[str, dict[str, Any]]:
-        return line, {}
+    def complete(self, model: str, prompt: str, params: dict, timeout: float) -> str:
+        return "PASS"
 
-    async def respond(
-        self,
-        _transcript: list[dict[str, Any]],
-        _signal: dict[str, Any] | None,
-    ) -> dict[str, str]:
-        return dict(_SIMULATOR_REPLY)
+    def decide(self, model: str, state: object, questions: object, params: dict, timeout: float) -> object:
+        raise RuntimeError("the preflight world makes no decision calls")
 
 
-def _candidate_ref(key: str) -> CandidateRef | None:
-    product_id, _, sku = key.partition("::")
-    if not product_id or not sku:
+class _StubSearch:
+    """Matches every query word against the bundled catalog titles."""
+
+    def ensure(self, index: dict) -> None:
         return None
-    return CandidateRef(product_id=product_id, sku=sku)
+
+    def search(self, index_id: str, query: str, params: dict, timeout: float) -> list[tuple[str, float]]:
+        words = query.lower().split()
+        return [(item["id"], 1.0) for item in _CATALOG if all(w in item["title"].split() for w in words)]
 
 
-def _reference_targets(
-    task: Any, acceptable_keys: list[str], probe: Any
-) -> tuple[list[CandidateRef], CandidateRef] | None:
-    """Build ``(positive_targets, negative)`` from the task's accepted keys and
-    the first in-stock, in-budget, non-accepted catalog candidate; ``None`` if
-    unusable."""
-    if not acceptable_keys:
-        return None
-    accepted: list[CandidateRef] = []
-    for key in acceptable_keys:
-        ref = _candidate_ref(key)
-        if ref is None:
-            return None
-        accepted.append(ref)
-    positive_targets = [accepted[0]]
-    second = next(
-        (c for c in accepted[1:] if c.product_id != accepted[0].product_id),
-        None,
-    )
-    if second is not None:
-        positive_targets.append(second)
-    accepted_keys = set(acceptable_keys)
-    negative = next(
-        (
-            ref
-            for ref in probe.catalog.purchasable(
-                max_price=task.hard.budget,
-                limit=150,
-            )
-            if ref.key() not in accepted_keys
-        ),
-        None,
-    )
-    if negative is None:
-        return None
-    return positive_targets, negative
+def build_preflight_pack(root: Path) -> Pack:
+    """Write the neutral world at ``root``, sign it with a fresh key and load it."""
 
-
-def _drive_replay(
-    loaded_pack: LoadedPack,
-    task_id: str,
-    groups: list[list[dict[str, Any]]],
-) -> Any:
-    """Drive action groups through a fresh replay session and the session
-    boundary as ``SessionRegistry`` does with the deterministic simulator, so it
-    reproduces the real run's ledger and verdict: a sent message gets the reply
-    unless a timeline line speaks instead, then the next turn begins and its
-    lines are said."""
-    replay = loaded_pack.open_session(task_id)
-    for turn, actions in enumerate(groups, start=1):
-        replay.step_parallel(actions)
-        if replay.env.done():
-            break
-        message_sent = any(action.get("name") == "message" for action in actions)
-        reply = (
-            [(dict(_SIMULATOR_REPLY), None)]
-            if message_sent and not replay.env.utterances
-            else []
+    answer = {"id": "blue-mug", "judge": _JUDGE}
+    files: dict[str, bytes] = {
+        "world/catalog.jsonl": b"".join(canonical.dumps(item) + b"\n" for item in _CATALOG),
+        "world/tools.json": canonical.dumps({"tools": _TOOLS}),
+        "world/code/main.star": _WORLD_CODE.encode(),
+        "world/index/titles.postings": canonical.dumps({item["id"]: item["title"] for item in _CATALOG}),
+        "world/index/titles.json": canonical.dumps({"archive": "world/index/titles.postings", "settings": {}}),
+    }
+    for task_id in POLICY_ACTIONS:
+        files[f"tasks/{task_id}.json"] = canonical.dumps(
+            {"task_id": task_id, "request_text": _REQUEST, "params": {}, "sha256": canonical.digest({})}
         )
-        _deliver(replay, [], reply, step=turn)
-        if turn < replay.max_steps:
-            replay.env.begin_solver_turn(turn + 1)
-            loop.say_utterances(replay, [], step=turn + 1)
-    return replay
-
-
-def _case_discriminates(loaded_pack: LoadedPack, task_id: str, task: Any, targets: Any) -> bool:
-    """True iff the scripted positive verdict is correct and the negative is not,
-    proven against the real verifier (skips tasks whose family gate the scripted
-    policy can't satisfy, no family-specific knowledge)."""
-    groups = _action_groups(task, targets)
-    positive = _drive_replay(loaded_pack, task_id, groups[POSITIVE_POLICY]).verdict()
-    negative = _drive_replay(loaded_pack, task_id, groups[NEGATIVE_POLICY]).verdict()
-    return bool(positive.correct) and not bool(negative.correct)
-
-
-def _select_reference_case(loaded_pack: LoadedPack) -> tuple[str, Any, Any]:
-    """Select any task with a self-verified positive/negative case.
-
-    Task-family-agnostic (the scripted policy still assumes the commerce tool
-    contract). Tasks without a timeline are preferred so a change can't invalidate
-    the positive order mid-episode; each candidate is validated against the real
-    verifier so a case that would false-fail the preflight is never shipped.
-    """
-    tasks = list(zip(loaded_pack.task_ids, loaded_pack.task_specs, strict=True))
-    ordered = sorted(tasks, key=lambda t: bool(t[1].situation and t[1].situation.timeline))
-    # The qualifying delivery's rows carry ``acceptance.acceptable_keys``; the
-    # runtime's task model does not, so read them from the delivered rows (v7 or v8,
-    # through the shared reader that expands v8's shared grading records).
-    acceptable_keys = {
-        row["task_id"]: (row["task"].get("acceptance") or {}).get("acceptable_keys")
-        for row in read_task_rows(loaded_pack.pack_dir)
-    }
-    for task_id, task in ordered:
-        probe = loaded_pack.open_session(task_id)
-        targets = _reference_targets(task, acceptable_keys[task_id], probe)
-        if targets is None:
-            continue
-        if _case_discriminates(loaded_pack, task_id, task, targets):
-            return task_id, task, targets
-    raise EnvironmentPreflightError(
-        "sealed pack has no task with a self-verifiable positive/negative "
-        "reference case for the environment preflight"
-    )
-
-
-def _action_groups(task: Any, targets: Any) -> dict[str, list[list[dict[str, Any]]]]:
-    positive_targets, negative = targets
-    query = task.goal_text
-    first_turn = [
-        {"name": "search", "args": {"query": query, "k": 10, "in_stock": True}},
-        {
-            "name": "message",
-            "args": {"content": "I found options. I will check stock before I order."},
+        files[f"answers/{task_id}.json"] = canonical.dumps(
+            {"task_id": task_id, "answer": answer, "sha256": canonical.digest(answer)}
+        )
+    for rel, data in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    manifest = {
+        "pack_format": PACK_FORMAT,
+        "runtime_contract": RUNTIME_CONTRACT,
+        "pack_id": "validator-preflight",
+        "world_id": "validator-preflight",
+        "delivery": {"kind": "practice", "id": "validator-preflight"},
+        "sandbox": {
+            "language": "starlark",
+            "implementation": "starlark-pyo3",
+            "version": importlib.metadata.version("starlark-pyo3"),
+            "generator": "validator-preflight",
         },
-    ]
-    return {
-        POSITIVE_POLICY: [
-            first_turn,
-            [
-                *[
-                    {
-                        "name": "add_to_cart",
-                        "args": target.model_dump(mode="json"),
-                    }
-                    for target in positive_targets
-                ],
-                {
-                    "name": "place_test_order",
-                    "args": positive_targets[-1].model_dump(mode="json"),
-                },
-            ],
-        ],
-        NEGATIVE_POLICY: [
-            first_turn,
-            [
-                {"name": "add_to_cart", "args": negative.model_dump(mode="json")},
-                {"name": "place_test_order", "args": negative.model_dump(mode="json")},
-            ],
-        ],
+        "limits": {
+            "max_steps": 4,
+            "max_turns": 10,
+            "call_ticks": 500,
+            "grade_ticks": 2000,
+            "max_callstack": 50,
+            "max_arg_bytes": 1024,
+        },
+        "parts": {rel: canonical.sha256_hex(data) for rel, data in files.items()},
     }
+    key = Ed25519PrivateKey.generate()
+    manifest["signature"] = {
+        "algorithm": "ed25519",
+        "key_id": _KEY_ID,
+        "value": base64.b64encode(key.sign(signed_bytes(manifest))).decode(),
+    }
+    (root / "manifest.json").write_bytes(canonical.dumps(manifest))
+    return load_pack(root, {_KEY_ID: key.public_key()})
 
 
-def _write_sandbox_inputs(
-    run_dir: Path,
-    *,
-    task: Any,
-    starts: dict[str, dict[str, Any]],
-    groups: dict[str, list[list[dict[str, Any]]]],
-) -> tuple[Path, Path]:
+def _write_sandbox_inputs(run_dir: Path, starts: dict[str, dict[str, Any]]) -> tuple[Path, Path]:
     agent_path = run_dir / "agent.py"
     problem_path = run_dir / "problems.jsonl"
-    output_path = run_dir / "output.jsonl"
-    output_path.unlink(missing_ok=True)
+    (run_dir / "output.jsonl").unlink(missing_ok=True)
     agent_path.write_text(
         Path(environment_preflight_agent.__file__).read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-
     rows = [
         {
-            "problem_id": policy.rsplit(".", 1)[-1],
-            "query": task.goal_text,
+            "problem_id": policy,
+            "query": start["policy_view"]["query"],
             "category": "environment_preflight",
             "environment": {
-                "policy_protocol_version": (
-                    environment_preflight_agent.POLICY_PROTOCOL_VERSION
-                ),
-                "reference_policy_version": policy,
-                "binding": {"session_id": starts[policy]["session_id"]},
-                "policy_view": starts[policy]["policy_view"],
+                "binding": start["binding"],
+                "policy_view": start["policy_view"],
                 # This is validator-owned test input, never miner-supplied work.
-                "action_groups": groups[policy],
+                "actions": POLICY_ACTIONS[policy],
             },
         }
-        for policy in (POSITIVE_POLICY, NEGATIVE_POLICY)
+        for policy, start in starts.items()
     ]
     problem_path.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
@@ -252,7 +231,10 @@ def _write_sandbox_inputs(
         json.dumps(
             {
                 "schema_version": "oro.session_bootstrap.v1",
-                "sessions": [starts[POSITIVE_POLICY], starts[NEGATIVE_POLICY]],
+                "sessions": [
+                    {"session_id": start["session_id"], "policy_view": start["policy_view"]}
+                    for start in starts.values()
+                ],
             },
             sort_keys=True,
         ),
@@ -275,153 +257,92 @@ def _read_sandbox_results(output_path: Path | None) -> list[dict[str, Any]]:
     ]
 
 
-def _replay_checks(
-    loaded_pack: LoadedPack,
-    result: dict[str, Any],
-    groups: list[list[dict[str, Any]]],
-) -> dict[str, bool]:
-    replay = _drive_replay(loaded_pack, result["task_id"], groups)
-    replayed_verdict = replay.verdict().model_dump(mode="json")
-    expected_verdict = result["verdict"]
-    return {
-        "terminal_state": result["terminal_state_hash"] == replay.env.state_hash_now(),
-        "ledger": result["ledger"]
-        == [entry.model_dump(mode="json") for entry in replay.env.ledger.entries()],
-        "verdict_checks": expected_verdict.get("checks")
-        == replayed_verdict.get("checks"),
-        "reward_components": expected_verdict.get("reward_record")
-        == replayed_verdict.get("reward_record"),
-    }
-
-
 def _sandbox_passed(rows: list[dict[str, Any]]) -> bool:
     return (
-        {row.get("problem_id") for row in rows} == {"positive", "negative"}
+        {row.get("problem_id") for row in rows} == set(POLICY_ACTIONS)
         and all(row.get("status") == "SUCCESS" for row in rows)
         and all(int(row.get("inference_total") or 0) == 0 for row in rows)
     )
 
 
-def environment_preflight_run_id(env_pack_sha256: str) -> str:
-    """Return the stable evaluation-shaped ID used for logs and sandbox naming.
+def environment_preflight_run_id(key: str) -> str:
+    """Return the stable evaluation-shaped ID used for logs and sandbox naming."""
 
-    Keyed on the content-addressed pack SHA alone: the preflight is
-    deterministic per pack, so the sha is a stable, unique run identity.
-    """
-
-    return str(uuid5(_PREFLIGHT_NAMESPACE, env_pack_sha256))
+    return str(uuid5(_PREFLIGHT_NAMESPACE, key))
 
 
 def run_environment_preflight(
     *,
-    loaded_pack: LoadedPack,
     runtime: SessionRuntime,
     run_dir: Path,
     sandbox_runner: SandboxRunner,
 ) -> dict[str, Any]:
-    """Run the deterministic preflight through the validator's active runtime."""
+    """Run the scripted policies on the bundled world through the active runtime."""
 
     preflight_started = time.perf_counter()
-    run_id = environment_preflight_run_id(loaded_pack.pack_sha256)
     run_dir.mkdir(parents=True, exist_ok=True)
     run_dir.chmod(0o777)
+    pack = build_preflight_pack(run_dir / "world")
+    run_id = environment_preflight_run_id(pack.manifest_sha256)
     registry = SessionRegistry(
-        loaded_pack,
-        simulator_factory=lambda _session: _DeterministicSimulator(),
+        pack,
+        episode_nonces={task_id: canonical.sha256_hex(f"{run_id}\0{task_id}".encode()) for task_id in POLICY_ACTIONS},
+        model_client=_StubModels(),
+        search_client=_StubSearch(),
     )
     installed = False
     try:
-        task_id, task, targets = _select_reference_case(loaded_pack)
-        groups = _action_groups(task, targets)
-        starts = {
-            policy: registry.start(
-                evaluation_run_id=run_id,
-                agent_version_id=policy,
-                task_id=task_id,
-                session_id=f"preflight-{policy.rsplit('.', 1)[-1]}",
-            )
-            for policy in (POSITIVE_POLICY, NEGATIVE_POLICY)
-        }
-        agent_path, problem_path = _write_sandbox_inputs(
-            run_dir,
-            task=task,
-            starts=starts,
-            groups=groups,
-        )
+        starts = {policy: registry.start(policy) for policy in POLICY_ACTIONS}
+        agent_path, problem_path = _write_sandbox_inputs(run_dir, starts)
         runtime.install(registry)
         installed = True
         sandbox_started = time.perf_counter()
-        output_path, sandbox_metadata = sandbox_runner(
-            agent_path,
-            run_id,
-            problem_path,
-        )
-        sandbox_duration_ms = round(
-            (time.perf_counter() - sandbox_started) * 1000.0,
-            3,
-        )
+        output_path, sandbox_metadata = sandbox_runner(agent_path, run_id, problem_path)
+        sandbox_duration_ms = round((time.perf_counter() - sandbox_started) * 1000.0, 3)
         sandbox_rows = _read_sandbox_results(output_path)
+        registry.finish_all()
+        records = {record["task_id"]: record for record in registry.terminal_results()}
 
         policies = []
-        for policy in (POSITIVE_POLICY, NEGATIVE_POLICY):
-            result = registry.verdict({"session_id": starts[policy]["session_id"]})
+        for policy in POLICY_ACTIONS:
+            record = records.get(policy) or {}
+            verdict = record.get("verdict") or {}
+            finish = (record.get("ledger") or {}).get("episode", [{}])[-1]
             policies.append(
                 {
-                    "reference_policy_version": policy,
-                    "task_id": task_id,
-                    "terminal_state_hash": result["terminal_state_hash"],
-                    "terminal_reason": result["terminal_reason"],
-                    "verdict_correct": bool(result["verdict"].get("correct")),
-                    "solver_turn_count": result["solver_turn_count"],
-                    "action_count": result["action_count"],
-                    "replay_checks": _replay_checks(
-                        loaded_pack,
-                        result,
-                        groups[policy],
-                    ),
+                    "policy": policy,
+                    "score": verdict.get("score"),
+                    "category": verdict.get("category"),
+                    "finish_reason": finish.get("reason"),
+                    "steps": record.get("steps"),
+                    "replay_matches": bool(record) and replay_matches(pack, record),
                 }
             )
-
-        positive, negative = policies
-        expected_action_counts = {
-            policy: sum(len(turn) for turn in groups[policy])
-            for policy in (POSITIVE_POLICY, NEGATIVE_POLICY)
-        }
-        passed = all(
-            (
-                sandbox_metadata.get("exit_code") == 0,
-                _sandbox_passed(sandbox_rows),
-                positive["verdict_correct"],
-                not negative["verdict_correct"],
-                positive["solver_turn_count"] == 2,
-                positive["action_count"] == expected_action_counts[POSITIVE_POLICY],
-                negative["solver_turn_count"] == 2,
-                negative["action_count"] == expected_action_counts[NEGATIVE_POLICY],
-                all(
-                    all(policy["replay_checks"].values()) for policy in policies
-                ),
+        passed = (
+            sandbox_metadata.get("exit_code") == 0
+            and _sandbox_passed(sandbox_rows)
+            and all(
+                (p["score"], p["category"]) == EXPECTED_VERDICTS[p["policy"]]
+                and p["finish_reason"] == "order"
+                and p["steps"] == len(POLICY_ACTIONS[p["policy"]])
+                and p["replay_matches"]
+                for p in policies
             )
         )
         summary = {
-            "schema_version": "oro.environment_preflight.v1",
+            "schema_version": "oro.environment_preflight.v2",
             "status": "pass" if passed else "fail",
             "run_id": run_id,
-            "env_pack_sha256": loaded_pack.pack_sha256,
-            "versions": dict(PACK_VERSION_IDENTITIES),
+            "runtime_contract": RUNTIME_CONTRACT,
             "inference_usd_cap": INFERENCE_USD_CAP,
             "timing_ms": {
                 "sandbox": sandbox_duration_ms,
-                "total": round(
-                    (time.perf_counter() - preflight_started) * 1000.0,
-                    3,
-                ),
+                "total": round((time.perf_counter() - preflight_started) * 1000.0, 3),
             },
             "sandbox": {
                 "exit_code": sandbox_metadata.get("exit_code"),
                 "problem_count": len(sandbox_rows),
-                "inference_call_count": sum(
-                    int(row.get("inference_total") or 0) for row in sandbox_rows
-                ),
+                "inference_call_count": sum(int(row.get("inference_total") or 0) for row in sandbox_rows),
             },
             "policies": policies,
         }
@@ -443,6 +364,7 @@ __all__ = [
     "EnvironmentPreflightError",
     "NEGATIVE_POLICY",
     "POSITIVE_POLICY",
+    "build_preflight_pack",
     "environment_preflight_run_id",
     "run_environment_preflight",
 ]

@@ -2,94 +2,169 @@ from __future__ import annotations
 
 import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
+import re
 
 import pytest
+from oro_sdk.types import UNSET
 
+from subnet.tests.world_pack_fixture import (
+    StubModelClient,
+    StubSearchClient,
+    archive_pack,
+    build_world_pack,
+    load_world_pack,
+    world_keyring,  # noqa: F401
+)
+from validator import env_pack_loader, session_registry
+from validator import main as validator_main
 from validator.generated_evaluation import (
     GENERATED_PROBLEM_SCHEMA,
     aggregate_results,
-    select_run_task_roster,
+    claim_roster,
     summarize_agent_inference_usage,
     summarize_episode_resource_usage,
-    validate_run_results,
     write_problem_file,
 )
 from validator.main import Validator
-from validator import main as validator_main
+
+REAL_FETCH_PACK = env_pack_loader.fetch_and_validate_pack
+REAL_FETCH_RACE_PACK = env_pack_loader.fetch_and_validate_race_pack
+
+NONCES = {"t1": "nonce-1", "t2": "nonce-2"}
 
 
-def _result(task_id: str, *, correct: bool, reward: float = 0, outcome="completed"):
+def _record(task_id: str, score: float = 0.0, *, flags=(), verdict=True, session_id=None):
     return {
         "task_id": task_id,
-        "outcome": outcome,
-        "verdict": {"correct": correct, "paid_reward": reward},
+        "session_id": session_id or f"s-{task_id}",
+        "episode_nonce": f"n-{task_id}",
+        "ledger": {"episode": [{"kind": "open"}, {"reason": "order"}]},
+        "verdict": (
+            {"score": score, "category": None, "flags": list(flags)} if verdict else None
+        ),
+        "error": None if verdict else "runtime step failed: RuntimeError",
+        "call_trace": [],
+        "steps": 1,
     }
 
 
 def test_problem_file_contains_only_public_session_contract(tmp_path) -> None:
-    policy_view = {
-        "query": "Find a blue mug",
-        "max_steps": 5,
-        "tools": [],
-        "max_calls_per_turn": 16,
+    session = {
+        "session_id": "session",
+        "binding": {"session_id": "session"},
+        "policy_view": {"query": "find a mug", "tools": [], "max_steps": 6},
+        "private": "never exposed",
     }
     path = tmp_path / "problems.jsonl"
 
-    write_problem_file(path, [{"session_id": "session-1", "policy_view": policy_view}])
+    write_problem_file(path, [session])
 
-    row = json.loads(path.read_text())
-    assert row == {
-        "problem_id": "session-1",
-        "query": "Find a blue mug",
+    assert json.loads(path.read_text()) == {
+        "problem_id": "session",
+        "query": "find a mug",
         "category": "generated_environment",
         "environment": {
             "schema_version": GENERATED_PROBLEM_SCHEMA,
-            "binding": {"session_id": "session-1"},
-            "policy_view": policy_view,
+            "binding": {"session_id": "session"},
+            "policy_view": session["policy_view"],
         },
     }
 
 
-def test_score_is_mean_reward_with_agent_failures_as_zero() -> None:
-    score = aggregate_results(
-        [
-            _result("one", correct=True, reward=0.75),
-            _result("two", correct=False),
-            _result("three", correct=False, outcome="agent_error"),
-        ]
+def test_claim_roster_binds_delivery_tasks_to_claim_nonces(tmp_path) -> None:
+    pack = load_world_pack(tmp_path, delivery_id="qual-1", delivery_kind="qualifying")
+
+    assert claim_roster(pack, "qual-1", dict(reversed(NONCES.items()))) == NONCES
+
+
+@pytest.mark.parametrize(
+    ("delivery_id", "nonces", "match"),
+    [
+        (None, NONCES, "legacy work"),
+        ("qual-1", None, "legacy work"),
+        ("qual-1", {}, "legacy work"),
+        ("other", NONCES, "claimed delivery_id"),
+        ("qual-1", {"t1": "nonce-1"}, "differ from the delivery tasks"),
+        ("qual-1", {**NONCES, "t3": "x"}, "differ from the delivery tasks"),
+        ("qual-1", {"t1": "nonce-1", "t2": ""}, "nonempty strings"),
+    ],
+)
+def test_claim_roster_fails_closed(tmp_path, delivery_id, nonces, match) -> None:
+    pack = load_world_pack(tmp_path, delivery_id="qual-1", delivery_kind="qualifying")
+
+    with pytest.raises(ValueError, match=match):
+        claim_roster(pack, delivery_id, nonces)
+
+
+def test_score_is_mean_verdict_score_over_the_roster() -> None:
+    records = [_record("a", 1.0), _record("b", 0.25)]
+
+    # A roster task without a graded episode scores zero.
+    assert aggregate_results(records, ["a", "b", "c", "d"]) == pytest.approx(0.3125)
+
+
+def test_quarantines_and_world_errors_score_zero_up_to_the_threshold() -> None:
+    roster = [str(i) for i in range(10)]
+    records = [_record("0", verdict=False), _record("1", flags=["world_error"]),
+               *(_record(t, 1.0) for t in roster[2:])]
+
+    assert aggregate_results(records, roster) == pytest.approx(0.8)
+    records[2] = _record("2", verdict=False)
+    records[3] = _record("3", flags=["world_error"])
+    with pytest.raises(ValueError) as failure:
+        aggregate_results(records, roster)
+    assert str(failure.value) == (
+        "generated evaluation infrastructure failure: environment_error=2, verifier_error=2"
     )
 
-    assert score == 0.25
+
+def test_bound_trips_score_zero_and_never_fail_the_run() -> None:
+    roster = ["a", "b", "c"]
+    records = [_record(t, flags=["possible_world_defect"]) for t in roster]
+
+    assert aggregate_results(records, roster) == 0.0
 
 
-@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-def test_reader_work_rejects_even_one_infrastructure_row(outcome) -> None:
-    results = [_result(str(i), correct=True, reward=1) for i in range(10)]
-    results[0] = _result("0", correct=False, outcome=outcome)
-    assert aggregate_results(results) == 0.9
-    with pytest.raises(ValueError, match="generated evaluation infrastructure failure"):
-        aggregate_results(results, selected_reader_task_ids={"0"})
+def test_any_environment_unscored_episode_fails_the_run_as_infrastructure() -> None:
+    roster = [str(i) for i in range(10)]
+    records = [{**_record("0", verdict=False), "unscored": "environment"}, *(_record(t, 1.0) for t in roster[1:])]
+
+    with pytest.raises(ValueError) as failure:
+        aggregate_results(records, roster)
+    assert str(failure.value) == "generated evaluation infrastructure failure: environment_error=1"
 
 
-def test_reader_work_keeps_low_rewards_and_agent_errors_as_scores() -> None:
-    results = [_result("one", correct=True, reward=0.03), _result("two", correct=False, outcome="agent_error")]
-    assert aggregate_results(results, selected_reader_task_ids={"one", "two"}) == 0.015
+@pytest.mark.parametrize(
+    "records",
+    [[_record("a"), _record("a")], [_record("z")]],
+)
+def test_results_must_match_the_roster(records) -> None:
+    with pytest.raises(ValueError, match="differ from the delivery roster"):
+        aggregate_results(records, ["a", "b"])
 
 
-@pytest.mark.parametrize("outcome", ["exploit", "leakage"])
-def test_reader_infrastructure_failures_do_not_hide_integrity_failures(outcome) -> None:
-    results = [_result("one", correct=False, outcome="environment_error"),
-               _result("two", correct=False, outcome=outcome)]
-    with pytest.raises(ValueError, match="generated evaluation integrity failure"):
-        aggregate_results(results, selected_reader_task_ids={"one"})
+def test_empty_roster_is_rejected() -> None:
+    with pytest.raises(ValueError, match="empty roster"):
+        aggregate_results([], [])
 
 
 @pytest.mark.parametrize(
     ("provider", "stats", "expected_status"),
     [
-        ("openrouter", {"inference_cost_usd": 0.25, "cached_tokens": 8}, "complete"),
+        (
+            "openrouter",
+            {
+                "inference_cost_usd": 0.25,
+                "cached_tokens": 8,
+                "inference_byok_cost_usd": 0.75,
+                "inference_byok_requests": 2,
+            },
+            "complete",
+        ),
         (
             "openrouter",
             {"inference_cost_usd": 0.25, "inference_cost_missing": 1},
@@ -111,6 +186,10 @@ def test_episode_inference_usage_status(provider, stats, expected_status) -> Non
     assert ("inference_cost_usd" in usage) is (
         stats is not None and provider == "openrouter"
     )
+    assert ("inference_byok_cost_usd" in usage) is ("inference_cost_usd" in usage)
+    if "inference_byok_cost_usd" in usage:
+        assert usage["inference_byok_cost_usd"] == stats.get("inference_byok_cost_usd", 0)
+        assert usage["inference_byok_requests"] == stats.get("inference_byok_requests", 0)
 
 
 def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
@@ -123,15 +202,22 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
                 "cached_tokens": 8,
                 "completion_tokens": 7,
                 "inference_cost_usd": 0.3,
+                "inference_byok_cost_usd": 0.25,
+                "inference_byok_requests": 1,
                 "requested_models": {"requested/a": {"requests": 2}},
-                "served_models": {"served/a": {"requests": 2, "cost_usd": 0.3}},
+                "served_models": {
+                    "served/a": {"requests": 2, "cost_usd": 0.3, "byok_cost_usd": 0.25, "byok_requests": 1}
+                },
             },
             "agent-2": {
                 "inference_total": 1,
                 "inference_failed": 1,
+                "inference_byok_cost_usd": 0.5,
+                "inference_byok_requests": 1,
                 "requested_models": {
                     "requested/b": {"requests": 1, "failed_requests": 1}
                 },
+                "served_models": {"served/a": {"byok_cost_usd": 0.5, "byok_requests": 1}},
             },
         },
         "openrouter",
@@ -145,42 +231,32 @@ def test_agent_inference_summary_keeps_multi_model_usage_separate() -> None:
         "requested/b": {"requests": 1, "failed_requests": 1},
     }
     assert summary["served_models"] == {
-        "served/a": {"requests": 2, "cost_usd": 0.3},
+        "served/a": {"requests": 2, "cost_usd": 0.3, "byok_cost_usd": 0.75, "byok_requests": 2},
     }
     assert summary["inference_cost_status"] == "complete"
     assert summary["inference_cost_usd"] == 0.3
+    assert summary["inference_byok_cost_usd"] == 0.75
+    assert summary["inference_byok_requests"] == 2
 
 
-def test_episode_resource_usage_counts_single_and_grouped_operations() -> None:
+def test_episode_resource_usage_counts_tool_steps() -> None:
     result = {
         "session_id": "session",
         "task_id": "task",
         "call_trace": [
-            {"request": {"action": {"name": "search", "args": {}}}},
-            {
-                "request": {
-                    "calls": [
-                        {"action": {"name": "view", "args": {}}},
-                        {"action": {"name": "search", "args": {}}},
-                    ]
-                }
-            },
+            {"tool": "search", "step": 1, "elapsed_ms": 1.0},
+            {"tool": "view", "step": 2, "elapsed_ms": 1.0},
+            {"tool": "search", "step": 3, "elapsed_ms": 1.0, "error": "x"},
         ],
     }
 
     usage = summarize_episode_resource_usage([result], {}, "openrouter")["task"]
 
     assert usage["operation_requests"] == 3
-    assert usage["operations"] == {
-        "environment.search": 2,
-        "environment.view": 1,
-    }
+    assert usage["operations"] == {"environment.search": 2, "environment.view": 1}
 
 
-@pytest.mark.parametrize(
-    "call_trace",
-    [None, {}, [None, {}, {"request": None}, {"request": {"calls": [None]}}]],
-)
+@pytest.mark.parametrize("call_trace", [None, {}, [None, {}, {"tool": None}, {"tool": ""}]])
 def test_episode_resource_usage_ignores_malformed_trace_entries(call_trace) -> None:
     usage = summarize_episode_resource_usage(
         [{"session_id": "session", "task_id": "task", "call_trace": call_trace}],
@@ -192,462 +268,333 @@ def test_episode_resource_usage_ignores_malformed_trace_entries(call_trace) -> N
     assert usage["operations"] == {}
 
 
-@pytest.mark.parametrize("outcome", ["leakage", "exploit"])
-def test_integrity_outcomes_reject_the_run(outcome) -> None:
-    """Cheating still hard-fails the whole pack, at any count."""
-    with pytest.raises(ValueError, match=outcome):
-        aggregate_results([_result("one", correct=False, outcome=outcome)])
-
-
-@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("count", [10, 30, 90])
-def test_partial_harness_failure_scores_completed_episodes(outcome, count) -> None:
-    """A subset of environment_error / verifier_error episodes counts as 0
-    reward against the roster denominator, same as agent_error. Prior
-    behavior hard-failed the whole run on a single infra episode, throwing
-    away every completed task."""
-    results = [_result(f"task-{i}", correct=True, reward=1.0) for i in range(count - 1)]
-    results.append(_result("hiccup", correct=False, outcome=outcome))
-    # (count-1) correct at 1.0 each, 1 harness failure at 0.0, over `count` total
-    expected = (count - 1) / count
-    assert aggregate_results(results) == pytest.approx(expected)
-
-
-@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("failed", [2, 3, 8, 9])
-def test_at_or_below_threshold_harness_failures_score_normally(outcome, failed) -> None:
-    """Harness failures AT or BELOW the 30% infra threshold score at
-    zero reward against the full roster. Strict > matches Backend's
-    classifier — 9/30 = 30% exactly is NOT infra."""
-    total = 30
-    completed = total - failed
-    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(completed)]
-    results.extend(
-        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(failed)
+def _validator(tmp_path: Path) -> Validator:
+    validator = Validator.__new__(Validator)
+    validator.config = SimpleNamespace(
+        backend_url="http://backend.test",
+        search_server_url="http://search.test",
+        session_model_timeout=5.0,
     )
-    assert aggregate_results(results) == pytest.approx(completed / total)
+    validator.wallet = SimpleNamespace(hotkey=object())
+    validator._eval_dir = MagicMock(return_value=tmp_path)
+    validator.session_runtime = MagicMock()
+    validator.backend_client = MagicMock()
+    validator.backend_client.get_run_problems.return_value = [
+        {"task_id": "t1", "family": "world"}, {"task_id": "t2", "family": "world"},
+    ]
+    return validator
 
 
-@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-@pytest.mark.parametrize("failed", [10, 15, 27, 30])
-def test_above_threshold_harness_failures_hard_fail(outcome, failed) -> None:
-    """When > 30% of episodes are harness failures the completed sample
-    isn't representative of miner performance — hard-fail so the run
-    re-queues once infra recovers. First fail boundary: 10/30 = 33.3%."""
-    total = 30
-    completed = total - failed
-    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(completed)]
-    results.extend(
-        _result(f"bad-{i}", correct=False, outcome=outcome) for i in range(failed)
+def _work(**fields):
+    return SimpleNamespace(**{
+        "eval_run_id": "run",
+        "agent_version_id": "agent",
+        "env_pack_sha256": "a" * 64,
+        "race_id": None,
+        "delivery_id": "qual-1",
+        "episode_nonces": SimpleNamespace(additional_properties=dict(NONCES)),
+        **fields,
+    })
+
+
+@pytest.fixture
+def delivery_fetch(tmp_path, monkeypatch, world_keyring):  # noqa: F811
+    """Serve the signed test world as the claimed delivery and stub outside services."""
+
+    archive = archive_pack(
+        build_world_pack(tmp_path / "world", delivery_id="qual-1", delivery_kind="qualifying"),
+        tmp_path / "delivery.tar.gz",
     )
-    with pytest.raises(ValueError, match="infrastructure failure"):
-        aggregate_results(results)
+    calls = []
+
+    def fetch(kind):
+        async def fetch_delivery(*args, expected_delivery_id, **kwargs):
+            calls.append((kind, args[0], expected_delivery_id))
+            return env_pack_loader.load_delivery(
+                archive, expected_delivery_id=expected_delivery_id, cache_root=tmp_path / "cache"
+            )
+        return fetch_delivery
+
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_pack", fetch("qualifying"))
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_race_pack", fetch("race"))
+    search = StubSearchClient()
+    models = StubModelClient()
+    monkeypatch.setattr(session_registry, "SearchServerClient", lambda url, *a: search)
+    monkeypatch.setattr(session_registry, "ProxyModelClient", lambda token, **kw: models)
+    return SimpleNamespace(calls=calls, search=search, models=models)
 
 
-@pytest.mark.parametrize("outcome", ["environment_error", "verifier_error"])
-def test_all_harness_failures_still_hard_fail(outcome) -> None:
-    """Boundary case: 100% harness → still hard-fail (unchanged)."""
-    results = [_result(f"bad-{i}", correct=False, outcome=outcome) for i in range(5)]
-    with pytest.raises(ValueError) as caught:
-        aggregate_results(results)
-    assert str(caught.value) == (
-        f"generated evaluation infrastructure failure: {outcome}=5"
+def test_claimed_delivery_opens_one_session_per_task_with_claim_nonces(
+    tmp_path, delivery_fetch
+) -> None:
+    validator = _validator(tmp_path)
+
+    registry, sessions, roster, delivery_id = validator._create_environment_sessions(
+        _work(), inference_access_token="token"
     )
+    try:
+        assert delivery_fetch.calls == [("qualifying", "a" * 64, "qual-1")]
+        assert delivery_id == "qual-1" and roster == NONCES
+        # Every index was uploaded to the search server before sessions opened.
+        assert list(delivery_fetch.search.titles) == [
+            index["id"] for index in registry.pack.indexes.values()
+        ]
+        assert [s["policy_view"]["query"] for s in sessions] == [
+            "Buy the item for t1.", "Buy the item for t2."
+        ]
+        saved = json.loads((tmp_path / "environment_sessions.json").read_text())
+        assert saved["sessions"] == sessions
+        validator.session_runtime.install.assert_called_once_with(registry)
+        binding = sessions[0]["binding"]
+        assert registry.call({**binding, "step": 1, "action": {"name": "buy", "args": {"id": "a"}}})[
+            "finished"
+        ]
+        registry.finish_all()
+        records = {r["task_id"]: r for r in registry.terminal_results()}
+        assert records["t1"]["episode_nonce"] == "nonce-1"
+        assert records["t1"]["verdict"]["score"] == 1.0
+        assert records["t2"]["verdict"]["category"] == "did not finish"
+    finally:
+        registry.close()
 
 
-@pytest.mark.parametrize("integrity", ["leakage", "exploit"])
-@pytest.mark.parametrize("infra", ["environment_error", "verifier_error"])
-def test_integrity_takes_precedence_over_infrastructure(integrity, infra):
-    with pytest.raises(ValueError) as caught:
-        aggregate_results([
-            _result("infra", correct=False, outcome=infra),
-            _result("cheat", correct=False, outcome=integrity),
-        ])
-    assert str(caught.value) == f"generated evaluation integrity failure: {integrity}=1"
+def test_race_claim_loads_the_race_delivery(tmp_path, delivery_fetch) -> None:
+    validator = _validator(tmp_path)
+
+    registry, *_ = validator._create_environment_sessions(
+        _work(race_id="00000000-0000-0000-0000-000000000001"),
+        inference_access_token="token",
+    )
+    registry.close()
+
+    assert delivery_fetch.calls == [("race", "00000000-0000-0000-0000-000000000001", "qual-1")]
 
 
-def test_valid_all_zero_and_agent_error_run_is_successful_zero_score():
-    assert aggregate_results([
-        _result("wrong", correct=False),
-        _result("agent", correct=False, outcome="agent_error"),
-    ]) == 0.0
+@pytest.mark.parametrize("race_id", [None, "00000000-0000-0000-0000-000000000001"])
+def test_claims_reach_the_real_fetch_signatures(tmp_path, delivery_fetch, monkeypatch, race_id) -> None:
+    """The public fetch functions run as written; only the backend download is stubbed."""
 
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_pack", REAL_FETCH_PACK)
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_race_pack", REAL_FETCH_RACE_PACK)
+    archive = archive_pack(
+        build_world_pack(tmp_path / "real-world", delivery_id="qual-1", delivery_kind="qualifying"),
+        tmp_path / "real.tar.gz",
+    )
+    seen = []
 
-def test_cheating_outcome_rejects_even_at_low_count() -> None:
-    """A single cheating outcome hard-fails regardless of pack size."""
-    results = [_result(f"good-{i}", correct=True, reward=1.0) for i in range(9)]
-    results.append(_result("bad", correct=False, outcome="leakage"))
+    async def fetch_delivery(label, binding, fetch, backend_url, keypair, *, expected_delivery_id, **kwargs):
+        seen.append((label, binding, backend_url))
+        return env_pack_loader.load_delivery(archive, expected_delivery_id=expected_delivery_id, cache_root=tmp_path / "c")
 
-    with pytest.raises(ValueError, match="integrity failure"):
-        aggregate_results(results)
+    monkeypatch.setattr(env_pack_loader, "_fetch_delivery", fetch_delivery)
+    validator = _validator(tmp_path)
 
+    registry, *_ = validator._create_environment_sessions(_work(race_id=race_id), inference_access_token="token")
+    registry.close()
 
-def test_duplicate_task_result_is_rejected() -> None:
-    with pytest.raises(ValueError, match="one result per task"):
-        aggregate_results(
-            [_result("one", correct=True, reward=1), _result("one", correct=False)]
-        )
+    [(label, binding, backend_url)] = seen
+    assert binding["pack_sha256"] == "a" * 64 and backend_url == validator.config.backend_url
+    assert binding.get("race_id") == race_id
 
 
 @pytest.mark.parametrize(
-    "outcome,expected_reason,flush_failure",
-    [
-        (
-            "environment_error",
-            "generated evaluation infrastructure failure: environment_error=1",
-            False,
-        ),
-        (
-            "verifier_error",
-            "generated evaluation infrastructure failure: verifier_error=1",
-            False,
-        ),
-        ("exploit", "generated evaluation integrity failure: exploit=1", False),
-        ("completed", None, True),
-    ],
+    "unbound",
+    [{"delivery_id": UNSET, "episode_nonces": UNSET}, {"delivery_id": None}, {"episode_nonces": None}],
 )
-def test_generated_runner_delivers_failed_completion(
-    tmp_path, monkeypatch, outcome, expected_reason, flush_failure
-):
-    result = {
-        **_result("task", correct=False, outcome=outcome),
-        "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
-        "pack_sha256": "a" * 64,
-    }
+def test_unbound_claim_fails_clearly(tmp_path, delivery_fetch, unbound) -> None:
+    work = _work(**unbound)
+
+    with pytest.raises(ValueError, match="not bound to a world delivery"):
+        _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
+
+
+def test_claim_without_pack_binding_fails_clearly(tmp_path) -> None:
+    work = _work()
+    work.env_pack_sha256 = None
+
+    with pytest.raises(ValueError, match="legacy work"):
+        _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
+
+
+# The Backend's pattern for a pack failure that is ours, never the agent's (platform
+# apps/backend/app/services/failure_classification.py, _PACK_LOAD_FAILURE).
+BACKEND_PACK_LOAD_FAILURE = re.compile(
+    r"(?:race pack race_id=[0-9a-f-]{36} pack=|environment (?:preflight )?pack )"
+    r"[0-9a-f]{64} failed validation"
+)
+
+
+@pytest.mark.parametrize("race", [False, True])
+def test_a_rejected_delivery_fails_the_run_as_ours_not_the_agents(tmp_path, monkeypatch, race) -> None:
+    async def rejected(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_pack", rejected)
+    monkeypatch.setattr(env_pack_loader, "fetch_and_validate_race_pack", rejected)
+    work = _work()
+    if race:
+        work.race_id = "4a7e0c5e-0000-4000-8000-000000000001"
+
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(work, inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)
+
+
+def _runner(tmp_path, monkeypatch, records, *, roster=("t1", "t2"), sandbox_output=True):
     registry = MagicMock()
     registry.key_exhausted = threading.Event()
-    registry.finalized_results.return_value = [result]
+    registry.terminal_results.return_value = records
     reporter = MagicMock()
-    if flush_failure:
-        reporter.flush.side_effect = RuntimeError("artifact upload failed")
-    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
-    validator = Validator.__new__(Validator)
+    reporter_type = MagicMock(return_value=reporter)
+    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", reporter_type)
+    validator = _validator(tmp_path)
     validator._create_environment_sessions = MagicMock(return_value=(
         registry,
-        [{"session_id": "session", "policy_view": {"query": "query"}}],
-        {"task": "right"},
+        [{"session_id": "s-t1", "binding": {"session_id": "s-t1"}, "policy_view": {"query": "q"}}],
+        {task: f"n-{task}" for task in roster},
+        "qual-1",
     ))
-    validator._eval_dir = MagicMock(return_value=tmp_path)
-    validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
-    validator.session_runtime = MagicMock()
-    validator.backend_client = MagicMock()
-    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
-    completion = validator._run_generated_evaluation(
-        work, tmp_path / "agent.py", inference_access_token="synthetic",
+    validator.run_sandbox = MagicMock(
+        return_value=(tmp_path / "output.jsonl" if sandbox_output else None, {})
+    )
+    return validator, registry, reporter, reporter_type
+
+
+def _run(validator, tmp_path, token="synthetic"):
+    return validator._run_generated_evaluation(
+        _work(), tmp_path / "agent.py", inference_access_token=token,
         inference_provider="openrouter", inference_base_url="https://example.test/v1",
     )
-    if expected_reason is None:
-        assert completion is not None
-        assert completion.score == 0
-        validator.backend_client.complete_run.assert_not_called()
-    else:
-        assert completion is None
-        validator.backend_client.complete_run.assert_called_once_with(
-            eval_run_id="run", status=validator_main.TerminalStatus.FAILED,
-            failure_reason=expected_reason, sandbox_metadata={},
-        )
-    reporter.flush.assert_called_once_with([result])
+
+
+def test_generated_runner_scores_and_flushes_every_record(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", 1.0), _record("t2", 0.5)]
+    validator, registry, reporter, _ = _runner(tmp_path, monkeypatch, records)
+
+    completion = _run(validator, tmp_path)
+
+    assert completion.score == pytest.approx(0.75)
+    assert completion.score_components == {"schema_version": "oro.generated_run_score.v1"}
+    registry.finish_all.assert_called_once_with()
+    registry.terminal_results.assert_called_once_with(final=True)
+    reporter.flush.assert_called_once_with(records)
+    validator.session_runtime.clear.assert_called_once_with(registry)
+    validator.backend_client.complete_run.assert_not_called()
+    assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
+
+
+def test_environment_fault_reruns_see_nothing_from_the_first_attempt(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", 1.0), _record("t2", 0.5)]
+    validator, registry, _reporter, _ = _runner(tmp_path, monkeypatch, records)
+
+    def eval_dir(run_id: str) -> Path:
+        (tmp_path / f"eval_{run_id}").mkdir(exist_ok=True)
+        return tmp_path / f"eval_{run_id}"
+
+    validator._eval_dir = eval_dir
+    (tmp_path / "agent.py").write_text("AGENT = 1\n")
+    rerun_session = {"session_id": "s-t2-rerun", "binding": {"session_id": "s-t2-rerun"}, "policy_view": {"query": "q"}}
+    seen = []
+
+    def sandbox(agent_path, eval_run_id, problem_file, **kwargs):
+        run_dir = problem_file.parent
+        problems = [json.loads(row)["problem_id"] for row in problem_file.read_text().splitlines()]
+        seen.append((run_dir, sorted(p.name for p in run_dir.iterdir()), agent_path.read_text(), problems))
+        (run_dir / "left-by-the-agent.txt").write_text("attempt state")
+        (run_dir / "output.jsonl").write_text(json.dumps({"problem_id": f"run-{len(seen)}"}) + "\n")
+        return run_dir / "output.jsonl", {}
+
+    validator.run_sandbox.side_effect = sandbox
+    registry.rerun_environment_faults.side_effect = lambda run: run([rerun_session])
+
+    assert _run(validator, tmp_path).score == pytest.approx(0.75)
+
+    (dir1, *_), (dir2, files2, agent2, problems2) = seen
+    assert dir2 != dir1 and files2 == ["agent.py", "problems.jsonl"]  # nothing from attempt 1
+    assert agent2 == "AGENT = 1\n" and problems2 == ["s-t2-rerun"]
+    assert not dir2.exists()  # removed once its output is folded in
+    output = (dir1 / "output.jsonl").read_text().splitlines()
+    assert [json.loads(row)["problem_id"] for row in output] == ["run-1", "run-2"]
+
+
+def test_no_rerun_after_the_miner_key_runs_out(tmp_path, monkeypatch) -> None:
+    validator, registry, _reporter, _ = _runner(tmp_path, monkeypatch, [_record("t1", 1.0), _record("t2", 1.0)])
+    registry.key_exhausted.set()
+
+    _run(validator, tmp_path)
+
+    registry.rerun_environment_faults.assert_not_called()
+
+
+def test_generated_runner_fails_on_world_errors(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", flags=["world_error"]), _record("t2", 1.0)]
+    validator, registry, reporter, _ = _runner(tmp_path, monkeypatch, records)
+
+    assert _run(validator, tmp_path) is None
+
+    failure = validator.backend_client.complete_run.call_args.kwargs
+    assert failure["status"] == validator_main.TerminalStatus.FAILED
+    assert failure["failure_reason"] == (
+        "generated evaluation infrastructure failure: verifier_error=1"
+    )
     validator.session_runtime.clear.assert_called_once_with(registry)
 
 
-@pytest.mark.parametrize("reader_task,outcome,failed", [
-    ("0", "environment_error", True), ("0", "verifier_error", True),
-    ("1", "environment_error", False), ("1", "verifier_error", False),
-    ("hidden", "environment_error", False), ("0", "agent_error", False),
-    ("0", "completed", False),
-])
-def test_generated_reader_failure_policy_uses_selected_roster(
-    tmp_path, monkeypatch, reader_task, outcome, failed,
-) -> None:
-    roster = {str(i): "right" for i in range(10)}
-    results = [{**_result(task, correct=True, reward=0.0 if task == "0" and outcome != "completed" else 0.1,
-                         outcome=outcome if task == "0" else "completed"),
-                "family": "right", "evaluation_run_id": "run", "agent_version_id": "agent",
-                "pack_sha256": "a" * 64} for task in roster]
-    registry = MagicMock()
-    registry.key_exhausted = threading.Event()
-    registry.finalized_results.return_value = results
-    registry.loaded_pack.task_ids = [*roster, "hidden"]
-    registry.loaded_pack.task_specs = [
-        SimpleNamespace(situation=SimpleNamespace(reader=task == reader_task))
-        for task in registry.loaded_pack.task_ids
-    ]
-    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock())
-    validator = Validator.__new__(Validator)
-    validator._create_environment_sessions = MagicMock(return_value=(registry, [], roster))
-    validator._eval_dir = MagicMock(return_value=tmp_path)
-    validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
-    validator.session_runtime = MagicMock()
-    validator.backend_client = MagicMock()
-    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
-    completion = validator._run_generated_evaluation(
-        work, tmp_path / "agent.py", inference_access_token="synthetic",
-        inference_provider="openrouter", inference_base_url="https://example.test/v1",
-    )
-    if failed:
-        assert completion is None
-        failure = validator.backend_client.complete_run.call_args.kwargs
-        assert failure["status"] == validator_main.TerminalStatus.FAILED
-        assert failure["failure_reason"] == f"generated evaluation infrastructure failure: completed=9, {outcome}=1"
-    else:
-        assert completion.score == pytest.approx(0.1 if outcome == "completed" else 0.09)
-        validator.backend_client.complete_run.assert_not_called()
+def test_emission_failure_does_not_change_the_score(tmp_path, monkeypatch) -> None:
+    validator, _, reporter, _ = _runner(tmp_path, monkeypatch, [_record("t1", 1.0), _record("t2")])
+    reporter.flush.side_effect = RuntimeError("artifact upload failed")
 
-
-def test_generated_runner_partial_scores_on_miner_key_exhaustion(tmp_path, monkeypatch):
-    """When the miner's per-run inference key hits its cap mid-run, the
-    completed episodes are scored and the run is marked SUCCESS with a
-    partial score. Prior behavior discarded all completed work and marked
-    the run FAILED, wasting validator compute and cliff-dropping the miner's
-    score to 0."""
-    # Fixture: 2 tasks completed correctly (0.5 reward each), 2 tasks
-    # quarantined as agent_error when the key was exhausted. Expected score
-    # = 1.0 total paid_reward / 4 tasks = 0.25.
-    results = [
-        {**_result("t1", correct=True, reward=0.5), "family": "right",
-         "evaluation_run_id": "run", "agent_version_id": "agent",
-         "pack_sha256": "a" * 64},
-        {**_result("t2", correct=True, reward=0.5), "family": "right",
-         "evaluation_run_id": "run", "agent_version_id": "agent",
-         "pack_sha256": "a" * 64},
-        {**_result("t3", correct=False, outcome="agent_error"), "family": "right",
-         "evaluation_run_id": "run", "agent_version_id": "agent",
-         "pack_sha256": "a" * 64},
-        {**_result("t4", correct=False, outcome="agent_error"), "family": "right",
-         "evaluation_run_id": "run", "agent_version_id": "agent",
-         "pack_sha256": "a" * 64},
-    ]
-    registry = MagicMock()
-    registry.key_exhausted = threading.Event()
-    registry.key_exhausted.set()
-    registry.finalized_results.return_value = results
-    reporter = MagicMock()
-    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", MagicMock(return_value=reporter))
-    validator = Validator.__new__(Validator)
-    validator._create_environment_sessions = MagicMock(return_value=(
-        registry,
-        [{"session_id": "session", "policy_view": {"query": "query"}}],
-        {"t1": "right", "t2": "right", "t3": "right", "t4": "right"},
-    ))
-    validator._eval_dir = MagicMock(return_value=tmp_path)
-    validator._simulator_inference_stats_file = MagicMock(return_value=tmp_path / "sim.jsonl")
-    # sandbox stopped early via stop_event → empty output is expected on this path
-    validator.run_sandbox = MagicMock(return_value=(None, {}))
-    validator.session_runtime = MagicMock()
-    validator.backend_client = MagicMock()
-    work = SimpleNamespace(env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent")
-
-    completion = validator._run_generated_evaluation(
-        work, tmp_path / "agent.py", inference_access_token="synthetic",
-        inference_provider="openrouter", inference_base_url="https://example.test/v1",
-    )
-    assert validator.run_sandbox.call_args.kwargs["stop_event"] is registry.key_exhausted
-    # Not a run-level failure — the completion is returned to the caller so
-    # the outer scoring path finalizes SUCCESS with the partial score.
-    assert completion is not None
-    assert completion.score == pytest.approx(0.25)
-    assert completion.sandbox_metadata["_miner_inference_key_exhausted"] is True
+    assert _run(validator, tmp_path).score == pytest.approx(0.5)
     validator.backend_client.complete_run.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("pack_sha256", "expected"),
-    [(None, "legacy"), ("a" * 64, "generated")],
-)
-def test_validator_selects_evaluator_from_claim_binding(
-    pack_sha256: str | None, expected: str
-) -> None:
-    validator = Validator.__new__(Validator)
-    validator._run_legacy_evaluation = MagicMock(return_value="legacy")
-    validator._run_generated_evaluation = MagicMock(return_value="generated")
-    work = SimpleNamespace(env_pack_sha256=pack_sha256)
+def test_sandbox_failure_fails_the_run(tmp_path, monkeypatch) -> None:
+    validator, *_ = _runner(tmp_path, monkeypatch, [], sandbox_output=False)
 
-    result = validator._run_claimed_evaluation(
-        work,
-        MagicMock(),
-        inference_access_token="token",
-        inference_provider="openrouter",
-        inference_base_url="https://example.test/v1",
+    assert _run(validator, tmp_path) is None
+    assert validator.backend_client.complete_run.call_args.kwargs["failure_reason"] == (
+        "Sandbox execution failed"
     )
 
-    assert result == expected
-    selected = getattr(validator, f"_run_{expected}_evaluation")
-    selected.assert_called_once()
 
-
-def test_validator_rejects_invalid_claim_binding() -> None:
-    validator = Validator.__new__(Validator)
-
-    with pytest.raises(ValueError, match="64 lowercase hex"):
-        validator._run_claimed_evaluation(
-            SimpleNamespace(env_pack_sha256="invalid"),
-            MagicMock(),
-            inference_access_token="token",
-            inference_provider="openrouter",
-            inference_base_url="https://example.test/v1",
-        )
-
-
-@pytest.mark.parametrize(
-    "selected_ids",
-    [[f"task-{i}" for i in range(35)], ["task-35", "task-48", "task-80"]],
-)
-def test_generated_sessions_use_exact_authoritative_subset_without_hidden_bank(
-    tmp_path, monkeypatch, selected_ids
-):
-    all_ids = [f"task-{i}" for i in range(105)]
-    families = {task_id: f"family-{i % 7}" for i, task_id in enumerate(all_ids)}
-    pack = SimpleNamespace(
-        task_ids=all_ids,
-        task_specs=[SimpleNamespace(family=families[task]) for task in all_ids],
-        close=MagicMock(),
+def test_key_exhaustion_scores_finished_episodes(tmp_path, monkeypatch) -> None:
+    validator, registry, *_ = _runner(
+        tmp_path, monkeypatch, [_record("t1", 1.0)], roster=("t1", "t2", "t3", "t4"),
+        sandbox_output=False,
     )
-    monkeypatch.setattr(
-        validator_main, "fetch_and_validate_pack", AsyncMock(return_value=pack)
-    )
-    registry = MagicMock()
-    registry.start.side_effect = lambda **kw: {
-        "session_id": kw["task_id"],
-        "policy_view": {"query": "public query"},
-    }
-    monkeypatch.setattr(
-        validator_main, "SessionRegistry", MagicMock(return_value=registry)
-    )
-    validator = Validator.__new__(Validator)
-    validator.config = SimpleNamespace(
-        backend_url="unused",
-        session_tool_timeout=1,
-        session_simulator_timeout=1,
-        sandbox_max_workers=1,
-    )
-    validator.wallet = SimpleNamespace(hotkey="unused")
-    validator.backend_client = MagicMock()
-    validator.backend_client.get_run_problems.return_value = [
-        {"task_id": task, "family": families[task]} for task in selected_ids
-    ]
-    validator.session_runtime = MagicMock()
-    validator._eval_dir = MagicMock(return_value=tmp_path)
-    work = SimpleNamespace(
-        env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent"
-    )
-    _, sessions, roster = validator._create_environment_sessions(
-        work, inference_access_token="unused"
-    )
-    assert validator_main.SessionRegistry.call_args.kwargs["inference_access_token"] == "unused"
-    assert "simulator_access_token" not in validator_main.SessionRegistry.call_args.kwargs
-    validator.backend_client.get_run_problems.assert_called_once_with(work.eval_run_id)
-    assert [
-        call.kwargs["task_id"] for call in registry.start.call_args_list
-    ] == selected_ids
-    assert list(roster) == selected_ids
-    write_problem_file(tmp_path / "problems.jsonl", sessions)
-    emitted = [
-        json.loads(line)["problem_id"]
-        for line in (tmp_path / "problems.jsonl").read_text().splitlines()
-    ]
-    assert emitted == selected_ids
-    assert set(emitted).isdisjoint(set(all_ids) - set(selected_ids))
-    assert len(pack.task_ids) == 105
+    registry.key_exhausted.set()
+
+    completion = _run(validator, tmp_path)
+
+    assert completion.score == pytest.approx(0.25)
+    assert completion.sandbox_metadata["_miner_inference_key_exhausted"] is True
 
 
-@pytest.mark.parametrize(
-    "problems",
-    [
-        [],
-        [{"task_id": "public", "family": "right"}] * 2,
-        [{"task_id": "fabricated", "family": "right"}],
-        [{"task_id": "public", "family": "wrong"}],
-        [{"task_id": "", "family": "right"}],
-        [{"family": "right"}],
-    ],
-)
-def test_invalid_authoritative_roster_fails_closed(problems):
-    with pytest.raises(ValueError):
-        select_run_task_roster(problems, {"public": "right", "hidden": "right"})
+def test_progress_batches_emit_with_the_claim_binding(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", 1.0), _record("t2")]
+    validator, _, _, reporter_type = _runner(tmp_path, monkeypatch, records)
+    emitted = []
+
+    async def emit(**kwargs):
+        emitted.append(kwargs)
+        return {"results": [], "counts": {"201": len(kwargs["results"])}}
+
+    monkeypatch.setattr(validator_main, "emit_finalized_results", emit)
+    _run(validator, tmp_path)
+
+    reporter_type.call_args.args[1](records)
+
+    (call,) = emitted
+    assert call["delivery_id"] == "qual-1"
+    assert call["eval_run_id"] == "run"
+    assert call["env_pack_sha256"] == "a" * 64
+    assert call["task_families"] == {"t1": "world", "t2": "world"}
+    assert call["results"] == records
 
 
-def test_selection_preserves_backend_order_and_allows_selected_race_subset():
-    assert list(
-        select_run_task_roster(
-            [
-                {"task_id": "hidden-b", "family": "right"},
-                {"task_id": "hidden-a", "family": "right"},
-            ],
-            {"public": "right", "hidden-a": "right", "hidden-b": "right"},
-        )
-    ) == ["hidden-b", "hidden-a"]
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"task_id": "hidden"},
-        {"family": "wrong"},
-        {"evaluation_run_id": "wrong"},
-        {"agent_version_id": "wrong"},
-        {"pack_sha256": "wrong"},
-    ],
-)
-def test_result_identity_cannot_be_replaced_at_matching_cardinality(change):
-    result = {
-        "task_id": "public",
-        "session_id": "session",
-        "family": "right",
-        "evaluation_run_id": "run",
-        "agent_version_id": "agent",
-        "pack_sha256": "pack",
-    }
-    kwargs = dict(evaluation_run_id="run", agent_version_id="agent", pack_sha256="pack")
-    validate_run_results([result], {"public": "right"}, **kwargs)
-    with pytest.raises(ValueError):
-        validate_run_results([{**result, **change}], {"public": "right"}, **kwargs)
-    with pytest.raises(ValueError):
-        validate_run_results([], {"public": "right"}, **kwargs)
-    with pytest.raises(ValueError):
-        validate_run_results([result, result], {"public": "right"}, **kwargs)
-
-
-def test_wrong_roster_cannot_be_emitted(monkeypatch):
-    emitter = AsyncMock()
-    monkeypatch.setattr(validator_main, "emit_finalized_results", emitter)
-    validator = Validator.__new__(Validator)
-    registry = MagicMock()
-    registry.finalized_results.return_value = [{"task_id": "hidden"}]
-    work = SimpleNamespace(
-        env_pack_sha256="a" * 64, eval_run_id="run", agent_version_id="agent"
-    )
-    with pytest.raises(ValueError, match="authoritative run roster"):
-        validator._emit_environment_results(
-            work, registry, expected_task_roster={"public": "right"}
-        )
-    emitter.assert_not_called()
-
-
-def test_incremental_result_batch_accepts_only_selected_bound_tasks():
-    result = {
-        "task_id": "public",
-        "session_id": "session",
-        "family": "right",
-        "evaluation_run_id": "run",
-        "agent_version_id": "agent",
-        "pack_sha256": "pack",
-    }
-    kwargs = dict(evaluation_run_id="run", agent_version_id="agent", pack_sha256="pack")
-
-    validate_run_results(
-        [result],
-        {"public": "right", "later": "right"},
-        require_complete=False,
-        **kwargs,
-    )
-
-    with pytest.raises(ValueError, match="authoritative run roster"):
-        validate_run_results(
-            [{**result, "task_id": "hidden"}],
-            {"public": "right"},
-            require_complete=False,
-            **kwargs,
-        )
+def test_claim_episode_nonces_read_the_sdk_model() -> None:
+    assert validator_main._claim_episode_nonces(_work()) == NONCES
+    assert validator_main._claim_episode_nonces(_work(episode_nonces=UNSET)) is None
 
 
 @pytest.mark.parametrize(
@@ -725,49 +672,11 @@ def test_incremental_result_batch_accepts_only_selected_bound_tasks():
 def test_generated_runner_retains_agent_inference_summary(
     tmp_path, monkeypatch, sidecar_stats, output_stats, expected_cost, expected_requests
 ):
-    result = {
-        "task_id": "public",
-        "session_id": "session",
-        "family": "right",
-        "evaluation_run_id": "run",
-        "agent_version_id": "agent",
-        "pack_sha256": "a" * 64,
-        "outcome": "completed",
-        "verdict": {"correct": True, "paid_reward": 0.5},
-    }
-    registry = MagicMock()
-    registry.key_exhausted = threading.Event()
-    registry.finalized_results.return_value = [result]
-    reporter = MagicMock()
-    reporter_type = MagicMock(return_value=reporter)
-    monkeypatch.setattr(validator_main, "GeneratedProgressReporter", reporter_type)
-
-    validator = Validator.__new__(Validator)
-    validator._create_environment_sessions = MagicMock(
-        return_value=(
-            registry,
-            [
-                {
-                    "session_id": "session",
-                    "policy_view": {"query": "query"},
-                }
-            ],
-            {"public": "right"},
-        )
-    )
-    validator._eval_dir = MagicMock(return_value=tmp_path)
-    validator.run_sandbox = MagicMock(return_value=(tmp_path / "output.jsonl", {}))
-    validator.session_runtime = MagicMock()
-    validator._emit_environment_result_batch = MagicMock()
-    work = SimpleNamespace(
-        env_pack_sha256="a" * 64,
-        eval_run_id="run",
-        agent_version_id="agent",
-    )
+    record = {**_record("t1", 0.5), "session_id": "session"}
+    validator, _, _, reporter_type = _runner(tmp_path, monkeypatch, [record], roster=("t1",))
+    validator._emit_episode_records = MagicMock()
     if sidecar_stats is not None:
-        (tmp_path / "inference_stats.jsonl").write_text(
-            json.dumps(sidecar_stats) + "\n"
-        )
+        (tmp_path / "inference_stats.jsonl").write_text(json.dumps(sidecar_stats) + "\n")
     if output_stats is not None:
         (tmp_path / "output.jsonl").write_text(
             json.dumps(
@@ -781,27 +690,13 @@ def test_generated_runner_retains_agent_inference_summary(
             + "\n"
         )
 
-    completion = validator._run_generated_evaluation(
-        work,
-        tmp_path / "agent.py",
-        inference_access_token="sk-or-test-miner",
-        inference_provider="openrouter",
-        inference_base_url="https://example.test/v1",
-    )
+    completion = _run(validator, tmp_path, token="sk-or-test-miner")
 
-    reporter.start.assert_called_once_with()
-    reporter.stop.assert_called()
-    reporter.flush.assert_called_once_with([result])
-    validator.session_runtime.clear.assert_called_once_with(registry)
-    reporter_type.call_args.args[1]([result])
-    assert "sk-or-test-miner" not in json.dumps(
-        validator._emit_environment_result_batch.call_args.kwargs["inference_transcripts"]
-    )
-    assert completion is not None
+    reporter_type.call_args.args[1]([record])
+    transcripts = validator._emit_episode_records.call_args.args[4]
+    assert "sk-or-test-miner" not in json.dumps(transcripts)
     assert completion.score == 0.5
-    usage = completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"][
-        "public"
-    ]
+    usage = completion.sandbox_metadata["_shadow_resource_usage"]["by_episode"]["t1"]
     if expected_cost is None:
         assert usage["inference_cost_status"] == "missing"
         assert "inference_cost_usd" not in usage
@@ -809,3 +704,34 @@ def test_generated_runner_retains_agent_inference_summary(
         assert usage["inference_cost_status"] == "complete"
         assert usage["inference_cost_usd"] == expected_cost
     assert usage["inference_requests"] == expected_requests
+
+
+
+def test_a_pack_refused_at_session_start_fails_the_run_as_ours(tmp_path, delivery_fetch, monkeypatch) -> None:
+    """Runtime 4.0.1 refuses a delivery whose catalog file changed on the host before any worker starts; the run must
+    fail with the Backend's pack-failure text, never as the agent's failure."""
+    from oro_env_runtime.pack import PackRefused
+    from validator import session_registry
+
+    def refuse(self, task_id, **kwargs):
+        raise PackRefused("the pack's catalog file is missing or changed since it was verified")
+
+    monkeypatch.setattr(session_registry.SessionRegistry, "start", refuse)
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)
+
+
+
+def test_a_search_index_install_failure_fails_the_run_as_ours(tmp_path, delivery_fetch, monkeypatch) -> None:
+    """Review of #384: the registry installs each index on the search server; a search outage must not count
+    against the agent."""
+    import requests
+
+    def down(index):
+        raise requests.ConnectionError("search server unreachable")
+
+    monkeypatch.setattr(delivery_fetch.search, "ensure", down)
+    with pytest.raises(RuntimeError) as failed:
+        _validator(tmp_path)._create_environment_sessions(_work(), inference_access_token="token")
+    assert BACKEND_PACK_LOAD_FAILURE.fullmatch(str(failed.value)), str(failed.value)

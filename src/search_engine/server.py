@@ -10,6 +10,7 @@ from flask import Flask, request, jsonify
 from waitress import serve
 
 from src.search_engine import sidecar as _sidecar
+from src.search_engine import worlds
 from src.search_engine.product_filters import (
     is_filter_by_price,
     is_filter_by_service,
@@ -70,6 +71,7 @@ _SIDECAR = _sidecar.load(
 )
 
 app = Flask(__name__)
+app.register_blueprint(worlds.blueprint(worlds.from_env(LuceneSearcher)))
 
 
 def sanitize_query(q: str) -> str:

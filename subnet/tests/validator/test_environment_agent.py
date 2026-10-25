@@ -1,106 +1,55 @@
-"""Integration coverage for the generated-environment example agent."""
+"""Integration coverage for the world-session example agent."""
 
 from __future__ import annotations
 
-import json as jsonlib
-from pathlib import Path
+import json
 from typing import Any
 
 import pytest
 
 from src.agent import environment_agent
-from validator.env_pack_loader import LoadedPack
-from validator.generated_evaluation import write_problem_file
+from subnet.tests.world_pack_fixture import StubModelClient, StubSearchClient, load_world_pack
 from validator.session_registry import SessionRegistry
 from validator.session_service import SessionRuntime
 
-from tests.compat_fixture import accepted_ref
 
-pytest_plugins = ("tests.compat_fixture",)
+def _tool_call(n: int, name: str, args: dict) -> dict:
+    return {"id": f"model-call-{n}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
 
 
-def test_example_agent_uses_dynamic_tools_to_complete_a_runtime_session(
-    loaded_pack: LoadedPack,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_example_agent_takes_one_step_per_tool_call_until_finished(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pack = load_world_pack(tmp_path)
     runtime = SessionRuntime()
-    candidate = accepted_ref(loaded_pack.task_specs[0])
-    planned_actions = [
-        {
-            "name": "add_to_cart",
-            "arguments": {
-                "product_id": candidate.product_id,
-                "sku": candidate.sku,
-            },
-        },
-        {"name": "place_test_order", "arguments": {}},
+    replies = [
+        {"content": "Thinking."},  # no tool call: the agent nudges and retries
+        {"content": "", "tool_calls": [_tool_call(1, "find", {"query": "red"}), _tool_call(2, "ask", {"text": "this one?"})]},
+        {"content": "", "tool_calls": [_tool_call(3, "buy", {"id": "a"}), _tool_call(4, "find", {"query": "x"})]},
     ]
-    inference_requests: list[dict[str, Any]] = []
-    environment_requests: list[dict[str, Any]] = []
+    inference: list[dict[str, Any]] = []
+    environment: list[dict[str, Any]] = []
 
     def post(path: str, json_data: dict[str, Any]) -> dict[str, Any]:
         if path == "/inference/chat/completions":
-            inference_requests.append(json_data)
-            if len(inference_requests) == 1:
-                return {"choices": [{"message": {"content": "Finished."}}]}
-            action = planned_actions[len(inference_requests) - 2]
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "id": f"model-call-{len(inference_requests)}",
-                                    "type": "function",
-                                    "function": {
-                                        "name": action["name"],
-                                        "arguments": jsonlib.dumps(
-                                            action["arguments"]
-                                        ),
-                                    }
-                                }
-                            ],
-                        }
-                    }
-                ]
-            }
-        environment_requests.append(json_data)
+            inference.append(json_data)
+            return {"choices": [{"message": replies[len(inference) - 1]}]}
+        environment.append(json_data)
         return runtime.call(json_data)
 
     monkeypatch.setattr(environment_agent._proxy, "post", post)
-
-    with SessionRegistry(loaded_pack) as registry:
+    with SessionRegistry(pack, episode_nonces={"t1": "n1"}, model_client=StubModelClient("Yes, red."),
+                         search_client=StubSearchClient()) as registry:
         runtime.install(registry)
-        bootstrap = registry.start(
-            evaluation_run_id="private-evaluation-id",
-            agent_version_id="private-agent-version-id",
-            task_id=loaded_pack.task_ids[0],
-            session_id="example-session",
-        )
-        problem_path = tmp_path / "problems.jsonl"
-        write_problem_file(problem_path, [bootstrap])
-        problem = jsonlib.loads(problem_path.read_text(encoding="utf-8"))
+        started = registry.start("t1")
+        problem = {"problem_id": "p1", "environment": {"binding": started["binding"], "policy_view": started["policy_view"]}}
 
         dialogue = environment_agent.agent_main(problem)
+        [record] = registry.terminal_results()
 
-    assert len(dialogue) == 3
-    assert len(inference_requests) == 3
-    assert any(
-        message.get("content")
-        == "The environment has not reported done=true. "
-        "Choose one of the supplied tools to continue."
-        for message in inference_requests[1]["messages"]
-    )
-    assert inference_requests[0]["tools"] == problem["environment"]["policy_view"][
-        "tools"
-    ]
-    assert [request["turn"] for request in environment_requests] == [1, 2]
-    assert all(
-        request["idempotency_key"] == request["call_id"]
-        for request in environment_requests
-    )
-    assert dialogue[-1]["environment_result"]["calls"][0]["observation"][
-        "done"
-    ] is True
+    assert inference[0]["tools"] == started["policy_view"]["tools"]
+    assert "hello" in inference[0]["messages"][1]["content"]  # the opening reaches the model
+    assert [(e["step"], e["action"]["name"]) for e in environment] == [(1, "find"), (2, "ask"), (3, "buy")]
+    assert all(e["session_id"] == started["session_id"] for e in environment)
+    tool_messages = [m for m in inference[2]["messages"] if m["role"] == "tool"]
+    assert json.loads(tool_messages[1]["content"]) == {"reply": "Yes, red."}  # the shopper reply is an observation
+    assert dialogue[-1]["environment_result"]["finished"] is True
+    assert record["verdict"]["score"] == 1.0

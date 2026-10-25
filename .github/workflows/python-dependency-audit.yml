@@ -1,0 +1,135 @@
+name: Python Dependency Audit
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-dependency-audit.yml'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'docker/validator/pyproject.toml'
+      - 'docker/validator/uv.lock'
+      - 'docker/validator/Dockerfile'
+      - 'docker/search-server/requirements.txt'
+      - 'docker/search-server/Dockerfile'
+      - 'docker/sandbox/Dockerfile'
+      - 'docker/index-builder/Dockerfile'
+      - 'tests/integration/session-runtime.Dockerfile'
+      - '.github/workflows/integration-tests.yml'
+  schedule:
+    - cron: '30 12 * * *'
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  build-image-inventories:
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: sandbox
+            dockerfile: docker/sandbox/Dockerfile
+            published_image: ghcr.io/oro-ai/oro/sandbox:stable
+          - name: search-server
+            dockerfile: docker/search-server/Dockerfile
+            published_image: ghcr.io/oro-ai/oro/search-server:stable
+          - name: index-builder
+            dockerfile: docker/index-builder/Dockerfile
+            published_image: ''
+          - name: session-runtime
+            dockerfile: tests/integration/session-runtime.Dockerfile
+            published_image: ''
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image and export installed versions
+        env:
+          PUBLISHED_IMAGE: ${{ matrix.published_image }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = schedule ] && [ -n "$PUBLISHED_IMAGE" ]; then
+            image="$PUBLISHED_IMAGE"
+            docker pull "$image"
+            image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")"
+            if [[ ! "$image_ref" =~ @sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::No immutable repository digest found for $image"
+              exit 1
+            fi
+            image="$image_ref"
+            echo "- ${{ matrix.name }}: $image_ref" >> "$GITHUB_STEP_SUMMARY"
+          else
+            image="oro-audit-${{ matrix.name }}:local"
+            docker build -f "${{ matrix.dockerfile }}" -t "$image" .
+            if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+              echo "- ${{ matrix.name }}: source build; unpublished, not a live-host inventory" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- ${{ matrix.name }}: PR source build" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          docker run --rm --entrypoint python "$image" -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions() if d.metadata.get("Name"))))' > "${{ matrix.name }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-image-inventory-${{ matrix.name }}
+          path: ${{ matrix.name }}.txt
+          if-no-files-found: error
+          retention-days: 1
+
+  pull-request-scan:
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      scan-args: |-
+        --lockfile=./docker/validator/uv.lock
+        --lockfile=requirements.txt:./requirements.txt
+        --lockfile=requirements.txt:./docker/search-server/requirements.txt
+      upload-sarif: false
+      fail-on-vuln: true
+
+  scheduled-scan:
+    if: github.event_name == 'schedule'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      scan-args: |-
+        --lockfile=./docker/validator/uv.lock
+        --lockfile=requirements.txt:./requirements.txt
+        --lockfile=requirements.txt:./docker/search-server/requirements.txt
+      upload-sarif: false
+      fail-on-vuln: false
+
+  pull-request-image-scan:
+    if: github.event_name == 'pull_request'
+    needs: build-image-inventories
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [sandbox, search-server, index-builder, session-runtime]
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      download-artifact: python-image-inventory-${{ matrix.name }}
+      matrix-property: ${{ matrix.name }}-
+      scan-args: |-
+        --no-resolve
+        --lockfile=requirements.txt:./${{ matrix.name }}.txt
+      upload-sarif: false
+      fail-on-vuln: true
+
+  scheduled-image-scan:
+    if: github.event_name == 'schedule'
+    needs: build-image-inventories
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [sandbox, search-server, index-builder, session-runtime]
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36
+    with:
+      download-artifact: python-image-inventory-${{ matrix.name }}
+      matrix-property: ${{ matrix.name }}-
+      scan-args: |-
+        --no-resolve
+        --lockfile=requirements.txt:./${{ matrix.name }}.txt
+      upload-sarif: false
+      fail-on-vuln: false

@@ -1,1047 +1,482 @@
-"""Validator-owned session isolation for sealed environment tasks."""
+"""Validator-owned world sessions: one runtime ``Session`` per task, bound and idempotent."""
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import copy
 import hashlib
 import json
+import logging
+import os
 import threading
 import time
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, NoReturn
+from typing import Any, Callable
 from uuid import uuid4
 
-from oro_env_runtime import loop
-from oro_env_runtime.loop import record_user_message
-from oro_env_runtime.observations import event_observed_or_signaled
-from oro_env_runtime.runtime import TaskSession
-from oro_env_runtime.user_sim import UserSim
+import requests
+from oro_env_runtime import models, session as runtime_session
+from oro_env_runtime.pack import Pack
+from oro_env_runtime.session import Session
 
-from .env_pack_loader import LoadedPack
+from src.agent.proxy_client import ProxyClient
+
 from .session_errors import (
+    VALIDATOR_CALLER_HEADER,
+    VALIDATOR_CALLER_SECRET,
     AgentInferenceBudgetError,
     HarnessError,
     HarnessExecutionError,
     HarnessTimeoutError,
     InvalidSessionError,
 )
-from .simulator_completion import (
-    SIMULATOR_DEADLINE,
-    InferenceProviderError,
-    SimulatorCompletion,
-)
 
-DEFAULT_TOOL_TIMEOUT_S = 10.0
-MAX_CALLS_PER_TURN = 16
-# The tool timeout is per action. A grouped call runs its actions one after
-# another, so its budget scales with the group, up to this cap.
-MAX_TOOL_CALL_TIMEOUT_S = 30.0
-# The simulator is a provider call, not a local tool. env.openrouter allows 60s
-# per attempt, so a shorter budget would quarantine sessions the provider would
-# still answer.
-DEFAULT_SIMULATOR_TIMEOUT_S = 60.0
-_PACK_PROVENANCE_FIELDS = (
-    "contract_version",
-    "runtime_version",
-    "result_schema_version",
-    "catalog_epoch",
-    "catalog_sha256",
-    "search_index_epoch",
-    "search_index_sha256",
-)
+logger = logging.getLogger(__name__)
 
-# The sandbox receives a deliberately smaller contract than the validator keeps
-# for replay and scoring.  Treat this as an allowlist: fields added by the
-# runtime stay private until they are explicitly reviewed for agent exposure.
-_PUBLIC_POLICY_FIELDS = (
-    "query",
-    "max_steps",
-    "tools",
-)
-_PUBLIC_STEP_FIELDS = ("observation", "done", "error")
+DEFAULT_SEARCH_SERVER_URL = "http://search-server:5632"
+# One envelope may carry several tool calls; each runs as its own step.
+MAX_ACTIONS_PER_CALL = 16
+# Arguments nested deeper than this would overflow recursive JSON handling in the
+# runtime and void the episode; they run as a non-object, an invalid-arguments step.
+MAX_ARG_DEPTH = 64
+TOO_DEEP = "arguments nested too deeply"
+# A string with a lone surrogate cannot be canonically encoded and would void the
+# episode: such arguments run as an invalid-arguments step, such a name as an unknown tool.
+NOT_UTF8 = "arguments are not valid UTF-8"
+NOT_UTF8_TOOL = "tool name is not valid UTF-8"
+# A verdict for a fault of the validator's machine (wall clock, memory, worker crash),
+# never a score: the episode re-runs from the start with the same nonce, and a fault
+# that persists is the episode's infrastructure failure.
+ENVIRONMENT_FAULT = "environment fault"
+MAX_ENVIRONMENT_RERUNS = 2
 
 
-def _state_hash(session: TaskSession) -> str:
-    return session.env.state_hash_now()
+def _too_deep(value: object) -> bool:
+    stack = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, (dict, list)):
+            if depth > MAX_ARG_DEPTH:
+                return True
+            stack.extend((child, depth + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return False
+
+
+def _not_utf8(value: object) -> bool:
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            stack.extend(item)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, str):
+            try:
+                item.encode()
+            except UnicodeEncodeError:
+                return True
+    return False
+
+
+def _checked_args(args: object) -> object:
+    if _too_deep(args):
+        return TOO_DEEP
+    return NOT_UTF8 if _not_utf8(args) else args
+
+
+class InferenceProviderError(RuntimeError):
+    """A validator model call through the proxy returned no usable result."""
+
+    def __init__(self, status: int | None, body: str) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(f"validator inference failed (status={status} body={body!r})")
+
+    @property
+    def key_exhausted(self) -> bool:
+        """The run key's limit (403) or the miner account's credit (402) is spent.
+
+        The in-flight reservation 402 clears as other calls finish, so it doesn't count.
+        """
+        body = self.body.lower()
+        if self.status == 403:
+            return "key limit exceeded" in body
+        return self.status == 402 and (
+            "insufficient credits" in body or "requires more credits" in body
+        )
+
+
+class ProxyModelClient:
+    """The runtime's model client over the validator proxy, on the miner-funded run key.
+
+    One attempt per call: the runtime's ``live_reader`` owns timeouts and retries,
+    and turns a raised failure into an ``"error"`` reading.
+    """
+
+    def __init__(
+        self,
+        access_token: str,
+        *,
+        proxy_url: str = "http://proxy:80",
+        timeout: float = 60.0,
+        inference_stats_file: str | None = None,
+        key_exhausted_event: threading.Event | None = None,
+    ) -> None:
+        if not access_token:
+            raise ValueError("inference access token is required")
+        self._access_token = access_token
+        self._key_exhausted_event = key_exhausted_event
+        self._client = ProxyClient(
+            proxy_url=proxy_url,
+            api_key=access_token,
+            timeout=timeout,
+            max_retries=1,
+            inference_stats_file=inference_stats_file,
+            inference_stats_problem_id="validator",
+        )
+        self._client.headers = {VALIDATOR_CALLER_HEADER: VALIDATOR_CALLER_SECRET}
+
+    def complete(self, model: str, prompt: str, params: dict, timeout: float) -> str:
+        data = self._post(
+            "/inference/chat/completions",
+            {**params, "model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
+        )
+        choices = data.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
+        text = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(text, str):
+            raise InferenceProviderError(200, "completion has no text")
+        return text.replace(self._access_token, "[REDACTED]")
+
+    def decide(self, model: str, state: object, questions: object, params: dict, timeout: float) -> object:
+        # ``questions`` is pack-defined (OpenRouter's keyed dict for Jev): forward it unchanged.
+        return self._post(
+            "/inference/alpha/decisions",
+            {**params, "model": model, "state": state, "questions": questions},
+        )
+
+    def _post(self, path: str, body: dict) -> dict:
+        result = self._client.post_verbose(path, json_data=body)
+        if isinstance(result.data, dict):
+            return result.data
+        error = result.error or {}
+        failure = InferenceProviderError(
+            error.get("status"), str(error.get("body") or "").replace(self._access_token, "[REDACTED]")
+        )
+        if failure.key_exhausted and self._key_exhausted_event is not None:
+            self._key_exhausted_event.set()
+        raise failure
+
+
+class SearchServerClient:
+    """The runtime's search client over the search server's world routes."""
+
+    def __init__(self, base_url: str, timeout: float = 60.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self._indexes: dict[str, dict] = {}
+
+    def ensure(self, index: dict) -> None:
+        """Upload one verified index archive (``pack.indexes[name]``) under its sha256."""
+        with open(index["archive"], "rb") as archive:
+            response = requests.put(
+                f"{self.base_url}/internal/worlds/{index['id']}",
+                data=archive,
+                headers={"X-ORO-World-Settings": json.dumps(index["settings"], sort_keys=True, separators=(",", ":"))},
+                timeout=self.timeout,
+            )
+        response.raise_for_status()
+        self._indexes[index["id"]] = index
+
+    def search(self, index_id: str, query: str, params: dict, timeout: float) -> list[tuple[str, float]]:
+        response = self._post_search(index_id, query, params, timeout)
+        if response.status_code == 404 and index_id in self._indexes:  # the server restarted
+            self.ensure(self._indexes[index_id])
+            response = self._post_search(index_id, query, params, timeout)
+        response.raise_for_status()
+        return [(hit["id"], float(hit["score"])) for hit in response.json()["hits"]]
+
+    def _post_search(self, index_id: str, query: str, params: dict, timeout: float) -> requests.Response:
+        return requests.post(
+            f"{self.base_url}/internal/worlds/{index_id}/search",
+            json={"query": query, "params": params},
+            timeout=timeout,
+        )
 
 
 def _elapsed_ms(started: float) -> float:
     return round((time.perf_counter() - started) * 1000.0, 3)
 
 
-def _public_policy_view(
-    session: TaskSession, *, max_calls_per_turn: int
-) -> dict[str, Any]:
-    runtime_view = session.policy_view()
-    return {
-        **{
-            field: copy.deepcopy(runtime_view[field]) for field in _PUBLIC_POLICY_FIELDS
-        },
-        "max_calls_per_turn": max_calls_per_turn,
-    }
-
-
-def _public_step_result(result: dict[str, Any]) -> dict[str, Any]:
-    """Project a runtime result without its validator-only ledger entries."""
-
-    if not isinstance(result, dict):
-        raise TypeError("environment step result must be an object")
-    observation = result.get("observation")
-    if not isinstance(observation, dict):
-        raise TypeError("environment observation must be an object")
-    return {field: copy.deepcopy(result.get(field)) for field in _PUBLIC_STEP_FIELDS}
-
-
-def _deliver(
-    session: TaskSession,
-    transcript: list[dict[str, Any]],
-    decisions: list[tuple[dict[str, Any], dict[str, Any] | None]],
-    *,
-    step: int,
-) -> None:
-    """The runtime loop's boundary tail: record each shopper decision, reveal the
-    facet it disclosed, then say the lines fired timeline transitions queued."""
-
-    for decision, signal in decisions:
-        content = str(decision.get("content") or "").strip()
-        record_user_message(
-            session, step=step, decision={**decision, "content": content}, signal=signal
-        )
-        if decision.get("disclosed"):
-            session.env.disclose_facet(decision["disclosed"])
-        transcript.append({"role": "user", "content": content})
-    loop.say_utterances(session, transcript, step=step)
-
-
-def _strip_undeclared_arguments(
-    action: dict[str, Any], tool_parameters: dict[str, frozenset[str]]
-) -> dict[str, Any]:
-    args = action.get("args")
-    allowed = tool_parameters.get(action.get("name"))
-    if allowed is not None and isinstance(args, dict):
-        action["args"] = {key: value for key, value in args.items() if key in allowed}
-    return action
-
-
-@dataclass
-class _CachedResponse:
-    call_id: str
-    action_hash: str
-    response: dict[str, Any]
-
-
 @dataclass
 class _SessionState:
     session_id: str
-    evaluation_run_id: str
-    agent_version_id: str
     task_id: str
-    session: TaskSession
-    simulator: Any | None
-    transcript: list[dict[str, Any]]
-    bootstrap: dict[str, Any]
-    tool_parameters: dict[str, frozenset[str]]
-    started_at: float
-    finished_at: float | None = None
+    episode_nonce: str
+    session: Session
     call_trace: list[dict[str, Any]] = field(default_factory=list)
-    event_fired_turns: dict[int, int] = field(default_factory=dict)
-    surfaced_events: set[int] = field(default_factory=set)
-    terminal_reason: str | None = None
+    responses: dict[int, tuple[str, dict[str, Any]]] = field(default_factory=dict)
     quarantined_reason: str | None = None
-    quarantined_outcome: str = "environment_error"
-    final_result: dict[str, Any] | None = None
-    responses: dict[str, _CachedResponse] = field(default_factory=dict)
-    call_ids: dict[str, str] = field(default_factory=dict)
+    record: dict[str, Any] | None = None
+    retired: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
-@dataclass
-class _CallTrace:
-    request: dict[str, Any]
-    state_hash_before: str
-    started_at: float = field(default_factory=time.perf_counter)
-    tool_latency_ms: float | None = None
-    simulator_latency_ms: float | None = None
-    search_retries: list[dict[str, Any]] = field(default_factory=list)
-
-    def record(
-        self,
-        state: _SessionState,
-        *,
-        state_hash_after: str | None = None,
-        response: dict[str, Any] | None = None,
-        error_type: str | None = None,
-        error_detail: str | None = None,
-        simulator_exchanges: list[dict[str, Any]] | None = None,
-    ) -> None:
-        timing = {
-            "tool": self.tool_latency_ms,
-            "simulator": self.simulator_latency_ms,
-            "total": _elapsed_ms(self.started_at),
-        }
-        state.call_trace.append(
-            {
-                "request": self.request,
-                "response": copy.deepcopy(response),
-                "state_hash_before": self.state_hash_before,
-                "state_hash_after": state_hash_after or _state_hash(state.session),
-                "latency_ms": timing["total"],
-                "timing_ms": timing,
-                "search_retries": copy.deepcopy(self.search_retries),
-                "simulator": (
-                    {
-                        "latency_ms": self.simulator_latency_ms,
-                        "exchanges": simulator_exchanges or [],
-                    }
-                    if self.simulator_latency_ms is not None
-                    else None
-                ),
-                "error": (
-                    {"type": error_type, "detail": error_detail}
-                    if error_type is not None
-                    else None
-                ),
-            }
-        )
-
-
 class SessionRegistry:
-    """Fresh, bound, idempotent sessions over one validated sealed pack.
+    """Fresh, bound, idempotent sessions over one verified pack.
 
-    A registry is validator-local and owns its :class:`LoadedPack`. Calls for
-    one session are serialized; different sessions may run concurrently
-    through the bounded worker pool.
+    Calls for one session are serialized; different sessions may run
+    concurrently on the caller's threads.
     """
 
     def __init__(
         self,
-        loaded_pack: LoadedPack,
+        pack: Pack,
         *,
-        tool_timeout_s: float = DEFAULT_TOOL_TIMEOUT_S,
-        simulator_timeout_s: float = DEFAULT_SIMULATOR_TIMEOUT_S,
-        max_calls_per_turn: int = MAX_CALLS_PER_TURN,
-        max_workers: int = 8,
+        episode_nonces: dict[str, str],
+        model_client: models.ModelClient | None = None,
+        search_client: models.SearchClient | None = None,
+        timeout: float = 60.0,
+        retries: int = 2,
         inference_access_token: str | None = None,
+        proxy_url: str = "http://proxy:80",
         inference_stats_file: str | None = None,
-        simulator_proxy_url: str = "http://proxy:80",
-        simulator_factory: Callable[[TaskSession], Any] | None = None,
     ) -> None:
-        if tool_timeout_s <= 0:
-            raise ValueError("tool_timeout_s must be positive")
-        if simulator_timeout_s <= 0:
-            raise ValueError("simulator_timeout_s must be positive")
-        if max_calls_per_turn <= 0:
-            raise ValueError("max_calls_per_turn must be positive")
-        if max_workers <= 0:
-            raise ValueError("max_workers must be positive")
-        self.loaded_pack = loaded_pack
-        self.pack_sha256 = loaded_pack.pack_sha256
-        self.tool_timeout_s = float(tool_timeout_s)
-        self.simulator_timeout_s = float(simulator_timeout_s)
-        self.max_calls_per_turn = int(max_calls_per_turn)
-        self._inference_access_token = inference_access_token
-        self._inference_stats_file = inference_stats_file
-        self._simulator_proxy_url = simulator_proxy_url
-        self._simulator_factory = simulator_factory
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.pack = pack
+        self.episode_nonces = dict(episode_nonces)
+        self.key_exhausted = threading.Event()
+        if model_client is None:
+            if not inference_access_token:
+                raise ValueError("model_client or inference_access_token is required")
+            # Resolved from the module at construction so harnesses can wrap it.
+            model_client = ProxyModelClient(
+                inference_access_token,
+                proxy_url=proxy_url,
+                timeout=timeout,
+                inference_stats_file=inference_stats_file,
+                key_exhausted_event=self.key_exhausted,
+            )
+        if search_client is None:
+            search_client = SearchServerClient(
+                os.environ.get("SEARCH_SERVER_URL", DEFAULT_SEARCH_SERVER_URL), timeout
+            )
+        for index in pack.indexes.values():
+            search_client.ensure(index)
+        self.read = models.live_reader(model_client, search_client, timeout, retries)
         self._sessions: dict[str, _SessionState] = {}
+        self._reruns: dict[str, int] = {}
         self._lock = threading.Lock()
         self._closed = False
         self._finalized = False
-        self.key_exhausted = threading.Event()
 
-    def _default_simulator(self, state: _SessionState) -> UserSim:
-        session = state.session
-        reader = session.task.situation and session.task.situation.reader
-        token = self._inference_access_token
-        if token is None:
-            raise RuntimeError(
-                "miner inference credentials are required for user simulation"
-            )
-        completion = SimulatorCompletion(
-            token,
-            proxy_url=self._simulator_proxy_url,
-            inference_stats_file=self._inference_stats_file,
-            episode_id=state.session_id,
-            key_exhausted_event=self.key_exhausted,
-        )
-        return UserSim(
-            session.task,
-            model=session.model_roles["user_simulator"],
-            surface_events=not session.state_blind,
-            completion=completion,
-            reader_completion=completion if reader else None,
-            fired=lambda: session.env.fired_transitions,
-        )
+    def start(self, task_id: str, *, session_id: str | None = None) -> dict[str, Any]:
+        """Open one fresh episode for ``task_id`` with the claim's nonce."""
 
-    def _simulator(self, state: _SessionState) -> Any:
-        if state.simulator is None:
-            state.simulator = (
-                self._simulator_factory(state.session)
-                if self._simulator_factory is not None
-                else self._default_simulator(state)
-            )
-        return state.simulator
-
-    def _simulator_response(
-        self, state: _SessionState, signal: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        self._simulator(state)
-        decision = self._run_simulator(state.simulator.respond(state.transcript, signal))
-        if not isinstance(decision, dict):
-            raise TypeError("simulator response must be an object")
-        if signal is not None:
-            decision = state.simulator.ensure_react(decision, signal)
-        return decision
-
-    def _run_simulator(self, coroutine: Coroutine[Any, Any, Any]) -> Any:
-        async def bounded() -> Any:
-            remaining = max(0.0, SIMULATOR_DEADLINE.get() - time.monotonic())
-            return await asyncio.wait_for(coroutine, timeout=remaining)
-
-        return asyncio.run(bounded())
-
-    @staticmethod
-    def _simulator_exchanges(simulator: Any | None) -> list[dict[str, Any]]:
-        exporter = getattr(simulator, "exchange_trace", None)
-        if not callable(exporter):
-            return []
-        trace = exporter()
-        if not isinstance(trace, list):
-            raise TypeError("simulator exchange trace must be a list")
-        return copy.deepcopy(trace)
-
-    def _shopper_turn_decisions(
-        self,
-        state: _SessionState,
-        signal: dict[str, Any] | None,
-        turn: int,
-        message_sent: bool,
-    ) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
-        """Shared runtime scheduling: the shopper replies to a message or an event notice
-        unless a timeline line speaks for it this turn; queued lines are reworded."""
-        decisions = []
-        lines = state.session.env.utterances
-        if signal is not None or (message_sent and not lines):
-            decisions.append((self._simulator_response(state, signal), signal))
-        if lines:
-            self._run_simulator(
-                loop.reword_utterances(self._simulator(state), state.session)
-            )
-        return decisions
-
-    def start(
-        self,
-        *,
-        evaluation_run_id: str,
-        agent_version_id: str,
-        task_id: str,
-        session_id: str | None = None,
-        state_blind: bool = False,
-    ) -> dict[str, Any]:
-        """Create one fresh task state and bind it to an evaluation and agent."""
-
-        if any(
-            not isinstance(value, str) or not value
-            for value in (evaluation_run_id, agent_version_id, task_id)
-        ):
-            raise ValueError(
-                "evaluation_run_id, agent_version_id, and task_id must be non-empty strings"
-            )
-        if session_id is None:
-            session_id = uuid4().hex
-        elif not isinstance(session_id, str) or not session_id:
-            raise ValueError("session_id must be a non-empty string")
-
+        if task_id not in self.pack.tasks:
+            raise KeyError(f"unknown task_id {task_id!r}")
+        nonce = self.episode_nonces.get(task_id)
+        if not isinstance(nonce, str) or not nonce:
+            raise ValueError(f"no episode nonce for task_id {task_id!r}")
+        session_id = session_id or uuid4().hex
         with self._lock:
-            if self._closed:
+            if self._closed or self._finalized:
                 raise RuntimeError("session registry is closed")
-            if self._finalized:
-                raise RuntimeError("session registry is finalized")
             if session_id in self._sessions:
-                raise InvalidSessionError(
-                    f"session_id {session_id!r} is already active"
-                )
-            session = self.loaded_pack.open_session(task_id, state_blind=state_blind)
-            bootstrap = {
-                "session_id": session_id,
-                "policy_view": _public_policy_view(
-                    session,
-                    max_calls_per_turn=self.max_calls_per_turn,
-                ),
-            }
-            tool_parameters = {}
-            for spec in bootstrap["policy_view"]["tools"]:
-                function = spec["function"]
-                tool_parameters[function["name"]] = frozenset(
-                    function["parameters"].get("properties", {})
-                )
-            state = _SessionState(
-                session_id=session_id,
-                evaluation_run_id=evaluation_run_id,
-                agent_version_id=agent_version_id,
-                task_id=task_id,
-                session=session,
-                simulator=None,
-                transcript=[{"role": "user", "content": session.task.goal_text}],
-                bootstrap=bootstrap,
-                tool_parameters=tool_parameters,
-                started_at=time.perf_counter(),
-            )
-            self._sessions[session_id] = state
-
-        return copy.deepcopy(bootstrap)
-
-    def _state(self, envelope: dict[str, Any]) -> tuple[str, _SessionState]:
-        session_id = str(envelope.get("session_id") or "")
-        with self._lock:
-            state = self._sessions.get(session_id)
-        if state is None:
-            raise InvalidSessionError("unknown session_id")
-        return session_id, state
-
-    def _validate_binding(self, envelope: dict[str, Any], state: _SessionState) -> None:
-        # session_id is the opaque bearer binding.  Older clients may still
-        # send the private identifiers used by the first protocol revision;
-        # reject forged values when present without requiring or disclosing
-        # them in new sandbox bootstraps.
-        optional_expected = {
-            "evaluation_run_id": state.evaluation_run_id,
-            "agent_version_id": state.agent_version_id,
-            "task_id": state.task_id,
-            "pack_sha256": self.pack_sha256,
-        }
-        for key, value in optional_expected.items():
-            if key in envelope and envelope[key] != value:
-                raise InvalidSessionError(f"{key} does not match the active session")
-        if state.quarantined_reason is not None:
-            raise InvalidSessionError("session is quarantined")
-        if self.key_exhausted.is_set():
-            raise AgentInferenceBudgetError("miner inference key exhausted")
-
-    @staticmethod
-    def _required_string(envelope: dict[str, Any], key: str) -> str:
-        value = envelope.get(key)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{key} must be a non-empty string")
-        return value
-
-    def _call_group(
-        self, envelope: dict[str, Any], call_id: str
-    ) -> tuple[list[dict[str, Any]], bool]:
-        action = envelope.get("action")
-        calls = envelope.get("calls")
-        if action is not None:
-            if calls is not None:
-                raise ValueError("set action or calls, not both")
-            if not isinstance(action, dict):
-                raise ValueError("action must be an object")
-            return [{"call_id": call_id, "action": copy.deepcopy(action)}], False
-        if not isinstance(calls, list) or not calls:
-            raise ValueError("calls must be a non-empty list")
-        if len(calls) > self.max_calls_per_turn:
-            raise ValueError(
-                f"calls must contain at most {self.max_calls_per_turn} items"
-            )
-
-        call_group = []
-        call_ids: set[str] = set()
-        for item in calls:
-            call_group.append(self._grouped_call(item, call_ids))
-        return call_group, True
-
-    @staticmethod
-    def _grouped_call(item: Any, call_ids: set[str]) -> dict[str, Any]:
-        if not isinstance(item, dict):
-            raise ValueError("each call must be an object")
-        call_id = item.get("call_id")
-        action = item.get("action")
-        if not isinstance(call_id, str) or not call_id:
-            raise ValueError("each call_id must be a non-empty string")
-        if call_id in call_ids:
-            raise ValueError("call ids within one solver turn must be unique")
-        if not isinstance(action, dict):
-            raise ValueError("each call action must be an object")
-        call_ids.add(call_id)
-        return {"call_id": call_id, "action": copy.deepcopy(action)}
-
-    def _replay_response(
-        self,
-        envelope: dict[str, Any],
-        state: _SessionState,
-        idempotency_key: str,
-        call_id: str,
-        action_hash: str,
-    ) -> dict[str, Any] | None:
-        if self._finalized:
-            raise InvalidSessionError("session registry is finalized")
-        self._validate_binding(envelope, state)
-        cached = state.responses.get(idempotency_key)
-        if cached is None:
-            return None
-        if cached.call_id != call_id or cached.action_hash != action_hash:
-            raise InvalidSessionError(
-                "idempotency key reused with a different call or action"
-            )
-        replayed = copy.deepcopy(cached.response)
-        replayed["replayed"] = True
-        return replayed
-
-    @staticmethod
-    def _validate_new_call(
-        state: _SessionState, call_ids: list[str], turn: int
-    ) -> None:
-        if state.terminal_reason is not None:
-            raise InvalidSessionError("session already reached a terminal observation")
-        for call_id in call_ids:
-            previous_key = state.call_ids.get(call_id)
-            if previous_key is not None:
-                raise InvalidSessionError(
-                    f"call_id already belongs to idempotency key {previous_key!r}"
-                )
-        expected_turn = state.session.solver_turn_count + 1
-        if turn != expected_turn:
-            raise InvalidSessionError(
-                "turn does not match session sequence: "
-                f"expected {expected_turn}, got {turn}"
-            )
-
-    @staticmethod
-    def _pending_event(state: _SessionState, turn: int) -> int | None:
-        """The first announced event still owed a shopper notice, as loop.run picks it."""
-        session = state.session
-        if session.state_blind:
-            return None
-        hard_band = session.task.difficulty_band == "hard"
-        if hard_band:
-            entries = session.env.ledger.entries()
-            state.surfaced_events.update(
-                index
-                for index in state.event_fired_turns
-                if event_observed_or_signaled(
-                    entries, None, index=index, budget=session.render_budget
-                )
-            )
-        notice_delay = 2 if hard_band else 1
-        return next(
-            (
-                index
-                for index in sorted(state.event_fired_turns)
-                if index not in state.surfaced_events
-                and turn >= state.event_fired_turns[index] + notice_delay
-            ),
-            None,
-        )
-
-    def _simulator_error(
-        self, state: _SessionState, exc: Exception
-    ) -> tuple[type[HarnessExecutionError], str]:
-        if self.key_exhausted.is_set() or (
-            isinstance(exc, InferenceProviderError) and exc.key_exhausted
-        ):
-            self.key_exhausted.set()
-            state.quarantined_outcome = "agent_error"
-            summary = "miner inference key exhausted"
-        elif isinstance(exc, InferenceProviderError):
-            summary = f"upstream status={exc.status} body={exc.body!r}"
-        else:
-            summary = type(exc).__name__
-        error_type = (
-            AgentInferenceBudgetError
-            if state.quarantined_outcome == "agent_error"
-            else HarnessExecutionError
-        )
-        return error_type, f"user simulator failed: {summary}"
-
-    def _raise_timeout(
-        self,
-        session_id: str,
-        state: _SessionState,
-        trace: _CallTrace,
-        *,
-        reason: str,
-        snapshot: dict[str, Any],
-        cause: concurrent.futures.TimeoutError,
-    ) -> NoReturn:
-        error_type = HarnessTimeoutError
-        if self.key_exhausted.is_set():
-            error_type, reason = self._simulator_error(state, cause)
-        state.quarantined_reason = reason
-        trace.record(
-            state,
-            state_hash_after=snapshot["state_hash"],
-            error_type=error_type.__name__,
-            error_detail=state.quarantined_reason,
-            simulator_exchanges=self._simulator_exchanges(state.simulator),
-        )
-        state.final_result = self._result(
-            session_id,
-            state,
-            outcome=state.quarantined_outcome,
-            verdict=None,
-            error_detail=state.quarantined_reason,
-            snapshot=snapshot,
-        )
-        raise error_type(
-            f"{state.quarantined_reason}; session quarantined"
-        ) from cause
-
-    def _execute_actions(
-        self,
-        session_id: str,
-        state: _SessionState,
-        actions: list[dict[str, Any]],
-        *,
-        is_group: bool,
-        trace: _CallTrace,
-    ) -> list[dict[str, Any]]:
-        started = time.perf_counter()
-        snapshot = self._session_snapshot(state)
-        step = state.session.step_parallel if is_group else state.session.step
-        step_arg = actions if is_group else actions[0]
-
-        def execute() -> Any:
-            capture = getattr(state.session.search, "capture_retry_trace", None)
-            if not callable(capture):
-                return step(step_arg)
-            with capture() as retries:
-                trace.search_retries = retries
-                return step(step_arg)
-
-        timeout_s = min(
-            self.tool_timeout_s * len(actions),
-            max(self.tool_timeout_s, MAX_TOOL_CALL_TIMEOUT_S),
-        )
-        future = self._executor.submit(execute)
-        try:
-            result = future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError as exc:
-            trace.tool_latency_ms = _elapsed_ms(started)
-            future.cancel()
-            self._raise_timeout(
-                session_id,
-                state,
-                trace,
-                reason=f"tool call exceeded {timeout_s:.3f}s",
-                snapshot=snapshot,
-                cause=exc,
-            )
-        except Exception as exc:
-            trace.tool_latency_ms = _elapsed_ms(started)
-            state.quarantined_reason = f"tool call failed: {type(exc).__name__}"
-            trace.record(
-                state,
-                error_type="HarnessExecutionError",
-                error_detail=state.quarantined_reason,
-            )
-            raise HarnessExecutionError(
-                f"{state.quarantined_reason}; session quarantined"
-            ) from exc
-        trace.tool_latency_ms = _elapsed_ms(started)
-        return result if is_group else [result]
-
-    def _in_simulator(
-        self,
-        session_id: str,
-        state: _SessionState,
-        trace: _CallTrace,
-        deadline: float,
-        work: Callable[..., Any],
-        *args: Any,
-    ) -> Any:
-        """Run simulator work under its timeout; a failure quarantines the session."""
-        started = time.perf_counter()
-        previous_latency_ms = trace.simulator_latency_ms or 0.0
-        snapshot = self._session_snapshot(state)
-
-        def bounded_work() -> Any:
-            # All response/reword phases share the deadline, including queue time.
-            token = SIMULATOR_DEADLINE.set(deadline)
-            try:
-                return work(*args)
-            finally:
-                SIMULATOR_DEADLINE.reset(token)
-
-        future = self._executor.submit(bounded_work)
-        try:
-            result = future.result(timeout=max(0.0, deadline - time.monotonic()))
-        except (concurrent.futures.TimeoutError, asyncio.TimeoutError) as exc:
-            trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
-            future.cancel()
-            self._raise_timeout(
-                session_id,
-                state,
-                trace,
-                reason=f"simulator call exceeded {self.simulator_timeout_s:.3f}s",
-                snapshot=snapshot,
-                cause=exc,
-            )
-        except Exception as exc:
-            trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
-            # Only trusted provider failures may surface status and body;
-            # arbitrary simulator messages can contain private task material.
-            error_type, state.quarantined_reason = self._simulator_error(state, exc)
-            trace.record(
-                state,
-                error_type=error_type.__name__,
-                error_detail=state.quarantined_reason,
-                simulator_exchanges=self._simulator_exchanges(state.simulator),
-            )
-            # The detail stays in the validator's trace and result; the agent
-            # gets no provider status or body.
-            public = (
-                state.quarantined_reason
-                if error_type is AgentInferenceBudgetError
-                else "user simulator failed"
-            )
-            raise error_type(f"{public}; session quarantined") from exc
-        trace.simulator_latency_ms = previous_latency_ms + _elapsed_ms(started)
-        return result
-
-    def _simulate_user_turn(
-        self,
-        session_id: str,
-        state: _SessionState,
-        turn: int,
-        call_group: list[dict[str, Any]],
-        trace: _CallTrace,
-    ) -> dict[str, str] | None:
-        env = state.session.env
-        if env.done():
-            return None
-        deadline = time.monotonic() + self.simulator_timeout_s
-        said = len(state.transcript)
-        message_sent = any(
-            item["action"].get("name") == "message" for item in call_group
-        )
-        # Preserve an unaided policy turn (two on the hard band) after each
-        # public event. The agent must react to the observation before the
-        # shopper simulator can reinforce it; a terminal action in that turn
-        # gets no rescue. Each announced event gets its own notice, in order.
-        pending_event = self._pending_event(state, turn)
-        if message_sent or pending_event is not None or env.utterances:
-            signal = None
-            if pending_event is not None:
-                signal = loop._event_signal(env.applied_events[pending_event])
-            decisions = self._in_simulator(
-                session_id,
-                state,
-                trace,
-                deadline,
-                self._shopper_turn_decisions,
-                state,
-                signal,
-                turn,
-                message_sent,
-            )
-            _deliver(state.session, state.transcript, decisions, step=turn)
-            if pending_event is not None:
-                state.surfaced_events.add(pending_event)
-        # The next turn's boundary fires now, so its lines are heard before the agent
-        # acts on that turn, as loop.run says them.
-        if turn < state.session.max_steps:
-            env.begin_solver_turn(turn + 1)
-            if env.utterances:
-                self._in_simulator(
-                    session_id,
-                    state,
-                    trace,
-                    deadline,
-                    lambda: self._run_simulator(
-                        loop.reword_utterances(self._simulator(state), state.session)
-                    ),
-                )
-                loop.say_utterances(state.session, state.transcript, step=turn + 1)
-        if len(state.transcript) == said:
-            return None
+                raise InvalidSessionError(f"session_id {session_id!r} is already active")
+            session = Session(self.pack, task_id, nonce, self.read)
+            self._sessions[session_id] = _SessionState(session_id, task_id, nonce, session)
         return {
-            "content": "\n".join(
-                message["content"]
-                for message in state.transcript[said:]
-                if message["content"]
-            )
-        }
-
-    def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
-        """Execute or replay one strictly ordered solver-turn envelope."""
-
-        if not isinstance(envelope, dict):
-            raise ValueError("call envelope must be an object")
-        session_id, state = self._state(envelope)
-        call_id = self._required_string(envelope, "call_id")
-        idempotency_key = self._required_string(envelope, "idempotency_key")
-        turn = envelope.get("turn")
-        if not isinstance(turn, int) or isinstance(turn, bool) or turn < 1:
-            raise ValueError("turn must be a positive integer")
-
-        call_group, is_group = self._call_group(envelope, call_id)
-
-        call_ids_to_bind = [call_id]
-        call_ids_to_bind.extend(
-            item["call_id"] for item in call_group if item["call_id"] != call_id
-        )
-        action_hash = hashlib.sha256(
-            json.dumps(
-                call_group,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode()
-        ).hexdigest()
-
-        with state.lock:
-            replayed = self._replay_response(
-                envelope, state, idempotency_key, call_id, action_hash
-            )
-            if replayed is not None:
-                return replayed
-            self._validate_new_call(state, call_ids_to_bind, turn)
-
-            # Ignore undeclared top-level arguments for compatibility with
-            # agents that relied on the runtime's previously wider surface.
-            actions = [
-                _strip_undeclared_arguments(item["action"], state.tool_parameters)
-                for item in call_group
-            ]
-
-            trace = _CallTrace(
-                request=copy.deepcopy(envelope),
-                state_hash_before=_state_hash(state.session),
-            )
-            observations = self._execute_actions(
-                session_id,
-                state,
-                actions,
-                is_group=is_group,
-                trace=trace,
-            )
-
-            public_observations = [
-                _public_step_result(observation) for observation in observations
-            ]
-            call_results = [
-                {
-                    "call_id": item["call_id"],
-                    "observation": observation,
-                }
-                for item, observation in zip(
-                    call_group, public_observations, strict=True
-                )
-            ]
-            # A silent market change is left for the agent to see; only an
-            # announced one gets a shopper notice.
-            for index in state.session.env.announced_events():
-                state.event_fired_turns.setdefault(index, turn)
-            state.transcript.append(
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": item["call_id"],
-                            "name": item["action"].get("name"),
-                            "args": item["action"].get("args") or {},
-                        }
-                        for item in call_group
-                    ],
-                }
-            )
-
-            user_message = self._simulate_user_turn(
-                session_id,
-                state,
-                turn,
-                call_group,
-                trace,
-            )
-
-            response = {
-                "session_id": session_id,
-                "call_id": call_id,
-                "turn": turn,
-                "solver_turn_count": state.session.solver_turn_count,
-                "action_count": state.session.step_count,
-                "calls": call_results,
-                "user_message": user_message,
-                "provider_status": "complete",
-                "environment_error": False,
-                "replayed": False,
-            }
-            if not is_group:
-                response["observation"] = public_observations[0]
-            state.responses[idempotency_key] = _CachedResponse(
-                call_id=call_id,
-                action_hash=action_hash,
-                response=copy.deepcopy(response),
-            )
-            for grouped_call_id in call_ids_to_bind:
-                state.call_ids[grouped_call_id] = idempotency_key
-            if any(observation.get("done") is True for observation in observations):
-                state.terminal_reason = "environment_done"
-            elif state.session.solver_turn_count >= state.session.max_steps:
-                state.terminal_reason = "step_limit"
-            trace.record(
-                state,
-                response=response,
-                simulator_exchanges=(
-                    self._simulator_exchanges(state.simulator)
-                    if trace.simulator_latency_ms is not None
-                    else None
-                ),
-            )
-            return response
-
-    def verdict(self, envelope: dict[str, Any]) -> dict[str, Any]:
-        """Return validator-only deterministic truth for a healthy session."""
-
-        if not isinstance(envelope, dict):
-            raise ValueError("verdict envelope must be an object")
-        session_id, state = self._state(envelope)
-        with state.lock:
-            self._validate_binding(envelope, state)
-            if state.terminal_reason is None:
-                raise InvalidSessionError("session has not reached terminal state")
-            result = state.session.verdict()
-            return self._result(
-                session_id,
-                state,
-                outcome="completed",
-                verdict=result.model_dump(mode="json"),
-            )
-
-    def _provenance(self) -> dict[str, Any]:
-        return {
-            "pack_sha256": self.pack_sha256,
-            **{
-                key: self.loaded_pack.metadata.get(key)
-                for key in _PACK_PROVENANCE_FIELDS
+            "session_id": session_id,
+            "binding": {"session_id": session_id},
+            "policy_view": {
+                "query": session.request_text,
+                "opening": copy.deepcopy(session.opening),
+                "tools": [{"type": "function", "function": tool} for tool in session.tools()],
+                "max_steps": self.pack.limits["max_steps"],
+                "finished": session.finished,
             },
         }
 
-    def _result(
-        self,
-        session_id: str,
-        state: _SessionState,
-        *,
-        outcome: str,
-        verdict: dict[str, Any] | None,
-        error_detail: str | None = None,
-        snapshot: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        snapshot = snapshot or self._session_snapshot(state)
-        if state.finished_at is None:
-            state.finished_at = time.perf_counter()
-        has_terminal_state = outcome in {"completed", "partial", "leakage", "exploit"}
-        return {
-            "evaluation_run_id": state.evaluation_run_id,
-            "agent_version_id": state.agent_version_id,
-            "task_id": state.task_id,
-            "session_id": session_id,
-            "pack_sha256": self.pack_sha256,
-            "family": snapshot["family"],
-            "outcome": outcome,
-            "terminal_reason": snapshot["terminal_reason"],
-            "error_detail": error_detail,
-            "verdict": verdict,
-            "terminal_state_hash": (
-                snapshot["state_hash"] if has_terminal_state else None
-            ),
-            "step_count": snapshot["step_count"],
-            "wall_seconds": round(max(0.0, state.finished_at - state.started_at), 6),
-            "solver_turn_count": snapshot["solver_turn_count"],
-            "action_count": snapshot["step_count"],
-            "render_budget": snapshot["render_budget"],
-            "bootstrap": copy.deepcopy(state.bootstrap),
-            "call_trace": copy.deepcopy(state.call_trace),
-            "ledger": copy.deepcopy(snapshot["ledger"]),
-            "provenance": self._provenance(),
-            "environment_error": outcome == "environment_error",
-            "verifier_error": outcome == "verifier_error",
-        }
+    def _state(self, envelope: dict[str, Any]) -> _SessionState:
+        with self._lock:
+            state = self._sessions.get(str(envelope.get("session_id") or ""))
+        if state is None:
+            raise InvalidSessionError("unknown session_id")
+        if "task_id" in envelope and envelope["task_id"] != state.task_id:
+            raise InvalidSessionError("task_id does not match the active session")
+        return state
 
     @staticmethod
-    def _session_snapshot(state: _SessionState) -> dict[str, Any]:
-        """Capture receipt fields before work that may outlive its timeout."""
+    def _actions(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+        action, actions = envelope.get("action"), envelope.get("actions")
+        if (action is None) == (actions is None):
+            raise ValueError("set exactly one of action or actions")
+        if action is not None:
+            actions = [action]
+        if not isinstance(actions, list) or not 1 <= len(actions) <= MAX_ACTIONS_PER_CALL:
+            raise ValueError(f"actions must be a list of 1 to {MAX_ACTIONS_PER_CALL} items")
+        for item in actions:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise ValueError("each action must be an object with a string name")
+        return [
+            {
+                "name": NOT_UTF8_TOOL if _not_utf8(item["name"]) else item["name"],
+                "args": _checked_args(item.get("args", {})),
+            }
+            for item in actions
+        ]
 
-        return {
-            "family": state.session.task.family,
-            "terminal_reason": state.terminal_reason,
-            "state_hash": _state_hash(state.session),
-            "step_count": state.session.step_count,
-            "solver_turn_count": state.session.solver_turn_count,
-            "render_budget": state.session.render_budget,
-            "ledger": [
-                entry.model_dump(mode="json")
-                for entry in state.session.env.ledger.entries()
-            ],
-        }
+    def call(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Run (or replay) one envelope; grouped actions run as consecutive steps."""
 
-    def _results(
-        self,
-        states: list[tuple[str, _SessionState]],
-        *,
-        include_unfinished: bool,
-    ) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for session_id, state in states:
-            with state.lock:
-                if state.final_result is not None:
-                    results.append(copy.deepcopy(state.final_result))
-                    continue
-                if state.quarantined_reason is not None:
-                    outcome = state.quarantined_outcome
-                    verdict = None
-                    error_detail = state.quarantined_reason
-                elif state.terminal_reason is None:
-                    if not include_unfinished:
-                        continue
-                    outcome = "agent_error"
-                    verdict = None
-                    error_detail = (
-                        "session was not attempted"
-                        if not state.call_trace
-                        else "agent did not reach a terminal state"
-                    )
-                else:
-                    try:
-                        verdict = state.session.verdict().model_dump(mode="json")
-                    except Exception as exc:
-                        outcome = "verifier_error"
-                        verdict = None
-                        error_detail = type(exc).__name__
-                    else:
-                        outcome = "completed"
-                        error_detail = None
-                state.final_result = self._result(
-                    session_id,
-                    state,
-                    outcome=outcome,
-                    verdict=verdict,
-                    error_detail=error_detail,
+        if not isinstance(envelope, dict):
+            raise ValueError("call envelope must be an object")
+        state = self._state(envelope)
+        step = envelope.get("step")
+        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+            raise ValueError("step must be a positive integer")
+        actions = self._actions(envelope)
+        action_hash = hashlib.sha256(
+            json.dumps(actions, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        with state.lock:
+            if self._finalized:
+                raise InvalidSessionError("session registry is finalized")
+            if state.quarantined_reason is not None:
+                raise InvalidSessionError("session is quarantined")
+            if self.key_exhausted.is_set():
+                raise AgentInferenceBudgetError("miner inference key exhausted")
+            cached = state.responses.get(step)
+            if cached is not None:
+                if cached[0] != action_hash:
+                    raise InvalidSessionError("step reused with a different action")
+                return {**copy.deepcopy(cached[1]), "replayed": True}
+            session = state.session
+            if session.finished:
+                raise InvalidSessionError("the episode has finished")
+            if step != session.steps + 1:
+                raise InvalidSessionError(
+                    f"step does not match session sequence: expected {session.steps + 1}, got {step}"
                 )
-                results.append(copy.deepcopy(state.final_result))
-        return results
+            observations = []
+            for action in actions:
+                started = time.perf_counter()
+                try:
+                    result = session.step(action["name"], action["args"])
+                except Exception as exc:
+                    state.quarantined_reason = f"runtime step failed: {type(exc).__name__}"
+                    state.call_trace.append({"tool": action["name"], "step": session.steps,
+                                             "elapsed_ms": _elapsed_ms(started), "error": state.quarantined_reason})
+                    raise HarnessExecutionError(f"{state.quarantined_reason}; session quarantined") from exc
+                state.call_trace.append({"tool": action["name"], "step": session.steps, "elapsed_ms": _elapsed_ms(started)})
+                observations.append(result.observation)
+                if result.finished:
+                    break
+            response: dict[str, Any] = {"observation": observations[-1], "finished": session.finished, "step": session.steps}
+            if "actions" in envelope:
+                response["observations"] = observations
+            state.responses[step] = (action_hash, copy.deepcopy(response))
+            return {**response, "replayed": False}
 
-    def terminal_results(self) -> list[dict[str, Any]]:
-        """Snapshot completed or quarantined sessions without sealing the registry."""
-
-        with self._lock:
-            states = list(self._sessions.items())
-        return self._results(states, include_unfinished=False)
-
-    def finalized_results(self) -> list[dict[str, Any]]:
-        """Seal new work, drain active calls, and finalize every session."""
+    def finish_all(self) -> None:
+        """Stop every unfinished, healthy episode (a runtime-forced finish) and seal new work."""
 
         with self._lock:
             self._finalized = True
-            states = list(self._sessions.items())
-        return self._results(states, include_unfinished=True)
+            states = list(self._sessions.values())
+        for state in states:
+            with state.lock:
+                if not state.session.finished and state.quarantined_reason is None:
+                    state.session.finish()
+
+    def _record(self, state: _SessionState) -> dict[str, Any]:
+        """Grade a finished episode once; a quarantined one gets no verdict."""
+
+        if state.record is None:
+            ledger = state.session.ledger()
+            verdict = None
+            if state.quarantined_reason is None:
+                verdict = runtime_session.grade_episode(self.pack, ledger, self.read)
+            state.record = {
+                "task_id": state.task_id,
+                "session_id": state.session_id,
+                "episode_nonce": state.episode_nonce,
+                "ledger": ledger,
+                "verdict": verdict,
+                "error": state.quarantined_reason,
+                "call_trace": state.call_trace,
+                "steps": state.session.steps,
+            }
+        return copy.deepcopy(state.record)
+
+    def _terminal(self) -> list[tuple[_SessionState, dict[str, Any]]]:
+        with self._lock:
+            states = [state for state in self._sessions.values() if not state.retired]
+        terminal = []
+        for state in states:
+            with state.lock:
+                if state.session.finished or state.quarantined_reason is not None:
+                    terminal.append((state, self._record(state)))
+        return terminal
+
+    def _may_rerun(self, record: dict[str, Any]) -> bool:
+        verdict = record["verdict"]
+        return (
+            verdict is not None
+            and verdict["category"] == ENVIRONMENT_FAULT
+            and self._reruns.get(record["task_id"], 0) < MAX_ENVIRONMENT_RERUNS
+        )
+
+    def terminal_results(self, *, final: bool = False) -> list[dict[str, Any]]:
+        """Records of every finished or quarantined episode, graded on first request.
+
+        An environment fault awaiting its re-run is held back until ``final``; a
+        fault that persisted, or that ends the run without its re-run, is unscored:
+        no verdict and ``unscored`` "environment".
+        """
+
+        results = []
+        for _state, record in self._terminal():
+            verdict = record["verdict"]
+            if verdict is not None and verdict["category"] == ENVIRONMENT_FAULT:
+                if self._may_rerun(record) and not final:
+                    continue
+                reruns = self._reruns.get(record["task_id"], 0)
+                record.update(verdict=None, unscored="environment",
+                              error=f"environment fault persisted after {reruns} re-runs")
+            results.append(record)
+        return results
+
+    def environment_faults(self) -> list[str]:
+        """Tasks whose latest episode ended in an environment fault and may re-run."""
+
+        return [record["task_id"] for _state, record in self._terminal() if self._may_rerun(record)]
+
+    def restart(self, task_id: str) -> dict[str, Any]:
+        """Retire the task's faulted episode and open a fresh one with the same nonce."""
+
+        faulted = [state for state, record in self._terminal() if record["task_id"] == task_id and self._may_rerun(record)]
+        if not faulted:
+            raise InvalidSessionError(f"task {task_id!r} has no environment fault to re-run")
+        with self._lock:
+            faulted[0].retired = True
+            self._reruns[task_id] = self._reruns.get(task_id, 0) + 1
+            self._finalized = False
+        return self.start(task_id)
+
+    def rerun_environment_faults(self, run: Callable[[list[dict[str, Any]]], object]) -> None:
+        """Re-run every environment-faulted episode with the agent until none may re-run.
+
+        ``run`` drives the agent over the new sessions' bootstraps.
+        """
+
+        while faulted := self.environment_faults():
+            logger.warning("Re-running %d episodes after an environment fault", len(faulted))
+            run([self.restart(task_id) for task_id in faulted])
+            self.finish_all()
 
     def close(self) -> None:
-        """Reject new work, quarantine active sessions, and release workers."""
+        """Reject new work and stop every episode's sandbox worker."""
 
         with self._lock:
             if self._closed:
@@ -1051,9 +486,8 @@ class SessionRegistry:
             self._sessions.clear()
         for state in states:
             with state.lock:
-                state.quarantined_reason = "registry closed"
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        self.loaded_pack.close()
+                if state.session.box is not None:
+                    state.session.box.close()
 
     def __enter__(self) -> SessionRegistry:
         return self
@@ -1064,12 +498,15 @@ class SessionRegistry:
 
 __all__ = [
     "AgentInferenceBudgetError",
-    "DEFAULT_SIMULATOR_TIMEOUT_S",
-    "DEFAULT_TOOL_TIMEOUT_S",
-    "MAX_CALLS_PER_TURN",
     "HarnessError",
     "HarnessExecutionError",
     "HarnessTimeoutError",
+    "InferenceProviderError",
     "InvalidSessionError",
+    "MAX_ACTIONS_PER_CALL",
+    "ProxyModelClient",
+    "SearchServerClient",
     "SessionRegistry",
+    "VALIDATOR_CALLER_HEADER",
+    "VALIDATOR_CALLER_SECRET",
 ]

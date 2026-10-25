@@ -4,179 +4,84 @@ This directory contains Docker configuration for running ShoppingBench services 
 
 ## Services
 
-- **Search Server**: Provides product search functionality
+- **Search Server**: Serves each world pack's own search indexes
 - **Proxy**: Nginx reverse proxy that routes agent requests to the session runtime and the inference providers
 
 ## Search Server
 
-The search server provides product search functionality via a REST API.
+The search server holds no catalog of its own. A world pack ships its own Lucene indexes; the validator
+(and the local test) installs each one at runtime and searches it with that index's BM25 settings. The
+image is `docker/search-server/Dockerfile`: Python, the JDK and Pyserini, with no baked index.
 
-### Prerequisites
+| Route | Purpose |
+| --- | --- |
+| `GET /health` | `{"status": "healthy", "service": "search-worlds"}` |
+| `PUT /internal/worlds/<sha>` | Install a world index archive (the request body); its BM25 settings travel in `X-ORO-World-Settings`. `201` when new, `200` when already installed, `409` on conflicting settings. |
+| `POST /internal/worlds/<sha>/search` | `{"query": ..., "params": {...}}` → `{"hits": [{"id": ..., "score": ...}]}`, ranked; `404` for a world not installed. |
 
-- Docker and Docker Compose installed
-- **Pre-built indexes and sidecar**: The `indexes/` and `sidecar/` directories must exist before building the base Docker image
-
-### Building the Indexes (One-time Setup)
-
-Before building the Docker image, you need to build the search indexes locally:
-
-```bash
-# Ensure documents.jsonl exists
-ls resources/documents.jsonl
-
-# Build the indexes (this may take several minutes)
-./build_index.sh
-```
-
-This will create the `indexes/` directory (~3.1GB) with all product data embedded via the `--storeRaw` flag.
-
-**Note:** The `build_index.sh` script is idempotent - it will skip building if indexes already exist. To force a rebuild, use:
-```bash
-./build_index.sh --force
-```
-
-### Building the Image
-
-The Dockerfile assumes the indexes are already built and copies them into the image.
-
-To build the image:
+These routes are internal: agents reach search only through their world's tools, which the validator's
+session runtime serves.
 
 ```bash
-docker compose build search-server
-```
-
-Or build directly:
-
-```bash
-docker build -f docker/search-server/Dockerfile -t shoppingbench-search-server .
-```
-
-**Note**:
-- The base image contains the pre-built `indexes/` and `sidecar/` directories and its identity manifest
-- A new index is released as a new pinned base image; the server never switches indexes at runtime
-- No `documents.jsonl` is needed at code-layer build time (all data is in the index and sidecar)
-- Build is fast since it skips index building (~3.1GB copy vs minutes of indexing)
-- Docker automatically caches image layers - subsequent builds will be much faster if only code or indexes change
-- Images built locally persist and are automatically reused by `docker compose` (no need to rebuild if images already exist)
-
-### Running the Service
-
-#### Using Docker Compose (Recommended)
-
-```bash
-# Start the service
+docker compose build search-server     # or: docker build -f docker/search-server/Dockerfile .
 docker compose up -d search-server
-
-# View logs
-docker compose logs -f search-server
-
-# Stop the service
-docker compose down
+curl http://localhost:5632/health
 ```
 
-#### Using Docker directly
+Settings (environment):
+- `PORT` (default `5632`).
+- `SEARCH_WORKERS`: gunicorn sync workers, one JVM each (default 2); keep it at or below free cores.
+- `_JAVA_OPTIONS`: per-worker heap (default `-Xmx1g -Xms256m`).
+- `WORLDS_DIR`: where installed worlds live, shared by the workers (default `/tmp/worlds`).
+- `WORLDS_OPEN` / `WORLDS_KEEP`: searchers kept open and worlds kept on disk (defaults 8 and 32).
+
+Inside the compose network the service is `http://search-server:5632`; the validator reads
+`SEARCH_SERVER_URL`. Logs go to stderr (`docker compose logs -f search-server`).
+
+## Python dependency security updates
+
+The validator and root Python requirements set patched floors for aiohttp,
+sentence-transformers, fsspec, multidict, urllib3 and setuptools; each isolated
+image also updates the dependencies it installs. Python images and CI paths use
+supported Python 3.11. The search image pins the official multi-platform
+Python image index digest.
+Rebuild each isolated image after changing its dependencies, including the
+index builder and integration test images. pip-based
+images bootstrap from [Python's incident notice](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)'s pip 26.2.2 wheel and verify
+its SHA-256 hash before installing dependencies. The validator image uses uv
+0.13.4 to install that same hash-checked wheel.
+Daily dependency scans inspect the published `stable` sandbox and search
+images by immutable image digest. The index-builder and integration
+session-runtime images are not published, so their daily inventories come from
+source builds and do not describe a running host. Installed inventories list every
+distribution and are scanned without dependency re-resolution; optional Pyserini
+dense-retrieval packages absent from the image are not treated as installed.
+Rebuild local images after dependency changes before relying on their updated packages.
+After updating this repository, rebuild the source images, then recreate the
+long-running services. The local `test` image uses the validator Dockerfile and
+is one-shot; rebuilding it updates the next local test run, so rerun your usual
+local test command after the build.
 
 ```bash
-docker run -d \
-  --name shoppingbench-search-server \
-  -p 5632:5632 \
-  -e HOST=0.0.0.0 \
-  -e PORT=5632 \
-  shoppingbench-search-server
+docker compose build --pull validator sandbox search-server index-builder test
+docker compose -f docker-compose.yml -f docker-compose.test.yml build --pull session-runtime
+docker compose --profile validator up -d --force-recreate validator search-server
 ```
 
-### Environment Variables
+To recreate the integration-test session runtime after rebuilding it, run
+`docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --no-deps --force-recreate session-runtime`.
 
-Configure via `.env` file or environment variables:
-
-- `HOST`: Server host (default: `0.0.0.0`)
-- `PORT`: Server port (default: `5632`)
-- `SIDECAR_DIR`: Directory for the columnar filter sidecar (default: `sidecar`; falls back to decode path if absent)
-
-Example `.env` file:
+For an existing host Python environment, upgrade pip and certifi, reinstall the
+project requirements, then restart Python processes using that environment:
 
 ```bash
-HOST=0.0.0.0
-PORT=5632
+python -m pip install --no-deps \
+  'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70'
+python -m pip install 'certifi>=2026.10.19'
+python -m pip install -r requirements.txt
 ```
 
-### Verifying the Service
-
-1. **Check health endpoint**:
-   ```bash
-   curl http://localhost:5632/health
-   ```
-   Returns the service status and baked search identity, including the index and documents hashes.
-
-2. **Check API usage**:
-   ```bash
-   curl http://localhost:5632/
-   ```
-   Should return API endpoint information
-
-3. **Test search endpoint**:
-   ```bash
-   curl "http://localhost:5632/find_product?q=shoes&page=1"
-   ```
-   Should return a JSON array of products
-
-   Trusted generator/runtime components can use pure BM25 search through:
-   ```bash
-   curl "http://localhost:5632/internal/bm25?q=travel%20mug&k=10"
-   ```
-
-   An index declaring `oro.lucene.catalog.v2` also exposes task-runtime catalog
-   search, batch product lookup, and structured filtering under `/internal/catalog/`.
-   These loopback-only operations hydrate the existing agent tools; they are not a
-   new miner-facing API.
-
-4. **Test product information endpoint**:
-   ```bash
-   curl "http://localhost:5632/view_product_information?product_ids=123456"
-   ```
-   Should return product details
-
-### Service Discovery
-
-When running with Docker Compose, the service is available at:
-- **Service name**: `search-server`
-- **Internal URL**: `http://search-server:5632`
-- **External URL**: `http://localhost:5632` (or configured port)
-
-Other services in the same Docker network can access it using the service name.
-
-### Troubleshooting
-
-1. **Index not found during build**: 
-   - Ensure `indexes/` directory exists and was built using `./build_index.sh`
-   - The indexes must be built locally before building the Docker image
-   - Check that `indexes/` is not excluded in `.dockerignore`
-
-2. **Port already in use**: Change the `PORT` environment variable
-
-3. **Build fails**: 
-   - Verify `indexes/` directory exists: `ls -la indexes/`
-   - Ensure indexes were built: `du -sh indexes/` should show ~3.1GB
-   - If indexes don't exist, run `./build_index.sh` first (requires `resources/documents.jsonl`)
-
-4. **Health check fails**: Wait for the index to load (may take 30+ seconds on first start)
-
-5. **Index directory empty in container**: 
-   - Verify indexes exist locally before build
-   - Check `.dockerignore` doesn't exclude `indexes/`
-
-### Logs
-
-View logs:
-```bash
-# Docker Compose
-docker compose logs -f search-server
-
-# Docker
-docker logs -f shoppingbench-search-server
-```
-
-The server logs to stderr, which Docker captures automatically.
+For uv-managed environments, use uv 0.13.4 or later and resync the environment.
 
 ## Image Caching and Reuse
 

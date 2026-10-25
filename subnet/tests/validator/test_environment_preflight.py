@@ -1,257 +1,111 @@
-"""Validator-owned environment preflight coverage."""
+"""Environment startup preflight on the bundled, freshly signed neutral world."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest import mock
 
 import pytest
-from oro_env_runtime.environment import Environment
-from oro_env_runtime.situation import (
-    Budget,
-    Requirement,
-    Situation,
-    SolverTurn,
-    Transition,
-    Utterance,
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from oro_env_runtime import RUNTIME_CONTRACT
+from oro_env_runtime.pack import PackRefused, load_pack
+from validator import environment_preflight, environment_preflight_agent
+from validator.environment_preflight import (
+    POLICY_ACTIONS,
+    build_preflight_pack,
+    run_environment_preflight,
 )
-
-from validator import environment_preflight, environment_preflight_agent, main
-from validator.env_pack_loader import PACK_VERSION_IDENTITIES, LoadedPack
-from validator.environment_preflight import run_environment_preflight
-from validator.session_registry import SessionRegistry
 from validator.session_service import SessionRuntime
 
-pytest_plugins = ("tests.compat_fixture",)
 
-
-def _in_process_sandbox_runner(runtime: SessionRuntime, *, exit_code: int = 0):
-    def run(
-        _agent_path: Path,
-        _run_id: str,
-        problem_path: Path,
-    ) -> tuple[Path, dict]:
+def _in_process_sandbox_runner(runtime: SessionRuntime, *, exit_code: int = 0, actions=None):
+    def run(_agent_path: Path, _run_id: str, problem_path: Path) -> tuple[Path, dict]:
         output_path = problem_path.with_name("output.jsonl")
-        output_rows = []
+        rows = []
         for line in problem_path.read_text(encoding="utf-8").splitlines():
             problem = json.loads(line)
-            binding = problem["environment"]["binding"]
-            for turn, actions in enumerate(
-                problem["environment"]["action_groups"], start=1
-            ):
-                group_id = f"{problem['problem_id']}-{turn}"
-                response = runtime.call(
-                    {
-                        **binding,
-                        "call_id": group_id,
-                        "idempotency_key": group_id,
-                        "turn": turn,
-                        "calls": [
-                            {
-                                "call_id": f"{group_id}-{index}",
-                                "action": action,
-                            }
-                            for index, action in enumerate(actions, start=1)
-                        ],
-                    }
-                )
-                if turn == 1:
-                    assert response["user_message"]["content"]
-            output_rows.append(
-                {
-                    "problem_id": problem["problem_id"],
-                    "status": "SUCCESS",
-                    "inference_total": 0,
-                    "dialogue": [],
-                }
-            )
-        output_path.write_text(
-            "".join(json.dumps(row) + "\n" for row in output_rows),
-            encoding="utf-8",
-        )
+            environment = problem["environment"]
+            for step, action in enumerate(actions or environment["actions"], start=1):
+                runtime.call({**environment["binding"], "step": step, "action": action})
+            rows.append({"problem_id": problem["problem_id"], "status": "SUCCESS", "inference_total": 0})
+        output_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         return output_path, {"exit_code": exit_code}
 
     return run
 
 
-def test_preflight_proves_positive_negative_and_replay(
-    loaded_pack: LoadedPack,
-    tmp_path: Path,
-) -> None:
+def test_preflight_world_is_a_valid_pack_signed_with_a_fresh_key(tmp_path: Path) -> None:
+    key = Ed25519PrivateKey.generate()
+    with mock.patch.object(Ed25519PrivateKey, "generate", return_value=key):
+        pack = build_preflight_pack(tmp_path / "a")
+
+    assert load_pack(tmp_path / "a", {"validator-preflight": key.public_key()}).pack_id == pack.pack_id
+    assert pack.manifest["runtime_contract"] == RUNTIME_CONTRACT
+    with pytest.raises(PackRefused):
+        load_pack(tmp_path / "a")  # never trusted by the pinned keyring
+    other = build_preflight_pack(tmp_path / "b")
+    assert other.manifest["signature"]["value"] != pack.manifest["signature"]["value"]
+
+
+def test_preflight_passes_both_policies_and_replays(tmp_path: Path) -> None:
     runtime = SessionRuntime()
 
     summary = run_environment_preflight(
-        loaded_pack=loaded_pack,
         runtime=runtime,
         run_dir=tmp_path / "preflight",
         sandbox_runner=_in_process_sandbox_runner(runtime),
     )
 
     assert summary["status"] == "pass"
-    assert summary["sandbox"] == {
-        "exit_code": 0,
-        "problem_count": 2,
-        "inference_call_count": 0,
-    }
-    assert summary["versions"] == PACK_VERSION_IDENTITIES
+    assert summary["runtime_contract"] == RUNTIME_CONTRACT
+    assert summary["sandbox"] == {"exit_code": 0, "problem_count": 2, "inference_call_count": 0}
     assert 0 <= summary["timing_ms"]["sandbox"] <= summary["timing_ms"]["total"]
-    positive, negative = summary["policies"]
-    assert len(positive["terminal_state_hash"]) == 64
-    assert len(negative["terminal_state_hash"]) == 64
-    assert positive["terminal_state_hash"] != negative["terminal_state_hash"]
-    assert positive["verdict_correct"] is True
-    assert positive["solver_turn_count"] == 2
-    assert positive["action_count"] == 4
-    assert negative["verdict_correct"] is False
-    assert negative["solver_turn_count"] == 2
-    assert negative["action_count"] == 4
-    assert all(positive["replay_checks"].values())
-    assert all(negative["replay_checks"].values())
+    assert summary["policies"] == [
+        {"policy": "positive", "score": 1.0, "category": None, "finish_reason": "order", "steps": 2, "replay_matches": True},
+        {"policy": "negative", "score": 0.0, "category": "request not met", "finish_reason": "order", "steps": 2,
+         "replay_matches": True},
+    ]
     assert runtime.ready is False
-    saved = json.loads(
-        (tmp_path / "preflight/environment_preflight_result.json").read_text(
-            encoding="utf-8"
-        )
-    )
+    saved = json.loads((tmp_path / "preflight/environment_preflight_result.json").read_text(encoding="utf-8"))
     assert saved == summary
-    bootstrap = json.loads(
-        (tmp_path / "preflight/environment_sessions.json").read_text(
-            encoding="utf-8"
+    problems = [
+        json.loads(line)
+        for line in (tmp_path / "preflight/problems.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [p["environment"]["actions"] for p in problems] == list(POLICY_ACTIONS.values())
+    assert all(p["environment"]["policy_view"]["max_steps"] == 4 for p in problems)
+
+
+def test_preflight_fails_when_a_verdict_does_not_discriminate(tmp_path: Path) -> None:
+    runtime = SessionRuntime()
+
+    with pytest.raises(environment_preflight.EnvironmentPreflightError, match='"status": "fail"'):
+        run_environment_preflight(
+            runtime=runtime,
+            run_dir=tmp_path / "preflight",
+            sandbox_runner=_in_process_sandbox_runner(runtime, actions=POLICY_ACTIONS["positive"]),
         )
-    )
-    assert set(bootstrap) == {"schema_version", "sessions"}
-    assert all(
-        set(session) == {"session_id", "policy_view"}
-        for session in bootstrap["sessions"]
-    )
+    assert runtime.ready is False
 
 
-def test_select_reference_case_is_family_agnostic(loaded_pack: LoadedPack) -> None:
-    """The selector picks any family, not only retrieval_recall. The
-    fixture's first task is intent_decomposition; the old filter skipped it."""
-    assert loaded_pack.task_specs[0].family != "retrieval_recall"
-
-    task_id, task, targets = environment_preflight._select_reference_case(loaded_pack)
-
-    assert task.family == loaded_pack.task_specs[0].family
-    assert task.family != "retrieval_recall"
-    positive_targets, negative = targets
-    assert positive_targets and negative is not None
-
-
-def test_select_reference_case_requires_a_discriminating_case(
-    loaded_pack: LoadedPack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No discriminating case -> the selector refuses rather than false-pass."""
-    monkeypatch.setattr(
-        environment_preflight, "_case_discriminates", lambda *_args: False
-    )
-    with pytest.raises(
-        environment_preflight.EnvironmentPreflightError,
-        match="self-verifiable positive/negative",
-    ):
-        environment_preflight._select_reference_case(loaded_pack)
-
-
-def test_replay_matches_live_when_a_line_is_due_at_turn_2(
-    loaded_pack: LoadedPack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A timeline line due at turn 2 is said at turn 1's boundary in the live
-    session; the replay must say it at the same boundary to match."""
-    task_id, task, targets = environment_preflight._select_reference_case(loaded_pack)
-    situation = Situation(
-        preset="boundary",
-        requirements=[
-            Requirement(
-                id="budget",
-                predicate=Budget(max=task.hard.budget, currency=task.hard.currency),
-            )
-        ],
-        timeline=[
-            Transition(
-                id="second",
-                trigger=SolverTurn(turn=2),
-                effects=[Utterance(text="one more thing.")],
-            )
-        ],
-    )
-    open_session = LoadedPack.open_session
-
-    def with_line(self, task_id, **kwargs):  # noqa: ANN001, ANN202
-        session = open_session(self, task_id, **kwargs)
-        session.task = session.task.model_copy(update={"situation": situation})
-        session.env = Environment(session.task, session.catalog, search=session.search)
-        return session
-
-    monkeypatch.setattr(LoadedPack, "open_session", with_line)
-    with SessionRegistry(
-        loaded_pack,
-        simulator_factory=lambda _session: environment_preflight._DeterministicSimulator(),
-    ) as registry:
-        for policy, groups in environment_preflight._action_groups(task, targets).items():
-            registry.start(
-                evaluation_run_id="run",
-                agent_version_id=policy,
-                task_id=task_id,
-                session_id=policy,
-            )
-            binding = {"session_id": policy}
-            for turn, actions in enumerate(groups, start=1):
-                registry.call(
-                    {
-                        **binding,
-                        "call_id": f"{turn}",
-                        "idempotency_key": f"{turn}",
-                        "turn": turn,
-                        "calls": [
-                            {"call_id": f"{turn}-{index}", "action": action}
-                            for index, action in enumerate(actions)
-                        ],
-                    }
-                )
-            result = registry.verdict(binding)
-            assert {"kind": "user_message", "content": "one more thing."} in [
-                {"kind": e["kind"], "content": e["payload"].get("content")}
-                for e in result["ledger"]
-            ]
-            checks = environment_preflight._replay_checks(loaded_pack, result, groups)
-            assert all(checks.values()), checks
-
-
-def test_preflight_clears_runtime_when_sandbox_fails(
-    loaded_pack: LoadedPack,
-    tmp_path: Path,
-) -> None:
+def test_preflight_clears_runtime_when_sandbox_fails(tmp_path: Path) -> None:
     runtime = SessionRuntime()
 
     def fail(*_args):  # noqa: ANN002, ANN202
         raise RuntimeError("sandbox unavailable")
 
     with pytest.raises(RuntimeError, match="sandbox unavailable"):
-        run_environment_preflight(
-            loaded_pack=loaded_pack,
-            runtime=runtime,
-            run_dir=tmp_path / "preflight",
-            sandbox_runner=fail,
-        )
+        run_environment_preflight(runtime=runtime, run_dir=tmp_path / "preflight", sandbox_runner=fail)
 
     assert runtime.ready is False
 
 
-def test_preflight_rejects_nonzero_sandbox_exit(
-    loaded_pack: LoadedPack,
-    tmp_path: Path,
-) -> None:
+def test_preflight_rejects_nonzero_sandbox_exit(tmp_path: Path) -> None:
     runtime = SessionRuntime()
 
     with pytest.raises(environment_preflight.EnvironmentPreflightError):
         run_environment_preflight(
-            loaded_pack=loaded_pack,
             runtime=runtime,
             run_dir=tmp_path / "preflight",
             sandbox_runner=_in_process_sandbox_runner(runtime, exit_code=1),
@@ -260,225 +114,45 @@ def test_preflight_rejects_nonzero_sandbox_exit(
     assert runtime.ready is False
 
 
-def test_reference_agent_groups_calls_and_requires_shopper_reply(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+class _Response:
+    def __init__(self, body: dict) -> None:
+        self.body = body
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self.body
+
+
+def test_reference_agent_posts_one_step_per_action(monkeypatch: pytest.MonkeyPatch) -> None:
     requests = []
-
-    class Response:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {"user_message": {"content": "continue"}}
 
     def post(url, *, json, timeout):  # noqa: ANN001, ANN201
         requests.append((url, json, timeout))
-        return Response()
+        return _Response({"observation": {}, "finished": json["step"] == 2})
 
     monkeypatch.setattr(environment_preflight_agent.requests, "post", post)
     dialogue = environment_preflight_agent.agent_main(
-        {
-            "problem_id": "positive",
-            "environment": {
-                "binding": {"session_id": "session"},
-                "action_groups": [
-                    [
-                        {"name": "search", "args": {"query": "shoes"}},
-                        {"name": "message", "args": {"content": "Continue?"}},
-                    ]
-                ],
-            },
-        }
+        {"problem_id": "positive", "environment": {"binding": {"session_id": "s"}, "actions": POLICY_ACTIONS["positive"]}}
     )
 
-    assert len(dialogue) == 1
-    assert dialogue[0]["environment_result"]["user_message"] == {
-        "content": "continue"
-    }
-    assert requests[0][0].endswith("/environment/call")
-    assert requests[0][1]["turn"] == 1
-    assert [call["call_id"] for call in requests[0][1]["calls"]] == [
-        "positive-1-1",
-        "positive-1-2",
+    assert len(dialogue) == 2
+    assert [r[0].rsplit("/", 2)[-2:] for r in requests] == [["environment", "call"]] * 2
+    assert [r[1] for r in requests] == [
+        {"session_id": "s", "step": step, "action": action}
+        for step, action in enumerate(POLICY_ACTIONS["positive"], start=1)
     ]
     assert requests[0][2] == 70
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [(None, False), ("true", True), ("YES", True), ("0", False), ("no", False)],
-)
-def test_environment_flag_parser(
-    monkeypatch: pytest.MonkeyPatch,
-    raw: str | None,
-    expected: bool,
-) -> None:
-    if raw is None:
-        monkeypatch.delenv("TEST_ENVIRONMENT_FLAG", raising=False)
-    else:
-        monkeypatch.setenv("TEST_ENVIRONMENT_FLAG", raw)
-    assert main._parse_env_bool("TEST_ENVIRONMENT_FLAG") is expected
-
-
-def test_disabled_feature_flag_does_not_fetch_pack() -> None:
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(environment_runtime_enabled=False)
-
-    assert validator._run_environment_preflight_if_enabled() is None
-
-
-def test_enabled_feature_flag_uses_validator_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pack_sha256 = "b" * 64
-    loaded_pack = object()
-    runtime = object()
-    sandbox_runner = MagicMock()
-    expected = {"status": "pass"}
-    log_messages = []
-
-    async def fetch(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        assert args[:2] == (pack_sha256, "https://backend.example")
-        assert kwargs["download_url_rewriter"]("http://localhost:4566/pack") == (
-            "http://host.docker.internal:4566/pack"
-        )
-        return loaded_pack
-
-    def run(**kwargs):  # noqa: ANN003, ANN201
-        assert kwargs["loaded_pack"] is loaded_pack
-        assert kwargs["runtime"] is runtime
-        assert kwargs["sandbox_runner"] is sandbox_runner
-        return expected
-
-    monkeypatch.setattr(main, "fetch_and_validate_pack", fetch)
-    monkeypatch.setattr(main, "run_environment_preflight", run)
-    monkeypatch.setattr(main.logging, "info", log_messages.append)
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(
-        environment_runtime_enabled=True,
-        environment_preflight_pack_sha256=pack_sha256,
-        backend_url="https://backend.example",
-        workspace_dir="/tmp/workspace",
-    )
-    validator.wallet = SimpleNamespace(hotkey=object())
-    validator.session_runtime = runtime
-    validator.run_sandbox = sandbox_runner
-    validator._eval_dir = MagicMock(return_value=Path("/tmp/preflight"))
-
-    assert validator._run_environment_preflight_if_enabled() is expected
-    validator._eval_dir.assert_called_once_with(
-        environment_preflight.environment_preflight_run_id(pack_sha256)
-    )
-    assert (
-        f"Environment preflight receipt: {json.dumps(expected, sort_keys=True)}"
-        in log_messages
-    )
-
-
-def test_enabled_feature_flag_requires_valid_pack_sha() -> None:
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(
-        environment_runtime_enabled=True,
-        environment_preflight_pack_sha256="bad",
-    )
-
-    with pytest.raises(RuntimeError, match="64 lowercase hex"):
-        validator._run_environment_preflight_if_enabled()
-
-
-def test_invalid_preflight_config_fails_before_session_server_starts() -> None:
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(
-        environment_runtime_enabled=True,
-        environment_preflight_pack_sha256="",
-    )
-    validator.session_server = MagicMock()
-
-    with pytest.raises(RuntimeError, match="64 lowercase hex"):
-        validator.run()
-
-    validator.session_server.start.assert_not_called()
-    validator.session_server.stop.assert_not_called()
-
-
-def test_finalize_submits_all_sessions_and_clears_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pack_sha256 = "b" * 64
-    work = SimpleNamespace(
-        eval_run_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        env_pack_sha256=pack_sha256,
-    )
-    registry = MagicMock()
-    results = [{"task_id": "task-1"}]
-    registry.finalized_results.return_value = results
-    emit = AsyncMock(return_value={"counts": {"201": 1}})
-    monkeypatch.setattr(main, "emit_finalized_results", emit)
-
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(backend_url="https://backend.example")
-    validator.wallet = SimpleNamespace(hotkey=object())
-    validator.session_runtime = MagicMock()
-
-    validator.finalize_environment_sessions(work, registry)
-    emit.assert_awaited_once_with(
-        backend_url="https://backend.example",
-        validator_keypair=validator.wallet.hotkey,
-        env_pack_sha256=pack_sha256,
-        results=results,
-        download_url_rewriter=main._rewrite_localhost_url,
-    )
-    validator.session_runtime.clear.assert_called_once_with(registry)
-
-
-def test_finalize_failure_cannot_change_legacy_evaluation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    work = SimpleNamespace(
-        eval_run_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        env_pack_sha256="b" * 64,
-    )
-    registry = MagicMock()
+def test_reference_agent_requires_the_last_step_to_finish(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        main,
-        "emit_finalized_results",
-        AsyncMock(side_effect=TypeError("schema drift")),
+        environment_preflight_agent.requests,
+        "post",
+        lambda *_a, **_k: _Response({"observation": {}, "finished": False}),
     )
-    validator = main.Validator.__new__(main.Validator)
-    validator.config = SimpleNamespace(backend_url="https://backend.example")
-    validator.wallet = SimpleNamespace(hotkey=object())
-    validator.session_runtime = MagicMock()
-    validator.session_runtime.clear.side_effect = RuntimeError("cleanup failed")
-
-    validator.finalize_environment_sessions(work, registry)
-    validator.session_runtime.clear.assert_called_once_with(registry)
-
-
-def test_select_reference_case_reads_v8_task_rows(loaded_pack: LoadedPack) -> None:
-    """The preflight reads delivered rows through the shared reader, so a v8 pack (whose
-    task file opens with an encoding record) selects the same case as its v7 original."""
-    from oro_env_runtime.task_codec import V8_PACK_VERSION, encode_task_rows
-
-    v7 = environment_preflight._select_reference_case(loaded_pack)
-    tasks = loaded_pack.pack_dir / "data/tasks/private_tasks.jsonl"
-    rows = [json.loads(line) for line in tasks.read_text(encoding="utf-8").splitlines()]
-    tasks.write_text(
-        "".join(json.dumps(row, sort_keys=True) + "\n" for row in encode_task_rows(rows, V8_PACK_VERSION)),
-        encoding="utf-8",
-    )
-    manifest_path = loaded_pack.pack_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["pack_version"] = V8_PACK_VERSION
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    checksums = loaded_pack.pack_dir / "checksums.sha256"
-    changed = {"data/tasks/private_tasks.jsonl": tasks, "manifest.json": manifest_path}
-    checksums.write_text(
-        "".join(
-            f"{hashlib.sha256(changed[rel].read_bytes()).hexdigest() if rel in changed else digest}  {rel}\n"
-            for digest, rel in (line.split("  ", 1) for line in checksums.read_text().splitlines())
+    with pytest.raises(RuntimeError, match="step 2 finished=False"):
+        environment_preflight_agent.agent_main(
+            {"problem_id": "p", "environment": {"binding": {}, "actions": POLICY_ACTIONS["negative"]}}
         )
-    )
-
-    v8 = environment_preflight._select_reference_case(loaded_pack)
-    assert v8[0] == v7[0] and v8[2] == v7[2]

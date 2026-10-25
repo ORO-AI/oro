@@ -9,7 +9,7 @@ import httpx
 import pytest
 from bittensor_wallet import Keypair, Wallet
 
-from oro_env_runtime.contracts import RUNTIME_CONTRACT
+from oro_env_runtime import RUNTIME_CONTRACT
 from oro_sdk.models import ProblemProgressUpdate, ProblemStatus
 
 from validator.backend_client import BackendClient, BackendError
@@ -123,6 +123,32 @@ class TestBackendClientClaimWork:
         for key, value in metrics.items():
             assert getattr(body, key) == value
 
+    def test_claim_work_reads_world_binding_fields(self, mock_wallet):
+        """The SDK types the claim's world binding fields."""
+        from oro_sdk.models.claim_work_response import ClaimWorkResponse
+
+        client = BackendClient("https://api.example.com", mock_wallet)
+        sdk_response = ClaimWorkResponse.from_dict(
+            {
+                "eval_run_id": "12345678-1234-1234-1234-123456789012",
+                "agent_version_id": "87654321-4321-4321-4321-210987654321",
+                "suite_id": 789,
+                "lease_expires_at": "2025-01-13T12:00:00",
+                "code_download_url": "https://example.com/code.py",
+                "delivery_id": "race-1",
+                "episode_nonces": {"t1": "a" * 64},
+            }
+        )
+
+        with patch(
+            "validator.backend_client.claim_work.sync_detailed",
+            return_value=_create_response(200, sdk_response),
+        ):
+            result = client.claim_work()
+
+        assert result.delivery_id == "race-1"
+        assert result.episode_nonces.additional_properties == {"t1": "a" * 64}
+
     def test_claim_work_no_work_available(self, mock_wallet):
         client = BackendClient("https://api.example.com", mock_wallet)
 
@@ -152,10 +178,13 @@ class TestBackendClientHeartbeat:
         with patch(
             "validator.backend_client.heartbeat.sync_detailed",
             return_value=mock_response,
-        ):
+        ) as mock_call:
             result = client.heartbeat("12345678-1234-1234-1234-123456789012")
 
         assert result.lease_expires_at is not None
+        assert mock_call.call_args.kwargs["body"].to_dict() == {
+            "runtime_contract": RUNTIME_CONTRACT
+        }
 
     def test_heartbeat_lease_expired(self, mock_wallet):
         client = BackendClient("https://api.example.com", mock_wallet)

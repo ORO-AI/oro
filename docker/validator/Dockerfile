@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for deterministic dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.4 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -19,7 +19,8 @@ WORKDIR /app
 # duplicating the rest of the dependency graph.
 COPY docker/validator/pyproject.toml docker/validator/uv.lock /app/
 ARG RUNTIME_PROFILE=validator
-RUN uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}
+RUN uv pip install --system --only-binary :all: --no-deps 'pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70' 'setuptools>=84.1.0' && \
+    uv sync --frozen --no-install-project --no-default-groups --group ${RUNTIME_PROFILE}
 
 # Pre-cache the canonical sentence model (avoids runtime download).
 RUN --mount=type=secret,id=hf_token,env=HF_TOKEN,required=false \

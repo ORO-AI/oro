@@ -1,0 +1,23 @@
+name: Validator Image Smoke
+
+# Builds the validator image from docker/validator/uv.lock and imports the
+# runtime and validator entry modules inside it, so lock drift against
+# pyproject.toml fails a PR instead of a publish.
+on:
+  pull_request:
+    paths:
+      - 'docker/validator/**'
+      - 'subnet/**'
+      - 'src/**'
+      - 'scripts/validator_image_smoke.sh'
+      - '.github/workflows/validator-image-smoke.yml'
+  push:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build validator image and import-smoke it
+        run: scripts/validator_image_smoke.sh

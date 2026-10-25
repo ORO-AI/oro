@@ -42,6 +42,8 @@ jobs:
     
     - name: Install uv
       uses: astral-sh/setup-uv@v7
+      with:
+        version: 0.13.4
 
     - name: Install test dependencies
       run: |
@@ -51,7 +53,7 @@ jobs:
         # package versions the validator ships with.
         UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --project docker/validator/ \
           --frozen --inexact --no-install-project --no-default-groups --group validator
-        uv pip install --python .venv/bin/python pytest-cov
+        uv pip install --python .venv/bin/python pytest-cov flask
 
     - name: Run tests with pytest and coverage
       run: |
@@ -94,13 +96,15 @@ jobs:
 
     - name: Install uv
       uses: astral-sh/setup-uv@v7
+      with:
+        version: 0.13.4
 
     - name: Install local-test dependencies
       run: |
         uv venv --seed --python 3.11
         UV_PROJECT_ENVIRONMENT="$PWD/.venv" uv sync --project docker/validator/ \
           --frozen --inexact --no-install-project --no-default-groups --group local-test
-        uv pip install --python .venv/bin/python pytest-cov
+        uv pip install --python .venv/bin/python pytest-cov flask
 
     - name: Run miner local-testing tests
       run: |

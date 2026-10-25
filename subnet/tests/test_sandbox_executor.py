@@ -14,6 +14,7 @@ from src.agent.sandbox_executor import (
     _read_request_log,
     build_result_envelope,
     execute_single_problem,
+    merge_inference_stats,
     read_inference_stats,
     read_regular_file,
 )
@@ -104,6 +105,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
         "inference_total": 1,
         "inference_cost_usd": 0.25,
         "inference_cost_missing": 0,
+        "inference_byok_cost_usd": 0.0,
+        "inference_byok_requests": 0,
         "prompt_tokens": 10,
         "cached_tokens": 6,
         "completion_tokens": 2,
@@ -116,6 +119,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
                 "completion_tokens": 2,
                 "cost_usd": 0.25,
                 "cost_missing": 0,
+                "byok_cost_usd": 0.0,
+                "byok_requests": 0,
                 }
             },
             "served_models": {
@@ -127,6 +132,8 @@ def test_agent_process_snapshots_episode_inference_stats(tmp_path, monkeypatch):
                     "completion_tokens": 2,
                     "cost_usd": 0.25,
                     "cost_missing": 0,
+                    "byok_cost_usd": 0.0,
+                    "byok_requests": 0,
                 }
             },
         }
@@ -271,6 +278,42 @@ class TestReadRequestLog:
             os.unlink(path)
 
 
+def test_merge_sums_byok_cost_across_sources():
+    agent = {
+        "p1": {
+            "problem_id": "p1",
+            "inference_total": 2,
+            "inference_cost_usd": 0.301,
+            "inference_byok_cost_usd": 0.25,
+            "inference_byok_requests": 1,
+            "served_models": {"byok/a": {"requests": 2, "cost_usd": 0.301, "byok_cost_usd": 0.25, "byok_requests": 1}},
+        }
+    }
+    simulator = {
+        "p1": {
+            "problem_id": "p1",
+            "inference_total": 1,
+            "inference_cost_usd": 0.2,
+            "inference_byok_cost_usd": 0.5,
+            "inference_byok_requests": 1,
+            "served_models": {"byok/a": {"requests": 1, "cost_usd": 0.2, "byok_cost_usd": 0.5, "byok_requests": 1}},
+        }
+    }
+
+    usage = merge_inference_stats(agent, simulator)["p1"]
+
+    assert usage["inference_total"] == 3
+    assert round(usage["inference_cost_usd"], 6) == 0.501
+    assert usage["inference_byok_cost_usd"] == 0.75
+    assert usage["inference_byok_requests"] == 2
+    assert usage["served_models"]["byok/a"] == {
+        "requests": 3,
+        "cost_usd": 0.501,
+        "byok_cost_usd": 0.75,
+        "byok_requests": 2,
+    }
+
+
 def test_sums_counters_from_multiple_clients_for_one_problem(tmp_path):
     """An agent that builds a new ProxyClient per call must not report one call per problem."""
     from src.agent.proxy_client import InferenceStats
@@ -372,3 +415,39 @@ def test_read_inference_stats_stops_at_the_cap_if_the_file_grows(tmp_path, monke
     )
 
     assert read_inference_stats(str(stats)) == {}
+
+
+def test_append_attempt_appends_a_rerun_and_follows_no_planted_file(tmp_path: Path) -> None:
+    """A re-run's output joins the run's own; an agent-planted symlink is replaced, never written
+    through, and a FIFO or oversized file reads as nothing instead of blocking or failing."""
+    from src.agent.sandbox_executor import append_attempt
+
+    earlier, later = tmp_path / "output.jsonl", tmp_path / "rerun.jsonl"
+    earlier.write_bytes(b'{"a": 1}')
+    later.write_bytes(b'{"b": 2}\n')
+    append_attempt(earlier, later, 1024)
+    assert earlier.read_bytes() == b'{"a": 1}\n{"b": 2}\n'
+
+    target = tmp_path / "site.pth"
+    target.write_bytes(b"untouched")
+    earlier.unlink()
+    earlier.symlink_to(target)
+    append_attempt(earlier, later, 1024)
+    assert target.read_bytes() == b"untouched"
+    assert not earlier.is_symlink() and earlier.read_bytes() == b'{"b": 2}\n'
+
+    fifo = tmp_path / "fifo.jsonl"
+    os.mkfifo(fifo)
+    append_attempt(earlier, fifo, 1024)  # returns at once: nothing to append
+    append_attempt(fifo, later, 1024)  # replaces the FIFO without opening it for writing
+    assert fifo.read_bytes() == b'{"b": 2}\n'
+    big = tmp_path / "big.jsonl"
+    big.write_bytes(b"x" * 2048)
+    before = earlier.read_bytes()
+    append_attempt(earlier, big, 1024)
+    assert earlier.read_bytes() == before
+
+    blocked = tmp_path / "stats.jsonl"
+    blocked.mkdir()  # a directory where the run's own file should be: kept, never an error
+    append_attempt(blocked, later, 1024)
+    assert blocked.is_dir() and not [p for p in tmp_path.iterdir() if p.name.startswith(".merge-")]

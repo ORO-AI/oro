@@ -173,6 +173,8 @@ _INFERENCE_COUNTERS = (
     "inference_failed",
     "inference_cost_usd",
     "inference_cost_missing",
+    "inference_byok_cost_usd",
+    "inference_byok_requests",
     "prompt_tokens",
     "cached_tokens",
     "completion_tokens",
@@ -217,6 +219,8 @@ def _model_inference_counters(
                 "completion_tokens",
                 "cost_usd",
                 "cost_missing",
+                "byok_cost_usd",
+                "byok_requests",
             ),
         )
         if numeric:
@@ -280,6 +284,41 @@ def read_regular_file(
     if len(content) > max_bytes:
         raise ValueError(f"{path} exceeds {max_bytes} bytes")
     return content
+
+
+def append_attempt(earlier: str | os.PathLike, later: str | os.PathLike, max_bytes: int) -> None:
+    """Append a re-run's output file ``later`` to the run's own ``earlier``.
+
+    Both live in directories the sandbox can write, so neither is trusted: each is read without
+    following links or blocking (a FIFO, a symlink or an oversized file reads as nothing), and the
+    merged bytes go to a new file this process creates, then replace ``earlier``. Writing through
+    ``earlier`` itself would follow an agent-planted link as root.
+    """
+
+    def read(path) -> bytes:
+        try:
+            return read_regular_file(path, max_bytes)
+        except (OSError, ValueError):
+            return b""
+
+    extra = read(later)
+    if not extra:
+        return
+    body = read(earlier)
+    if body and not body.endswith(b"\n"):
+        body += b"\n"
+    merged = os.path.join(os.path.dirname(earlier) or ".", f".merge-{uuid.uuid4().hex}")
+    try:
+        fd = os.open(merged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as out:
+            out.write(body + extra)
+        os.replace(merged, earlier)
+    except OSError:  # e.g. ``earlier`` is a directory: optional output must never change the evaluation
+        logger.warning("could not merge re-run output into %s", earlier)
+        try:
+            os.unlink(merged)
+        except OSError:
+            pass
 
 
 def read_inference_stats(

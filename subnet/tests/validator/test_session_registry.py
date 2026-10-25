@@ -1,1583 +1,515 @@
-"""Session isolation and validator-owned HTTP bridge coverage."""
+"""World sessions in the validator: start, steps, idempotent replay, finish, grading and outside clients."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
-from unittest.mock import AsyncMock, MagicMock
+from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-from oro_env_runtime import loop
-from oro_env_runtime.disclosure import JEV_MODEL
-from oro_env_runtime.schema import Event, LedgerEntry
-from oro_env_runtime.situation import Noul, ProbabilityRule, Reader
-from validator.env_pack_loader import LoadedPack
-from validator.episode_emitter import replay_ledger
+import requests
+from oro_env_runtime import models
+
+from subnet.tests.world_pack_fixture import StubModelClient, StubSearchClient, load_world_pack
+from validator import session_registry
 from validator.session_registry import (
+    VALIDATOR_CALLER_HEADER,
+    VALIDATOR_CALLER_SECRET,
+    AgentInferenceBudgetError,
     HarnessExecutionError,
-    HarnessTimeoutError,
+    InferenceProviderError,
     InvalidSessionError,
+    ProxyModelClient,
+    SearchServerClient,
     SessionRegistry,
 )
-from validator.session_service import SessionRuntime, create_session_app
-from validator.simulator_completion import (
-    VALIDATOR_CALLER_SECRET,
-    InferenceProviderError,
-    SimulatorCompletion,
-)
 
-from src.agent.proxy_client import ProxyClient
-from tests.compat_fixture import accepted_ref
+NONCES = {"t1": "nonce-1", "t2": "nonce-2"}
 
-pytest_plugins = ("tests.compat_fixture",)
+
+@pytest.fixture(scope="module")
+def pack(tmp_path_factory):
+    return load_world_pack(tmp_path_factory.mktemp("world"))
 
 
 @pytest.fixture
-def registry(loaded_pack: LoadedPack) -> SessionRegistry:
-    with SessionRegistry(loaded_pack) as value:
-        yield value
+def clients():
+    return StubModelClient(), StubSearchClient()
 
 
-def _start(
-    registry: SessionRegistry,
-    *,
-    session_id: str = "session-1",
-    task_id: str | None = None,
-) -> dict:
-    return registry.start(
-        evaluation_run_id="eval-1",
-        agent_version_id="agent-1",
-        task_id=task_id or registry.loaded_pack.task_ids[0],
-        session_id=session_id,
-    )
+@pytest.fixture
+def registry(pack, clients):
+    with SessionRegistry(pack, episode_nonces=NONCES, model_client=clients[0], search_client=clients[1]) as reg:
+        yield reg
 
 
-def _call_envelope(
-    registry: SessionRegistry,
-    *,
-    session_id: str = "session-1",
-    task_id: str | None = None,
-    call_id: str = "call-1",
-    idempotency_key: str = "idem-1",
-    turn: int = 1,
-    action: dict | None = None,
-) -> dict:
-    return {
-        "evaluation_run_id": "eval-1",
-        "agent_version_id": "agent-1",
-        "task_id": task_id or registry.loaded_pack.task_ids[0],
-        "session_id": session_id,
-        "call_id": call_id,
-        "idempotency_key": idempotency_key,
-        "pack_sha256": registry.pack_sha256,
-        "turn": turn,
-        "action": action or {"name": "inspect_cart", "args": {}},
-    }
+def _call(session_id: str, step: int, name: str, **args) -> dict:
+    return {"session_id": session_id, "step": step, "action": {"name": name, "args": args}}
 
 
-def test_undeclared_tool_arguments_are_removed_before_execution(registry):
-    _start(registry)
-    state = registry._sessions["session-1"]
-    step = MagicMock(wraps=state.session.step)
-    state.session.step = step
-    envelope = _call_envelope(
-        registry,
-        action={
-            "name": "search",
-            "args": {
-                "query": "phone",
-                "k": "2",
-                "max_price": "100",
-                "category": "phones",
-            },
-        },
-    )
+def test_start_returns_binding_and_an_openai_tool_policy_view(registry, pack) -> None:
+    started = registry.start("t1", session_id="s1")
+
+    assert started["session_id"] == "s1" and started["binding"] == {"session_id": "s1"}
+    view = started["policy_view"]
+    assert set(view) == {"query", "opening", "tools", "max_steps", "finished"}
+    assert view["query"] == "Buy the item for t1."
+    assert view["opening"] == {"greeting": "hello"}
+    assert view["max_steps"] == pack.limits["max_steps"] and view["finished"] is False
+    assert [t["type"] for t in view["tools"]] == ["function"] * 3
+    assert [t["function"]["name"] for t in view["tools"]] == ["find", "ask", "buy"]
+    assert set(view["tools"][0]["function"]) == {"name", "description", "parameters"}  # no handler ids
+
+
+def test_start_rejects_unknown_tasks_missing_nonces_and_duplicate_sessions(pack, clients) -> None:
+    with SessionRegistry(pack, episode_nonces={"t1": "n"}, model_client=clients[0], search_client=clients[1]) as reg:
+        with pytest.raises(KeyError):
+            reg.start("nope")
+        with pytest.raises(ValueError, match="no episode nonce"):
+            reg.start("t2")
+        reg.start("t1", session_id="dup")
+        with pytest.raises(InvalidSessionError):
+            reg.start("t1", session_id="dup")
+
+
+def test_indexes_are_uploaded_and_search_reaches_the_search_client(registry, pack, clients) -> None:
+    index_id = pack.indexes["title"]["id"]
+    assert index_id in clients[1].titles
+
+    sid = registry.start("t1")["session_id"]
+    result = registry.call(_call(sid, 1, "find", query="mug"))
+
+    assert result == {"observation": {"ok": True, "ids": ["a", "b"]}, "finished": False, "step": 1, "replayed": False}
+    assert clients[1].calls == [(index_id, "mug", {"k": 5})]
+
+
+def test_a_correct_episode_is_graded_with_the_claim_nonce(registry, clients) -> None:
+    sid = registry.start("t1")["session_id"]
+    ask = registry.call(_call(sid, 1, "ask", text="which colour?"))
+    buy = registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert ask["observation"] == {"reply": "I want the red one."}
+    assert clients[0].calls[0][:2] == ("complete", "shopper-model")
+    assert buy["finished"] is True and buy["step"] == 2
+    with pytest.raises(InvalidSessionError, match="finished"):
+        registry.call(_call(sid, 3, "find", query="mug"))
+
+    [record] = registry.terminal_results()
+    assert set(record) >= {"task_id", "session_id", "episode_nonce", "ledger", "verdict", "call_trace", "steps"}
+    assert (record["task_id"], record["session_id"], record["episode_nonce"], record["steps"]) == ("t1", sid, "nonce-1", 2)
+    assert record["verdict"]["score"] == 1.0 and record["verdict"]["category"] is None
+    assert record["error"] is None
+    episode = record["ledger"]["episode"]
+    assert episode[0]["episode_nonce"] == "nonce-1" and episode[-1]["reason"] == "order"
+    assert [(t["tool"], t["step"]) for t in record["call_trace"]] == [("ask", 1), ("buy", 2)]
+    assert all(t["elapsed_ms"] >= 0 for t in record["call_trace"])
+    assert registry.terminal_results() == [record]  # graded once, then cached
+
+
+def test_replay_by_step_is_idempotent_and_bound_to_the_action(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    first = registry.call(_call(sid, 1, "find", query="red"))
+    again = registry.call(_call(sid, 1, "find", query="red"))
+
+    assert again == {**first, "replayed": True}
+    with pytest.raises(InvalidSessionError, match="different action"):
+        registry.call(_call(sid, 1, "find", query="blue"))
+    with pytest.raises(InvalidSessionError, match="expected 2, got 3"):
+        registry.call(_call(sid, 3, "find", query="blue"))
+    assert registry.call(_call(sid, 2, "find", query="blue"))["step"] == 2
+
+
+def test_grouped_actions_run_as_consecutive_steps_and_stop_at_finish(registry) -> None:
+    sid = registry.start("t2")["session_id"]
+    envelope = {"session_id": sid, "step": 1, "actions": [
+        {"name": "find", "args": {"query": "blue"}},
+        {"name": "buy", "args": {"id": "b"}},
+        {"name": "find", "args": {"query": "red"}},  # never runs: the episode finished
+    ]}
     result = registry.call(envelope)
 
-    assert result["observation"]["error"] is None
-    step.assert_called_once_with(
-        {"name": "search", "args": {"query": "phone", "k": "2"}}
-    )
-    assert state.call_trace[0]["request"] == envelope
-    assert envelope["action"]["args"]["max_price"] == "100"
+    assert result["step"] == 2 and result["finished"] is True
+    assert result["observations"] == [{"ok": True, "ids": ["b"]}, {"submitted": "b"}]
+    assert result["observation"] == {"submitted": "b"}
     assert registry.call(envelope)["replayed"] is True
+    [record] = registry.terminal_results()
+    assert record["verdict"]["score"] == 1.0
 
 
-@pytest.mark.parametrize("proxy_url", ["http://proxy:80", "http://127.0.0.1:80"])
-def test_default_simulator_uses_the_miner_funded_proxy(
-    loaded_pack: LoadedPack,
-    proxy_url: str,
-    tmp_path,
-) -> None:
-    stats_file = str(tmp_path / "simulator-inference.jsonl")
-    with SessionRegistry(
-        loaded_pack,
-        inference_access_token="miner-token",
-        inference_stats_file=stats_file,
-        simulator_proxy_url=proxy_url,
-    ) as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        simulator = registry._default_simulator(state)
+def test_finish_all_stops_unfinished_episodes_and_seals_the_registry(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    idle = registry.start("t2")["session_id"]
+    registry.call(_call(sid, 1, "find", query="mug"))
+    assert registry.terminal_results() == []
 
-        assert simulator.model == state.session.model_roles["user_simulator"]
-        assert simulator._completion._client.api_key == "miner-token"
-        assert simulator._completion._client.proxy_url == proxy_url
-        assert simulator._completion._client.inference_stats._problem_id == "session-1"
-        assert simulator._completion._client.inference_stats._stats_file == stats_file
+    registry.finish_all()
+
+    records = {r["session_id"]: r for r in registry.terminal_results()}
+    assert set(records) == {sid, idle}
+    for record in records.values():
+        assert record["ledger"]["episode"][-1]["reason"] == "stopped"
+        assert record["verdict"]["category"] == "did not finish"
+    with pytest.raises(InvalidSessionError, match="finalized"):
+        registry.call(_call(sid, 2, "find", query="mug"))
+    with pytest.raises(RuntimeError):
+        registry.start("t1")
 
 
-def test_default_simulator_evidence_is_private_and_persisted(
-    loaded_pack: LoadedPack,
-) -> None:
-    with SessionRegistry(
-        loaded_pack,
-        inference_access_token="miner-token",
-    ) as registry:
-        _start(registry)
-        # SimulatorCompletion uses the awaitable request-local result;
-        # patch the new method with a ``PostResult(data=..., error=None)``
-        # equivalent of the old success shape.
-        from src.agent.proxy_client import PostResult
+def test_envelope_validation(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    with pytest.raises(InvalidSessionError, match="unknown session_id"):
+        registry.call(_call("forged", 1, "find", query="x"))
+    with pytest.raises(InvalidSessionError, match="task_id"):
+        registry.call({**_call(sid, 1, "find", query="x"), "task_id": "t2"})
+    with pytest.raises(ValueError, match="step"):
+        registry.call(_call(sid, 0, "find", query="x"))
+    with pytest.raises(ValueError, match="exactly one"):
+        registry.call({"session_id": sid, "step": 1})
+    with pytest.raises(ValueError, match="actions must be"):
+        registry.call({"session_id": sid, "step": 1, "actions": []})
+    # Tool-level mistakes are observations, not transport errors.
+    bad = registry.call(_call(sid, 1, "find", query=3))
+    assert bad["observation"]["error"] == "invalid_arguments"
+    assert registry.call(_call(sid, 2, "nope"))["observation"] == {"error": "unknown_tool"}
 
-        state = registry._sessions["session-1"]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = AsyncMock(
-            return_value=PostResult(
-                data={
-                    "choices": [
-                        {
-                            "message": {
-                                "content": '{"action":"clarify","content":"which size?"}'
-                            },
-                            "finish_reason": "stop",
-                        }
-                    ]
-                },
-                error=None,
-            )
-        )
-        response = registry.call(
-            _call_envelope(
-                registry,
-                action={"name": "message", "args": {"content": "Any preference?"}},
-            )
-        )
-        registry.call(
-            _call_envelope(
-                registry,
-                call_id="call-2",
-                idempotency_key="idem-2",
-                turn=2,
-            )
-        )
-        traces = registry.finalized_results()[0]["call_trace"]
 
-    # The reply is the task's own budget line (the compat fixture names each line by its key).
-    assert response["user_message"] == {"content": "budget 200.00 USD"}
-    assert "simulator" not in response
-    evidence = traces[0]["simulator"]
-    assert evidence["latency_ms"] >= 0
-    assert len(evidence["exchanges"]) == 1
-    exchange = evidence["exchanges"][0]
-    assert exchange["model"]
-    assert [message["role"] for message in exchange["messages"]] == [
-        "system",
-        "user",
-    ]
-    assert exchange["configuration"] == {"max_tokens": 400, "temperature": 0.0}
-    assert exchange["response"]["finish_reason"] == "stop"
-    assert (
-        exchange["response"]["text"] == '{"action":"clarify","content":"which size?"}'
-    )
-    assert exchange["error"] is None
-    assert "miner-token" not in json.dumps(traces)
-    assert traces[1]["simulator"] is None
+def test_a_runtime_failure_quarantines_the_session_without_a_verdict(registry, monkeypatch) -> None:
+    sid = registry.start("t1")["session_id"]
+    state = registry._sessions[sid]
+    monkeypatch.setattr(state.session, "step", lambda *_a: (_ for _ in ()).throw(OSError("worker died")))
+
+    with pytest.raises(HarnessExecutionError, match="quarantined"):
+        registry.call(_call(sid, 1, "find", query="x"))
+    with pytest.raises(InvalidSessionError, match="quarantined"):
+        registry.call(_call(sid, 1, "find", query="x"))
+
+    registry.finish_all()
+    [record] = registry.terminal_results()
+    assert record["verdict"] is None and record["error"] == "runtime step failed: OSError"
+    assert "worker died" not in json.dumps(record)
+
+
+def test_deeply_nested_arguments_are_an_invalid_step_not_a_voided_episode(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    deep: object = "x"
+    for _ in range(950):  # parses as JSON, but would overflow the runtime's recursive check
+        deep = {"q": deep}
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "find", "args": deep}})
+    buy = registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "invalid_arguments" and result["finished"] is False
+    assert buy["finished"] is True
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    action = next(r for r in record["ledger"]["episode"] if r["kind"] == "action")
+    assert action["args"] == session_registry.TOO_DEEP
+
+
+@pytest.mark.parametrize("args", [{"query": "\ud800"}, {"q": [{"\udfff": 1}]}])
+def test_arguments_that_are_not_utf8_are_an_invalid_step_not_a_voided_episode(registry, args) -> None:
+    sid = registry.start("t1")["session_id"]
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "find", "args": args}})
+    buy = registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "invalid_arguments" and result["finished"] is False
+    assert buy["finished"] is True
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    action = next(r for r in record["ledger"]["episode"] if r["kind"] == "action")
+    assert action["args"] == session_registry.NOT_UTF8
+    json.dumps(record).encode()
+
+
+def test_a_tool_name_that_is_not_utf8_is_an_unknown_tool(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+
+    result = registry.call({"session_id": sid, "step": 1, "action": {"name": "buy\ud800", "args": {}}})
+    registry.call(_call(sid, 2, "buy", id="a"))
+
+    assert result["observation"]["error"] == "unknown_tool" and result["finished"] is False
+    [record] = registry.terminal_results()
+    assert record["error"] is None and record["verdict"]["score"] == 1.0
+    serialized = json.dumps(record, ensure_ascii=False)
+    assert "\ud800" not in serialized and "buy\\ud800" not in json.dumps(record)
+    serialized.encode()
+
+
+def _faulting_grader(monkeypatch, faults: int) -> None:
+    """The runtime's grader, returning an environment-fault verdict for the first ``faults`` gradings."""
+
+    real, left = session_registry.runtime_session.grade_episode, [faults]
+
+    def grade(pack, ledger, read):
+        verdict = real(pack, ledger, read)
+        if left[0]:
+            left[0] -= 1
+            verdict = {**verdict, "score": None, "category": "environment fault", "flags": ["environment_fault"]}
+        return verdict
+
+    monkeypatch.setattr(session_registry.runtime_session, "grade_episode", grade)
+
+
+def _play_buy(registry):
+    def run(sessions):
+        for started in sessions:
+            registry.call(_call(started["session_id"], 1, "buy", id="a"))
+        return sessions
+
+    return run
+
+
+def test_an_environment_fault_reruns_the_episode_with_the_same_nonce(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=1)
+    first = registry.start("t1")["session_id"]
+    registry.call(_call(first, 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.terminal_results() == []  # held back: never reported as a score
+    assert registry.environment_faults() == ["t1"]
+    reruns = []
+    registry.rerun_environment_faults(lambda sessions: reruns.append(_play_buy(registry)(sessions)))
+
+    [[rerun]] = reruns
+    [record] = registry.terminal_results()
+    assert rerun["session_id"] != first and record["session_id"] == rerun["session_id"]
+    assert record["episode_nonce"] == "nonce-1" and record["ledger"]["episode"][0]["episode_nonce"] == "nonce-1"
+    assert record["verdict"]["score"] == 1.0 and record["error"] is None
+    assert registry.environment_faults() == []
+
+
+@pytest.mark.skipif(
+    not hasattr(session_registry.runtime_session, "ENVIRONMENT_FAULT"), reason="runtime without environment faults"
+)
+def test_a_real_wall_clock_trip_is_rerun_not_scored(registry, monkeypatch) -> None:
+    from oro_env_runtime import sandbox
+
+    real, trips = sandbox.Sandbox.entry, [1]
+
+    def entry(self, name, args, counters):
+        if name == "call" and trips[0]:  # one slow handler call on the validator's machine
+            trips[0] -= 1
+            raise sandbox.BoundTrip("wall")
+        return real(self, name, args, counters)
+
+    monkeypatch.setattr(sandbox.Sandbox, "entry", entry)
+    first = registry.start("t1")["session_id"]
+    registry.call(_call(first, 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.environment_faults() == ["t1"] and registry.terminal_results() == []
+    registry.rerun_environment_faults(_play_buy(registry))
+    [record] = registry.terminal_results()
+    assert record["session_id"] != first and record["episode_nonce"] == "nonce-1"
+    assert record["verdict"]["score"] == 1.0
+
+
+def test_final_results_report_a_fault_that_got_no_rerun_as_unscored(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=1)
+    registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
+    registry.finish_all()
+
+    assert registry.terminal_results() == []  # progress: held back for its re-run
+    [record] = registry.terminal_results(final=True)  # the run ends without one
+    assert record["verdict"] is None and record["unscored"] == "environment"
+
+
+def test_a_persistent_environment_fault_is_an_unscored_infrastructure_failure(registry, monkeypatch) -> None:
+    _faulting_grader(monkeypatch, faults=99)
+    registry.call(_call(registry.start("t1")["session_id"], 1, "buy", id="a"))
+    registry.finish_all()
+    runs = []
+    registry.rerun_environment_faults(lambda sessions: runs.append(_play_buy(registry)(sessions)))
+
+    assert len(runs) == session_registry.MAX_ENVIRONMENT_RERUNS
+    [record] = registry.terminal_results()
+    assert record["verdict"] is None and "environment fault persisted" in record["error"]
+    assert record["unscored"] == "environment"
+    with pytest.raises(InvalidSessionError, match="no environment fault"):
+        registry.restart("t1")
+
+
+def test_an_exhausted_inference_key_stops_calls(registry) -> None:
+    sid = registry.start("t1")["session_id"]
+    registry.key_exhausted.set()
+    with pytest.raises(AgentInferenceBudgetError):
+        registry.call(_call(sid, 1, "find", query="x"))
+
+
+def test_the_default_model_client_is_the_module_proxy_client(pack, monkeypatch, clients) -> None:
+    built = []
+
+    class Recording(StubModelClient):
+        def __init__(self, token, **kwargs):
+            super().__init__()
+            built.append((token, kwargs))
+
+    monkeypatch.setattr(session_registry, "ProxyModelClient", Recording)
+    with SessionRegistry(pack, episode_nonces=NONCES, search_client=clients[1], inference_access_token="sk-or-run",
+                         proxy_url="http://proxy.test", timeout=12.0) as reg:
+        assert built[0][0] == "sk-or-run"
+        assert built[0][1]["proxy_url"] == "http://proxy.test" and built[0][1]["key_exhausted_event"] is reg.key_exhausted
+    with pytest.raises(ValueError):
+        SessionRegistry(pack, episode_nonces=NONCES, search_client=clients[1])
+
+
+def test_close_stops_every_sandbox_worker(pack, clients) -> None:
+    reg = SessionRegistry(pack, episode_nonces=NONCES, model_client=clients[0], search_client=clients[1])
+    sid = reg.start("t1")["session_id"]
+    proc = reg._sessions[sid].session.box.proc
+    reg.close()
+    assert proc.poll() is not None
+    with pytest.raises(InvalidSessionError):
+        reg.call(_call(sid, 1, "find", query="x"))
+
+
+# ---------------------------------------------------------------- SearchServerClient
+
+
+class _Response:
+    text = ""
+
+    def __init__(self, status: int, body: dict | None = None) -> None:
+        self.status_code, self._body = status, body or {}
+
+    def json(self) -> dict:
+        return self._body
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(str(self.status_code))
 
 
 @pytest.fixture
-def reader_pack(loaded_pack: LoadedPack) -> LoadedPack:
-    task = loaded_pack.task_specs[0]
-    questions = {
-        key: "Is this synthetic test question eligible?"
-        for key in (
-            "all", "asks", *(f"facet:{facet.id}" for facet in task.situation.facets)
-        )
-    }
-    decisions = {
-        key: Noul(type="noul", instructions="Answer this synthetic test question.")
-        for key in questions
-    }
-    reader = Reader(
-        model="test/reader",
-        instructions="Answer the synthetic test questions.",
-        state={"opening_request": "A synthetic test request."},
-        questions=questions,
-        decisions=decisions,
-        rules={key: ProbabilityRule(op="ref", args=key) for key in questions},
-        batches=[list(decisions), []],
-        reply_templates={
-            "synthetic": Noul(
-                type="noul", instructions="Answer {question} with yes or no."
-            )
-        },
-        gates={},
-        uncertainty_gates={},
-        conflicts={},
-        reply_fallback=[],
-    )
-    loaded_pack.task_specs[0] = task.model_copy(update={
-        "situation": task.situation.model_copy(update={"reader": reader}),
-    })
-    return loaded_pack
-
-
-def test_reader_uses_miner_for_every_simulator_role_and_budget_exhaustion_is_agent_error(
-    reader_pack: LoadedPack,
-) -> None:
-    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.session.task = reader_pack.task_specs[0]
-        simulator = registry._default_simulator(state)
-        assert simulator._completion._client.api_key == "sk-or-miner"
-        reader_judge = simulator._discloser.reader_judges[0]
-        assert reader_judge._jev._decide.__self__ is simulator._completion
-        assert reader_judge._fallback._complete.func is simulator._completion
-        assert reader_judge.model == JEV_MODEL
-        assert simulator._completion._client.headers["X-ORO-Validator"] == VALIDATOR_CALLER_SECRET
-        assert callable(simulator._completion.decide)
-        simulator.respond = AsyncMock(side_effect=InferenceProviderError(403, "Key limit exceeded"))
-        state.simulator = simulator
-        runtime = SessionRuntime()
-        runtime.install(registry)
-        response = TestClient(create_session_app(runtime)).post(
-            "/v1/session/call", json=_call_envelope(
-                registry, action={"name": "message", "args": {"content": "A test question?"}},
-            ),
-        )
-        assert response.status_code == 402
-        assert "Key limit" not in response.text
-        assert registry.key_exhausted.is_set()
-        result = registry.finalized_results()[0]
-        assert result["outcome"] == "agent_error"
-        assert result["environment_error"] is False
-
-
-def test_reader_requires_bound_decisions_client_for_chutes(reader_pack: LoadedPack) -> None:
-    with SessionRegistry(reader_pack, inference_access_token="cak_miner") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.session.task = reader_pack.task_specs[0]
-        with pytest.raises(ValueError, match="Jev reader requires a bound decisions client"):
-            registry._default_simulator(state)
-
-
-@pytest.mark.parametrize("status,body,http_status", [
-    (403, "Key limit exceeded", 402),
-    (402, '{"error":{"message":"Insufficient credits. Add more","code":402}}', 402),
-    (402, '{"error":{"message":"This request requires more credits, or fewer max_tokens."}}', 402),
-    (402, '{"error":{"message":"This request would exceed your available credits given '
-          'your current in-flight requests.","metadata":{"reason":"in_flight_budget_exhausted"}}}', 500),
-    (400, "provider failure", 500),
-])
-def test_real_reader_classifies_budget_and_infrastructure_failures(
-    reader_pack, monkeypatch, status, body, http_status,
-) -> None:
-    from src.agent.proxy_client import PostResult
-
-    monkeypatch.setattr("validator.simulator_completion._MAX_ATTEMPTS", 1)
-    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.session.task = reader_pack.task_specs[0]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = AsyncMock(return_value=PostResult(
-            data=None, error={"kind": "http", "status": status, "body": body},
-        ))
-        runtime = SessionRuntime()
-        runtime.install(registry)
-        response = TestClient(create_session_app(runtime)).post(
-            "/v1/session/call", json=_call_envelope(
-                registry, action={"name": "message", "args": {"content": "A test question?"}},
-            ),
-        )
-        assert response.status_code == http_status
-        assert response.json()["detail"]["environment_error"] is (http_status == 500)
-        assert registry.key_exhausted.is_set() is (http_status == 402)
-        assert registry.finalized_results()[0]["outcome"] == (
-            "agent_error" if http_status == 402 else "environment_error"
-        )
-        assert state.simulator._completion._client.post_verbose_async.call_count == 1
-
-
-def test_real_reader_retries_an_in_flight_credit_402(reader_pack, monkeypatch) -> None:
-    from src.agent.proxy_client import PostResult
-
-    async def no_sleep(_seconds):
-        return None
-
-    monkeypatch.setattr("validator.simulator_completion.asyncio.sleep", no_sleep)
-    in_flight = PostResult(data=None, error={"kind": "http", "status": 402, "body": (
-        '{"error":{"message":"This request would exceed your available credits given '
-        'your current in-flight requests."}}'
-    )})
-    decisions: list[str] = []
-
-    async def post(path, json_data):
-        if path == "/inference/alpha/decisions":
-            decisions.append(path)
-            if len(decisions) == 1:
-                return in_flight
-            answers = {key: {"noul": 0.1} for key in json_data["questions"]}
-            return PostResult(data={"model": JEV_MODEL, "answers": answers}, error=None)
-        return PostResult(data={"choices": [{
-            "message": {"content": '{"action":"clarify","content":"which size?"}'},
-            "finish_reason": "stop",
-        }]}, error=None)
-
-    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.session.task = reader_pack.task_specs[0]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = post
-        response = registry.call(_call_envelope(
-            registry, action={"name": "message", "args": {"content": "A test question?"}},
-        ))
-        trace = registry.finalized_results()[0]["call_trace"][0]
-
-    assert len(decisions) >= 2
-    assert response["user_message"]["content"]
-    assert trace["error"] is None
-    assert not registry.key_exhausted.is_set()
-
-
-@pytest.mark.parametrize("exhausted,http_status", [(True, 402), (False, 504)])
-def test_reader_timeout_preserves_miner_budget_classification(reader_pack, exhausted, http_status):
-    from validator.generated_evaluation import aggregate_results
-
-    with SessionRegistry(reader_pack, inference_access_token="sk-or-miner", simulator_timeout_s=0.25) as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.session.task = reader_pack.task_specs[0]
-        state.simulator = registry._default_simulator(state)
-
-        async def stalled_reader(*args, **kwargs):
-            assert kwargs["json_data"]["model"] == JEV_MODEL
-            if exhausted:
-                registry.key_exhausted.set()
-            await asyncio.sleep(60)
-
-        state.simulator._completion._client.post_verbose_async = stalled_reader
-        runtime = SessionRuntime()
-        runtime.install(registry)
-        response = TestClient(create_session_app(runtime)).post(
-            "/v1/session/call", json=_call_envelope(
-                registry, action={"name": "message", "args": {"content": "A test question?"}},
-            ),
-        )
-        assert response.status_code == http_status
-        result = registry.finalized_results()[0]
-        assert result["environment_error"] is not exhausted
-        assert result["outcome"] == ("agent_error" if exhausted else "environment_error")
-        assert result["call_trace"][0]["error"]["type"] == (
-            "AgentInferenceBudgetError" if exhausted else "HarnessTimeoutError"
-        )
-        if exhausted:
-            assert aggregate_results([result], selected_reader_task_ids={result["task_id"]}) == 0.0
-        else:
-            with pytest.raises(ValueError, match="infrastructure failure"):
-                aggregate_results([result], selected_reader_task_ids={result["task_id"]})
-
-
-def test_a_provider_error_body_never_reaches_the_agent(
-    loaded_pack: LoadedPack,
-) -> None:
-    """The provider's status and body stay in the validator's trace and result."""
-    body = "provider-body-marker"
-    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = AsyncMock(
-            side_effect=InferenceProviderError(400, body)
-        )
-        envelope = _call_envelope(
-            registry, action={"name": "message", "args": {"content": "Any preference?"}}
-        )
-        with pytest.raises(HarnessExecutionError) as raised:
-            registry.call(envelope)
-        assert body not in str(raised.value)
-        with pytest.raises(InvalidSessionError) as again:
-            registry.call(
-                _call_envelope(
-                    registry, call_id="call-2", idempotency_key="idem-2", turn=2
-                )
-            )
-        assert body not in str(again.value)
-        result = registry.finalized_results()[0]
-    assert body in result["error_detail"]
-
-
-def test_default_simulator_failure_is_an_environment_error(
-    loaded_pack: LoadedPack,
-) -> None:
-    private_detail = "credential-bearing-provider-detail"
-    with SessionRegistry(
-        loaded_pack,
-        inference_access_token="miner-token",
-    ) as registry:
-        _start(registry)
-        # SimulatorCompletion now calls ``post_verbose_async``; a bug/misuse in the
-        # completion client that raises an arbitrary ``RuntimeError`` (as
-        # opposed to returning a ``PostResult`` with an error dict) must NOT
-        # leak the exception's private message into the ledger. Only the
-        # class name is safe to surface — trusted upstream bodies flow
-        # through ``InferenceProviderError`` instead (ORO-2191).
-        state = registry._sessions["session-1"]
-        state.simulator = registry._default_simulator(state)
-        state.simulator._completion._client.post_verbose_async = AsyncMock(
-            side_effect=RuntimeError(private_detail)
-        )
-        with pytest.raises(
-            HarnessExecutionError, match="^user simulator failed; session quarantined$"
-        ):
-            registry.call(
-                _call_envelope(
-                    registry,
-                    action={
-                        "name": "message",
-                        "args": {"content": "Any preference?"},
-                    },
-                )
-            )
-        result = registry.finalized_results()[0]
-
-    assert result["outcome"] == "environment_error"
-    assert result["environment_error"] is True
-    assert result["error_detail"] == "user simulator failed: RuntimeError"
-    trace = result["call_trace"][0]
-    assert trace["error"]["type"] == "HarnessExecutionError"
-    assert trace["simulator"]["exchanges"][0]["error"] == {"type": "RuntimeError"}
-    assert private_detail not in json.dumps(result)
-
-
-def test_miner_key_exhaustion_is_agent_error_and_stops_run(
-    loaded_pack: LoadedPack,
-) -> None:
-    from src.agent.proxy_client import PostResult
-
-    with SessionRegistry(loaded_pack, inference_access_token="miner-token") as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-        state.simulator = registry._default_simulator(state)
-        post = AsyncMock(
-            return_value=PostResult(
-                data=None,
-                error={
-                    "kind": "upstream",
-                    "status": 403,
-                    "body": '{"error":{"message":"Key limit exceeded (total limit)"}}',
-                },
-            )
-        )
-        state.simulator._completion._client.post_verbose_async = post
-        with pytest.raises(HarnessExecutionError, match="miner inference key exhausted"):
-            registry.call(
-                _call_envelope(
-                    registry,
-                    action={"name": "message", "args": {"content": "Any preference?"}},
-                )
-            )
-        _start(registry, session_id="session-2")
-        runtime = SessionRuntime()
-        runtime.install(registry)
-        response = TestClient(create_session_app(runtime)).post(
-            "/v1/session/call",
-            json=_call_envelope(registry, session_id="session-2"),
-        )
-        assert response.status_code == 402
-        assert response.json()["detail"]["environment_error"] is False
-        result = registry.finalized_results()[0]
-        assert registry.key_exhausted.is_set()
-
-    # The disclosure reader's read fails first (no reveal); the simulator's own call then
-    # surfaces the exhausted key.
-    assert post.call_count == 2
-    assert result["outcome"] == "agent_error"
-    assert result["environment_error"] is False
-    assert result["error_detail"] == "user simulator failed: miner inference key exhausted"
-    assert result["call_trace"][0]["error"]["type"] == "AgentInferenceBudgetError"
-
-
-def test_default_simulator_rejects_missing_miner_credentials(
-    loaded_pack: LoadedPack,
-) -> None:
-    with SessionRegistry(loaded_pack) as registry:
-        _start(registry)
-        state = registry._sessions["session-1"]
-
-        with pytest.raises(RuntimeError, match="miner inference credentials"):
-            registry._default_simulator(state)
-
-
-def test_fresh_sessions_are_isolated_and_hide_private_truth(
-    registry: SessionRegistry,
-) -> None:
-    first = _start(registry)
-    second = _start(registry, session_id="session-2")
-    policy = json.dumps(first["policy_view"])
-
-    assert set(first) == {"session_id", "policy_view"}
-    assert set(first["policy_view"]) == {
-        "query",
-        "max_steps",
-        "tools",
-        "max_calls_per_turn",
-    }
-    assert first["session_id"] != second["session_id"]
-    assert "gold_set" not in policy
-    assert "family_payload" not in policy
-
-    first_state_hash = registry._sessions["session-1"].session.env.state_hash_now()
-    second_state_hash = registry._sessions["session-2"].session.env.state_hash_now()
-    assert first_state_hash == second_state_hash
-    task = registry.loaded_pack.task_specs[0]
-    candidate = accepted_ref(task)
-    changed = registry.call(
-        _call_envelope(
-            registry,
-            action={
-                "name": "add_to_cart",
-                "args": {
-                    "product_id": candidate.product_id,
-                    "sku": candidate.sku,
-                },
-            },
-        )
-    )
-    assert "state_hash" not in changed
-    assert (
-        registry._sessions["session-1"].session.env.state_hash_now() != first_state_hash
-    )
-    assert registry._sessions["session-2"].session.env.ledger.entries() == []
-
-
-def test_session_ids_cannot_be_rebound(registry: SessionRegistry) -> None:
-    _start(registry)
-    with pytest.raises(InvalidSessionError, match="already active"):
-        _start(registry)
-
-
-def test_forged_session_token_is_rejected(registry: SessionRegistry) -> None:
-    _start(registry)
-    with pytest.raises(InvalidSessionError, match="unknown session_id"):
-        registry.call(_call_envelope(registry, session_id="forged-token"))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("evaluation_run_id", "other-eval"),
-        ("agent_version_id", "other-agent"),
-        ("task_id", "other-task"),
-        ("pack_sha256", "0" * 64),
-    ],
-)
-def test_call_must_match_full_session_binding(
-    registry: SessionRegistry, field: str, value: str
-) -> None:
-    _start(registry)
-    envelope = {**_call_envelope(registry), field: value}
-    with pytest.raises(InvalidSessionError, match=field):
-        registry.call(envelope)
-
-
-def test_call_ignores_a_tool_contract_version_from_older_agents(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    envelope = {**_call_envelope(registry), "tool_contract_version": "oro_task_tools_v6"}
-
-    assert registry.call(envelope)["observation"]["error"] is None
-
-
-def test_idempotency_is_serialized_and_call_ids_are_bound(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    envelope = _call_envelope(registry)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        responses = list(executor.map(registry.call, [envelope, envelope]))
-
-    assert sorted(response["replayed"] for response in responses) == [False, True]
-    assert len(registry._sessions["session-1"].session.env.ledger.entries()) == 2
-
-    # Callers never receive references into the authoritative replay cache.
-    for response in responses:
-        response["observation"]["observation"]["cart"].append({"forged": True})
-    replayed = registry.call(envelope)
-    assert replayed["replayed"] is True
-    assert replayed["observation"]["observation"]["cart"] == []
-
-    with pytest.raises(InvalidSessionError, match="different call or action"):
-        registry.call({**envelope, "call_id": "call-2"})
-    with pytest.raises(InvalidSessionError, match="already belongs"):
-        registry.call(
-            {
-                **envelope,
-                "idempotency_key": "idem-2",
-                "action": {"name": "search", "args": {"query": "x"}},
-            }
-        )
-    assert len(registry._sessions["session-1"].session.env.ledger.entries()) == 2
-
-
-def test_forged_result_and_ledger_fields_cannot_change_authoritative_state(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    registry._sessions["session-1"].session.max_steps = 1
-    canary = "ORO_FORGED_RESULT_CANARY_1868"
-    envelope = {
-        **_call_envelope(registry),
-        "verdict": {"correct": True, "paid_reward": 1.0, "canary": canary},
-        "reward": 1.0,
-        "ledger": [{"kind": "forged", "canary": canary}],
-        "entries": [{"kind": "forged", "canary": canary}],
-        "state_hash": canary,
-        "terminal_state_hash": canary,
-    }
-
-    response = registry.call(envelope)
-    result = registry.verdict(envelope)
-
-    assert not {
-        "verdict",
-        "reward",
-        "ledger",
-        "entries",
-        "state_hash",
-        "terminal_state_hash",
-    } & set(response)
-    assert result["verdict"]["correct"] is False
-    assert result["verdict"].get("paid_reward") != 1.0
-    assert canary not in json.dumps(result["ledger"])
-    # The attempted forgery remains available as untrusted validator-owned
-    # attack evidence without becoming environment or verifier authority.
-    assert canary in json.dumps(result["call_trace"][0]["request"])
-
-
-def test_turns_are_strictly_monotonic(registry: SessionRegistry) -> None:
-    _start(registry)
-    with pytest.raises(InvalidSessionError, match="expected 1, got 2"):
-        registry.call(_call_envelope(registry, turn=2))
-
-    registry.call(_call_envelope(registry))
-    with pytest.raises(InvalidSessionError, match="expected 2, got 1"):
-        registry.call(
-            _call_envelope(
-                registry,
-                call_id="call-2",
-                idempotency_key="idem-2",
-            )
-        )
-
-
-def test_grouped_calls_keep_order_ids_and_simulator_reply(
-    loaded_pack: LoadedPack,
-) -> None:
-    signals: list[dict | None] = []
-
-    class Simulator:
-        async def respond(self, transcript, signal):
-            signals.append(signal)
-            if signal is not None:
-                return {"action": "no_op", "content": "", "reason": "chose_no_op"}
-            assert [call["name"] for call in transcript[-1]["tool_calls"]] == [
-                "inspect_cart",
-                "message",
-            ]
-            return {
-                "action": "clarify",
-                "content": "please choose the lowest-priced valid option",
-                "reason": "spoke",
-            }
-
-        def ensure_react(self, _decision, signal):
-            return {
-                "action": "react_to_event",
-                "content": (
-                    f"price changed to {signal['new_price']:.2f} {signal['currency']}"
-                ),
-                "reason": "forced_event_notice",
-            }
-
-    with SessionRegistry(
-        loaded_pack,
-        simulator_factory=lambda _session: Simulator(),
-    ) as registry:
-        _start(registry)
-        envelope = {
-            **_call_envelope(registry),
-            "call_id": "solver-turn-1",
-            "idempotency_key": "solver-turn-1",
-            "calls": [
-                {
-                    "call_id": "tool-1",
-                    "action": {"name": "inspect_cart", "args": {}},
-                },
-                {
-                    "call_id": "tool-2",
-                    "action": {
-                        "name": "message",
-                        "args": {"content": "Should I choose the lowest price?"},
-                    },
-                },
-            ],
-        }
-        envelope.pop("action")
-
-        response = registry.call(envelope)
-
-        assert [call["call_id"] for call in response["calls"]] == [
-            "tool-1",
-            "tool-2",
-        ]
-        timing = registry._sessions["session-1"].call_trace[0]["timing_ms"]
-        assert timing["total"] >= timing["tool"] >= 0
-        assert timing["total"] >= timing["simulator"] >= 0
-        assert response["solver_turn_count"] == 1
-        assert response["action_count"] == 2
-        assert response["user_message"]["content"].startswith("please choose")
-        assert registry.call(envelope)["replayed"] is True
-        entries = registry._sessions["session-1"].session.env.ledger.entries()
-        assert [entry.kind for entry in entries].count("user_message") == 1
-
-        repeated_inner_id = {
-            **envelope,
-            "call_id": "solver-turn-2",
-            "idempotency_key": "solver-turn-2",
-            "turn": 2,
-            "calls": [
-                {
-                    "call_id": "tool-1",
-                    "action": {"name": "inspect_cart", "args": {}},
-                }
-            ],
-        }
-        with pytest.raises(InvalidSessionError, match="already belongs"):
-            registry.call(repeated_inner_id)
-
-        state = registry._sessions["session-1"]
-        state.session.env.applied_events.append(
-            Event(
-                kind="price_change",
-                target=accepted_ref(state.session.task),
-                old_price=10.0,
-                new_price=12.0,
-                currency=state.session.task.hard.currency,
-            )
-        )
-        state.event_fired_turns[0] = 1
-        event_response = registry.call(
-            _call_envelope(
-                registry,
-                call_id="solver-turn-2",
-                idempotency_key="event-turn",
-                turn=2,
-            )
-        )
-        expected_signal = {
-            "kind": "price_change",
-            "old_price": 10.0,
-            "new_price": 12.0,
-            "currency": state.session.task.hard.currency,
-        }
-        assert signals[-1] == expected_signal
-        assert event_response["user_message"] == {
-            "content": f"price changed to 12.00 {state.session.task.hard.currency}"
-        }
-        assert state.session.env.ledger.last().payload["env_signal"] == expected_signal
-
-
-def test_shopper_reply_is_delivered_for_every_retained_family(
-    loaded_pack: LoadedPack,
-) -> None:
-    class Simulator:
-        async def respond(self, _transcript, _signal):  # noqa: ANN001, ANN201
-            return {"action": "clarify", "content": "shopper reply", "reason": "spoke"}
-
-    task_by_family = {
-        task.family: task_id
-        for task_id, task in zip(
-            loaded_pack.task_ids,
-            loaded_pack.task_specs,
-            strict=True,
-        )
-    }
-    expected_families = {
-        family
-        for family, count in loaded_pack.manifest["epoch"]["family_counts"].items()
-        if count
-    }
-    assert set(task_by_family) == expected_families
-
-    with SessionRegistry(
-        loaded_pack,
-        simulator_factory=lambda _session: Simulator(),
-    ) as registry:
-        for index, (family, task_id) in enumerate(sorted(task_by_family.items())):
-            session_id = f"session-{family}"
-            _start(registry, session_id=session_id, task_id=task_id)
-            response = registry.call(
-                _call_envelope(
-                    registry,
-                    session_id=session_id,
-                    task_id=task_id,
-                    call_id=f"call-{index}",
-                    idempotency_key=f"idem-{index}",
-                    action={
-                        "name": "message",
-                        "args": {"content": "What matters most?"},
-                    },
-                )
-            )
-
-            assert response["user_message"] == {"content": "shopper reply"}
-            ledger = registry._sessions[session_id].session.env.ledger.entries()
-            assert [entry.kind for entry in ledger].count("user_message") == 1
-
-
-def test_simulator_timeout_is_independent_of_the_tool_timeout(
-    loaded_pack: LoadedPack,
-) -> None:
-    class SlowSimulator:
-        async def respond(self, _transcript, _signal):  # noqa: ANN001, ANN201
-            await asyncio.sleep(0.2)
-            return {"action": "clarify", "content": "late", "reason": "spoke"}
-
-    def message_envelope(registry: SessionRegistry) -> dict:
-        return {
-            **_call_envelope(registry),
-            "action": {
-                "name": "message",
-                "args": {"content": "Which option should I choose?"},
-            },
-        }
-
-    # The provider is slower than the local tool budget and still answers.
-    with SessionRegistry(
-        loaded_pack,
-        tool_timeout_s=0.05,
-        simulator_timeout_s=5.0,
-        simulator_factory=lambda _session: SlowSimulator(),
-    ) as registry:
-        _start(registry)
-        assert registry.call(message_envelope(registry))["user_message"]["content"]
-
-    # Its own budget still quarantines a provider that never answers.
-    with SessionRegistry(
-        loaded_pack,
-        tool_timeout_s=5.0,
-        simulator_timeout_s=0.05,
-        simulator_factory=lambda _session: SlowSimulator(),
-    ) as registry:
-        _start(registry)
-        envelope = message_envelope(registry)
-        with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
-            registry.call(envelope)
-        timing = registry.finalized_results()[0]["call_trace"][0]["timing_ms"]
-        assert timing["tool"] is not None
-        assert timing["simulator"] >= 50
-        assert timing["total"] >= timing["simulator"]
-        with pytest.raises(InvalidSessionError, match="quarantined"):
-            registry.verdict(envelope)
-
-
-def test_registry_timeout_closes_http_request_and_releases_worker(
-    loaded_pack: LoadedPack, tmp_path, monkeypatch
-) -> None:
-    log_path = tmp_path / "requests.jsonl"
-    monkeypatch.setenv("REQUEST_LOG_FILE", str(log_path))
-
-    async def exercise() -> None:
-        started, closed = asyncio.Event(), asyncio.Event()
-
-        async def handle(reader, writer):
-            try:
-                headers = await reader.readuntil(b"\r\n\r\n")
-                length = next(
-                    int(header.split(b":", 1)[1])
-                    for header in headers.split(b"\r\n")
-                    if header.lower().startswith(b"content-length:")
-                )
-                await reader.readexactly(length)
-                started.set()
-                assert await reader.read() == b""
-                closed.set()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        async with await asyncio.start_server(handle, "127.0.0.1", 0) as server:
-            port = server.sockets[0].getsockname()[1]
-            complete = SimulatorCompletion(
-                "test-token",
-                client=ProxyClient(
-                    proxy_url=f"http://127.0.0.1:{port}",
-                    api_key="test-token",
-                    timeout=5,
-                    max_retries=1,
-                ),
-            )
-
-            class Simulator:
-                def exchange_trace(self):
-                    return [{"kind": "completed_reader", "answer": "unsure"}]
-
-                async def respond(self, _transcript, _signal):
-                    await complete("test-model", [])
-                    raise AssertionError("timed-out response must not return")
-
-            with SessionRegistry(
-                loaded_pack,
-                simulator_timeout_s=0.5,
-                max_workers=1,
-                simulator_factory=lambda _session: Simulator(),
-            ) as registry:
-                _start(registry)
-                envelope = _call_envelope(
-                    registry,
-                    action={"name": "message", "args": {"content": "A question?"}},
-                )
-                call = asyncio.create_task(asyncio.to_thread(registry.call, envelope))
-                await asyncio.wait_for(started.wait(), 2)
-                with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
-                    await call
-                await asyncio.wait_for(closed.wait(), 1)
-                # The only worker can accept work after the socket has closed.
-                assert await asyncio.wait_for(
-                    asyncio.wrap_future(registry._executor.submit(lambda: "available")), 1
-                ) == "available"
-                with pytest.raises(InvalidSessionError, match="quarantined"):
-                    registry.verdict(envelope)
-                assert registry.finalized_results()[0]["call_trace"][0]["simulator"]["exchanges"] == [
-                    {"kind": "completed_reader", "answer": "unsure"}
-                ]
-
-    asyncio.run(asyncio.wait_for(exercise(), 4))
-    summaries = [json.loads(line) for line in log_path.read_text().splitlines()]
-    assert [entry["response"] for entry in summaries if entry["kind"] == "summary"] == [
-        {"kind": "cancelled", "usage": "unknown"}
-    ]
-
-
-def test_simulator_phases_share_one_deadline(loaded_pack: LoadedPack, monkeypatch) -> None:
-    completed, cancelled = [], threading.Event()
-
-    async def phase(name):
-        try:
-            await asyncio.sleep(0.08)
-            completed.append(name)
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
-
-    with SessionRegistry(loaded_pack, simulator_timeout_s=0.12, max_workers=1) as registry:
-        _start(registry)
-
-        def two_phases(*_args):
-            registry._run_simulator(phase("response"))
-            registry._run_simulator(phase("reword"))
-            return []
-
-        monkeypatch.setattr(registry, "_shopper_turn_decisions", two_phases)
-        with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
-            registry.call(_call_envelope(
-                registry,
-                action={"name": "message", "args": {"content": "A question?"}},
-            ))
-        assert cancelled.wait(timeout=1)
-        assert completed == ["response"]
-        assert registry._executor.submit(lambda: "available").result(timeout=1) == "available"
-
-
-def test_response_and_next_boundary_reword_share_deadline(
-    loaded_pack: LoadedPack, monkeypatch
-) -> None:
-    completed, cancelled = [], threading.Event()
-
-    class Simulator:
-        async def respond(self, _transcript, _signal):
-            await asyncio.sleep(0.15)
-            completed.append("response")
-            return {"action": "clarify", "content": "reply", "reason": "spoke"}
-
-    async def reword(_simulator, _session):
-        try:
-            await asyncio.sleep(0.15)
-            completed.append("reword")
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
-
-    with SessionRegistry(
-        loaded_pack,
-        simulator_timeout_s=0.25,
-        max_workers=1,
-        simulator_factory=lambda _session: Simulator(),
-    ) as registry:
-        _start(registry)
-        env = registry._sessions["session-1"].session.env
-        begin_turn = env.begin_solver_turn
-
-        def queue_next_line(turn):
-            begin_turn(turn)
-            if turn == 2:
-                env.utterances.append(("test-line", "next turn line"))
-
-        monkeypatch.setattr(env, "begin_solver_turn", queue_next_line)
-        monkeypatch.setattr(loop, "reword_utterances", reword)
-        with pytest.raises(HarnessTimeoutError, match="simulator call exceeded"):
-            registry.call(_call_envelope(
-                registry,
-                action={"name": "message", "args": {"content": "A question?"}},
-            ))
-        assert cancelled.wait(timeout=1)
-        assert completed == ["response"]
-        assert registry._executor.submit(lambda: "available").result(timeout=1) == "available"
-        timing = registry.finalized_results()[0]["call_trace"][0]["timing_ms"]
-        assert timing["simulator"] >= 240  # both phases, excluding boundary bookkeeping
-
-
-def test_grouped_calls_reject_more_than_the_declared_limit(
-    loaded_pack: LoadedPack,
-) -> None:
-    with SessionRegistry(loaded_pack, max_calls_per_turn=2) as registry:
-        bootstrap = _start(registry)
-        assert bootstrap["policy_view"]["max_calls_per_turn"] == 2
-        envelope = _call_envelope(registry)
-        envelope.pop("action")
-        envelope["calls"] = [
-            {
-                "call_id": f"tool-{index}",
-                "action": {"name": "inspect_cart", "args": {}},
-            }
-            for index in range(3)
-        ]
-
-        with pytest.raises(ValueError, match="at most 2"):
-            registry.call(envelope)
-        assert registry._sessions["session-1"].session.solver_turn_count == 0
-
-
-def test_terminal_call_allows_replay_but_rejects_new_turn(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    candidate = accepted_ref(registry.loaded_pack.task_specs[0])
-    registry.call(
-        _call_envelope(
-            registry,
-            action={
-                "name": "add_to_cart",
-                "args": {
-                    "product_id": candidate.product_id,
-                    "sku": candidate.sku,
-                },
-            },
-        )
-    )
-    terminal = _call_envelope(
-        registry,
-        call_id="call-2",
-        idempotency_key="idem-2",
-        turn=2,
-    )
-    terminal.pop("action")
-    terminal["calls"] = [
-        {
-            "call_id": "tool-2",
-            "action": {"name": "place_test_order", "args": {}},
-        },
-        {"call_id": "tool-3", "action": {"name": "inspect_cart", "args": {}}},
-    ]
-    first = registry.call(terminal)
-    assert first["calls"][0]["observation"]["done"] is True
-    assert first["calls"][1]["observation"]["error"] == "skipped_after_terminal"
-    assert registry.call(terminal)["replayed"] is True
-    terminal_result = registry.verdict(terminal)
-    assert "state_hash" not in first
-    assert terminal_result["step_count"] == 2
-    assert terminal_result["solver_turn_count"] == 2
-    assert terminal_result["action_count"] == 2
-    assert terminal_result["family"] == registry.loaded_pack.task_specs[0].family
-    assert terminal_result["terminal_reason"] == "environment_done"
-    assert (
-        terminal_result["ledger"][-1]["state_hash"]
-        == terminal_result["terminal_state_hash"]
-    )
-    assert terminal_result["bootstrap"]["session_id"] == "session-1"
-    assert [row["request"]["call_id"] for row in terminal_result["call_trace"]] == [
-        "call-1",
-        "call-2",
-    ]
-    assert terminal_result["provenance"]["pack_sha256"] == registry.pack_sha256
-
-    session = registry.loaded_pack.open_session(terminal_result["task_id"])
-    replay = replay_ledger(
-        ledger=[LedgerEntry.model_validate(row) for row in terminal_result["ledger"]],
-        task=session.task,
-        catalog=session.catalog,
-        expected_terminal_hash=terminal_result["terminal_state_hash"],
-        expected_verdict=terminal_result["verdict"],
-        render_budget=terminal_result["render_budget"],
-    )
-    assert replay.terminal_hash_matches is True
-    assert replay.verdict_matches is True
-
-    with pytest.raises(InvalidSessionError, match="terminal observation"):
-        registry.call(
-            _call_envelope(
-                registry,
-                call_id="call-3",
-                idempotency_key="idem-3",
-                turn=3,
-            )
-        )
-
-    # Sealing changes admission only, not the successful receipt or verifier.
-    assert json.dumps(registry.finalized_results()[0], sort_keys=True) == json.dumps(
-        terminal_result, sort_keys=True
-    )
-
-
-def test_verdict_requires_terminal_state(registry: SessionRegistry) -> None:
-    _start(registry)
-    with pytest.raises(InvalidSessionError, match="not reached terminal"):
-        registry.verdict(_call_envelope(registry))
-
-
-def test_terminal_results_snapshot_does_not_finalize_registry(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    candidate = accepted_ref(registry.loaded_pack.task_specs[0])
-    registry.call(
-        _call_envelope(
-            registry,
-            action={
-                "name": "add_to_cart",
-                "args": {"product_id": candidate.product_id, "sku": candidate.sku},
-            },
-        )
-    )
-    registry.call(
-        _call_envelope(
-            registry,
-            call_id="call-2",
-            idempotency_key="idem-2",
-            turn=2,
-            action={"name": "place_test_order", "args": {}},
-        )
-    )
-
-    snapshot = registry.terminal_results()
-
-    assert [result["session_id"] for result in snapshot] == ["session-1"]
-    snapshot[0]["outcome"] = "tampered"
-    assert registry.terminal_results()[0]["outcome"] == "completed"
-    _start(registry, session_id="session-2")
-    assert [result["session_id"] for result in registry.terminal_results()] == [
-        "session-1"
-    ]
-
-
-def test_finalization_rejects_new_sessions_calls_and_cached_replays(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    envelope = _call_envelope(registry)
-    registry.call(envelope)
-    before = json.dumps(registry.finalized_results(), sort_keys=True)
-
-    with pytest.raises(RuntimeError, match="finalized"):
-        _start(registry, session_id="late-session")
-    for request in (
-        envelope,
-        _call_envelope(registry, call_id="late", idempotency_key="late", turn=2),
-    ):
-        with pytest.raises(InvalidSessionError, match="finalized"):
-            registry.call(request)
-    assert json.dumps(registry.finalized_results(), sort_keys=True) == before
-
-
-def test_finalization_drains_inflight_call_and_rejects_queued_replay(
-    registry: SessionRegistry,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _start(registry)
-    entered = threading.Event()
-    release = threading.Event()
-    queued = threading.Event()
-    validate = registry._validate_binding
-    state_lookup = registry._state
-
-    def hold_inflight(envelope: dict, state: object) -> None:
-        entered.set()
-        assert release.wait(5), "test must release the active call"
-        validate(envelope, state)
-
-    def lookup(envelope: dict) -> tuple:
-        result = state_lookup(envelope)
-        if entered.is_set():
-            queued.set()
-        return result
-
-    monkeypatch.setattr(registry, "_validate_binding", hold_inflight)
-    monkeypatch.setattr(registry, "_state", lookup)
-    envelope = _call_envelope(registry)
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        active = executor.submit(registry.call, envelope)
-        try:
-            assert entered.wait(5)
-            replay = executor.submit(registry.call, envelope)
-            assert queued.wait(5)
-            finalization = executor.submit(registry.finalized_results)
-            deadline = time.monotonic() + 5
-            while not registry._finalized and time.monotonic() < deadline:
-                time.sleep(0.001)
-            assert registry._finalized
-            assert not finalization.done(), "receipt must wait for active work"
-        finally:
-            release.set()
-        assert active.result(timeout=5)["replayed"] is False
-        with pytest.raises(InvalidSessionError, match="finalized"):
-            replay.result(timeout=5)
-        results = finalization.result(timeout=5)
-    assert len(results[0]["call_trace"]) == 1
-    assert results[0]["step_count"] == 1
-    assert registry.finalized_results() == results
-
-
-def test_finalization_classifies_unfinished_sessions_as_agent_errors(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    _start(registry, session_id="session-2")
-    registry.call(_call_envelope(registry, session_id="session-2"))
-
-    results = {result["session_id"]: result for result in registry.finalized_results()}
-
-    assert results["session-1"]["outcome"] == "agent_error"
-    assert results["session-1"]["error_detail"] == "session was not attempted"
-    assert results["session-2"]["outcome"] == "agent_error"
-    assert (
-        results["session-2"]["error_detail"] == "agent did not reach a terminal state"
-    )
-    assert results["session-2"]["call_trace"][0]["response"]["replayed"] is False
-
-
-def test_step_limit_freezes_a_serializable_partial_session(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    registry._sessions["session-1"].session.max_steps = 1
-
-    response = registry.call(_call_envelope(registry))
-    result = registry.verdict(_call_envelope(registry))
-
-    assert response["observation"]["done"] is False
-    assert result["terminal_reason"] == "step_limit"
-    assert result["step_count"] == 1
-    assert result["ledger"]
-
-
-def test_timeout_quarantines_session_and_blocks_verdict(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with SessionRegistry(loaded_pack, tool_timeout_s=0.001) as registry:
-        _start(registry)
-        session = registry._sessions["session-1"].session
-        original = session.step
-
-        def slow_step(action: dict) -> dict:
-            time.sleep(0.03)
-            return original(action)
-
-        monkeypatch.setattr(session, "step", slow_step)
-        envelope = _call_envelope(registry)
-        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
-            registry.call(envelope)
-        with pytest.raises(InvalidSessionError, match="quarantined"):
-            registry.verdict(envelope)
-        result = registry.finalized_results()[0]
-        assert result["outcome"] == "environment_error"
-        assert result["call_trace"][0]["error"]["type"] == "HarnessTimeoutError"
-        timing = result["call_trace"][0]["timing_ms"]
-        assert timing["tool"] >= 1
-        assert timing["simulator"] is None
-        assert result["call_trace"][0]["latency_ms"] == timing["total"]
-
-
-def _group_envelope(registry: SessionRegistry, size: int) -> dict:
-    envelope = {
-        **_call_envelope(registry),
-        "calls": [
-            {"call_id": f"tool-{i}", "action": {"name": "inspect_cart", "args": {}}}
-            for i in range(size)
-        ],
-    }
-    envelope.pop("action")
-    return envelope
-
-
-def _slow_group(monkeypatch: pytest.MonkeyPatch, session, seconds: float) -> None:
-    original = session.step_parallel
-
-    def slow(actions):
-        time.sleep(seconds)
-        return original(actions)
-
-    monkeypatch.setattr(session, "step_parallel", slow)
-
-
-def test_grouped_call_gets_the_tool_timeout_per_action(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Grouped actions run one after another: 4 actions get 4 per-action budgets."""
-    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
-        _start(registry)
-        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.25)
-
-        response = registry.call(_group_envelope(registry, 4))
-
-    assert len(response["calls"]) == 4
-
-
-def test_grouped_call_budget_is_capped(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("validator.session_registry.MAX_TOOL_CALL_TIMEOUT_S", 0.15)
-    with SessionRegistry(loaded_pack, tool_timeout_s=0.1) as registry:
-        _start(registry)
-        _slow_group(monkeypatch, registry._sessions["session-1"].session, 0.4)
-
-        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
-            registry.call(_group_envelope(registry, 16))
-        result = registry.finalized_results()[0]
-
-    assert result["outcome"] == "environment_error"
-    assert result["error_detail"] == "tool call exceeded 0.150s"
-
-
-def test_search_retry_trace_is_private_and_persisted(registry: SessionRegistry) -> None:
-    _start(registry)
-    session = registry._sessions["session-1"].session
-    retry_trace = [
-        {
-            "attempt": 1,
-            "method": "GET",
-            "outcome": "retry",
-            "error_type": "HTTPError",
-            "status_code": 503,
-            "backoff_seconds": 0.1,
-        },
-        {
-            "attempt": 2,
-            "method": "GET",
-            "outcome": "recovered",
-            "error_type": None,
-            "status_code": 200,
-            "backoff_seconds": 0.0,
-        },
-    ]
-
-    session.search.capture_retry_trace = MagicMock(
-        return_value=nullcontext(retry_trace)
-    )
-
-    response = registry.call(_call_envelope(registry))
-    trace = registry._sessions["session-1"].call_trace[0]
-
-    assert "search_retries" not in response
-    assert trace["search_retries"] == retry_trace
-    session.search.capture_retry_trace.assert_called_once_with()
-
-
-def test_timeout_trace_keeps_completed_search_retries(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    retry_trace = []
-    entered = threading.Event()
-    release = threading.Event()
-    with SessionRegistry(loaded_pack, tool_timeout_s=0.01) as registry:
-        _start(registry)
-        session = registry._sessions["session-1"].session
-        session.search.capture_retry_trace = MagicMock(
-            return_value=nullcontext(retry_trace)
-        )
-
-        def blocked_step(_action: dict) -> None:
-            retry_trace.append({"attempt": 1, "outcome": "retry"})
-            entered.set()
-            assert release.wait(5), "test must release the timed-out worker"
-
-        monkeypatch.setattr(session, "step", blocked_step)
-        try:
-            with pytest.raises(HarnessTimeoutError, match="session quarantined"):
-                registry.call(_call_envelope(registry))
-            assert entered.is_set()
-            trace = registry.finalized_results()[0]["call_trace"][0]
-            assert trace["search_retries"] == [{"attempt": 1, "outcome": "retry"}]
-        finally:
-            release.set()
-
-
-def test_timeout_finalization_and_close_do_not_wait_for_tool_worker(
-    loaded_pack: LoadedPack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    entered = threading.Event()
-    release = threading.Event()
-    finished = threading.Event()
-    registry = SessionRegistry(loaded_pack, tool_timeout_s=0.01)
-    try:
-        _start(registry)
-        session = registry._sessions["session-1"].session
-        original = session.step
-
-        def blocked_step(action: dict) -> dict:
-            entered.set()
-            assert release.wait(5), "test must release the timed-out worker"
-            try:
-                return original(action)
-            finally:
-                finished.set()
-
-        monkeypatch.setattr(session, "step", blocked_step)
-        with pytest.raises(HarnessTimeoutError, match="session quarantined"):
-            registry.call(_call_envelope(registry))
-        assert entered.is_set()
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            finalization = executor.submit(registry.finalized_results)
-            result = finalization.result(timeout=0.5)[0]
-
-        assert result["outcome"] == "environment_error"
-        assert result["step_count"] == 0
-        assert result["ledger"] == []
-        assert result["terminal_state_hash"] is None
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            executor.submit(registry.close).result(timeout=0.5)
-    finally:
-        release.set()
-        assert finished.wait(5)
-        registry.close()
-
-
-def test_finalized_result_records_stable_monotonic_wall_seconds(
-    registry: SessionRegistry,
-) -> None:
-    _start(registry)
-    state = registry._sessions["session-1"]
-    state.started_at = time.perf_counter() - 2.5
-
-    first = registry.finalized_results()[0]
-    second = registry.finalized_results()[0]
-
-    assert 2.4 < first["wall_seconds"] < 2.6
-    assert second["wall_seconds"] == first["wall_seconds"]
-
-
-def test_http_bridge_exposes_calls_but_not_private_operations(
-    registry: SessionRegistry,
-) -> None:
-    runtime = SessionRuntime()
-    client = TestClient(create_session_app(runtime))
-    assert client.get("/health").json() == {"status": "ok", "ready": False}
-    assert client.post("/v1/session/call", json={}).status_code == 503
-
-    runtime.install(registry)
-    _start(registry)
-    response = client.post("/v1/session/call", json=_call_envelope(registry))
-    assert response.status_code == 200
-    assert response.json()["observation"]["observation"] == {"cart": []}
-    assert client.post("/v1/session/start", json={}).status_code == 404
-    assert client.post("/v1/session/verdict", json={}).status_code == 404
-
-
-def test_inference_key_is_bound_to_active_run() -> None:
-    runtime = SessionRuntime()
-    client = TestClient(create_session_app(runtime))
-    url = "/v1/inference/authorize"
-    valid = {"Authorization": "Bearer sk-or-expected"}
-
-    assert client.get(url, headers=valid).status_code == 401
-    runtime.set_inference_grant("run-1", "sk-or-expected", time.time() + 60)
-    rejected = client.get(url, headers={"Authorization": "Bearer sk-or-other"})
-    assert rejected.status_code == 401
-    assert rejected.headers["X-ORO-Run-ID"] == "run-1"
-    response = client.get(url, headers=valid)
-    assert response.status_code == 204
-    assert response.headers["X-ORO-Run-ID"] == "run-1"
-    assert "sk-or-expected" not in str(response.headers)
-    # The key alone (the agent's) reads as the agent; only the validator's own secret,
-    # which never leaves its process, reads as the validator.
-    assert response.headers["X-ORO-Caller"] == "agent"
-    forged = client.get(url, headers={**valid, "X-ORO-Validator": "guess"})
-    assert forged.headers["X-ORO-Caller"] == "agent"
-    own = client.get(url, headers={**valid, "X-ORO-Validator": VALIDATOR_CALLER_SECRET})
-    assert own.headers["X-ORO-Caller"] == "validator"
-    assert VALIDATOR_CALLER_SECRET not in str(own.headers)
-    # A non-ASCII header is a mismatch, not a server error.
-    odd = "é".encode("latin-1")
-    assert client.get(url, headers={"Authorization": b"Bearer " + odd}).status_code == 401
-    assert client.get(url, headers={**valid, "X-ORO-Validator": odd}).headers[
-        "X-ORO-Caller"
-    ] == "agent"
-
-    runtime.set_inference_grant("run-1", "sk-or-expected", 0)
-    assert client.get(url, headers=valid).status_code == 401
-    runtime.clear_inference_grant()
-    assert client.get(url, headers=valid).status_code == 401
-
-
-def test_runtime_replacement_closes_the_previous_pack_generation() -> None:
-    runtime = SessionRuntime()
-    first = MagicMock(spec=SessionRegistry)
-    second = MagicMock(spec=SessionRegistry)
-
-    runtime.install(first)
-    runtime.install(second)
-    runtime.clear(second)
-
-    first.close.assert_called_once_with()
-    second.close.assert_called_once_with()
-
-
-def test_validator_caller_cannot_authorize_a_different_account() -> None:
-    runtime = SessionRuntime()
-    client = TestClient(create_session_app(runtime))
-    url = "/v1/inference/authorize"
-    runtime.set_inference_grant("run", "cak_miner", time.time() + 60)
-    for caller in (None, "guess", VALIDATOR_CALLER_SECRET):
-        headers = {"Authorization": "Bearer sk-or-other"}
-        if caller is not None:
-            headers["X-ORO-Validator"] = caller
-        assert client.get(url, headers=headers).status_code == 401
-    response = client.get(url, headers={
-        "Authorization": "Bearer cak_miner", "X-ORO-Validator": VALIDATOR_CALLER_SECRET,
-    })
-    assert response.status_code == 204
-    assert response.headers["X-ORO-Caller"] == "validator"
-    runtime.set_inference_grant("run", "cak_miner", 0)
-    assert client.get(url, headers={"Authorization": "Bearer cak_miner"}).status_code == 401
-    runtime.clear_inference_grant()
-    assert client.get(url, headers={"Authorization": "Bearer cak_miner"}).status_code == 401
+def search_http(monkeypatch):
+    log: list[tuple] = []
+    search_statuses: list[int] = []
+
+    def put(url, data, headers, timeout):
+        log.append(("PUT", url, data.read(), headers))
+        return _Response(201)
+
+    def post(url, json, timeout):
+        log.append(("POST", url, json))
+        status = search_statuses.pop(0) if search_statuses else 200
+        return _Response(status, {"hits": [{"id": "a", "score": 2.5}]})
+
+    monkeypatch.setattr(session_registry.requests, "put", put)
+    monkeypatch.setattr(session_registry.requests, "post", post)
+    return log, search_statuses
+
+
+def _index(tmp_path: Path) -> dict:
+    archive = tmp_path / "title.archive"
+    archive.write_bytes(b"index-bytes")
+    return {"id": "f" * 64, "archive": str(archive), "settings": {"bm25": {"k1": 1.2, "b": 0.5}}}
+
+
+def test_search_client_uploads_with_settings_and_posts_queries(tmp_path, search_http) -> None:
+    log, _ = search_http
+    client = SearchServerClient("http://search.test/")
+    client.ensure(_index(tmp_path))
+    hits = client.search("f" * 64, "red mug", {"k": 3, "all_terms": True}, 5.0)
+
+    assert hits == [("a", 2.5)]
+    method, url, body, headers = log[0]
+    assert (method, url, body) == ("PUT", f"http://search.test/internal/worlds/{'f' * 64}", b"index-bytes")
+    assert json.loads(headers["X-ORO-World-Settings"]) == {"bm25": {"k1": 1.2, "b": 0.5}}
+    assert log[1] == ("POST", f"http://search.test/internal/worlds/{'f' * 64}/search",
+                      {"query": "red mug", "params": {"k": 3, "all_terms": True}})
+
+
+def test_search_client_reuploads_once_after_a_404(tmp_path, search_http) -> None:
+    log, statuses = search_http
+    client = SearchServerClient("http://search.test")
+    client.ensure(_index(tmp_path))
+    statuses.extend([404])
+    assert client.search("f" * 64, "q", {}, 5.0) == [("a", 2.5)]
+    assert [entry[0] for entry in log] == ["PUT", "POST", "PUT", "POST"]
+
+    statuses.extend([404, 404])
+    with pytest.raises(requests.HTTPError):
+        client.search("f" * 64, "q", {}, 5.0)
+    assert [entry[0] for entry in log[4:]] == ["POST", "PUT", "POST"]
+
+
+# ---------------------------------------------------------------- ProxyModelClient
+
+
+@pytest.fixture
+def proxy_http(monkeypatch):
+    sent: list[tuple] = []
+    replies: list[_Response] = []
+
+    def post(url, json, headers, timeout):
+        sent.append((url, json, headers))
+        return replies.pop(0)
+
+    import src.agent.proxy_client as proxy_client
+
+    monkeypatch.setattr(proxy_client.requests, "post", post)
+    return sent, replies
+
+
+def _ok(body: dict) -> _Response:
+    return _Response(200, body)
+
+
+def _fail(status: int, text: str) -> _Response:
+    response = _Response(status)
+    response.text = text
+    return response
+
+
+def _model_client(tmp_path, **kwargs) -> ProxyModelClient:
+    return ProxyModelClient("sk-or-secret", proxy_url="http://proxy.test", inference_stats_file=str(tmp_path / "s.jsonl"), **kwargs)
+
+
+def test_complete_uses_the_chat_route_with_the_validator_header(tmp_path, proxy_http) -> None:
+    sent, replies = proxy_http
+    replies.append(_ok({"choices": [{"message": {"content": "yes sk-or-secret"}}]}))
+
+    text = _model_client(tmp_path).complete("m", "Hello", {"temperature": 0}, 5.0)
+
+    assert text == "yes [REDACTED]"
+    url, body, headers = sent[0]
+    assert url == "http://proxy.test/inference/chat/completions"
+    assert body == {"temperature": 0, "model": "m", "messages": [{"role": "user", "content": "Hello"}], "stream": False}
+    assert headers[VALIDATOR_CALLER_HEADER] == VALIDATOR_CALLER_SECRET
+    assert headers["Authorization"] == "Bearer sk-or-secret"
+
+
+def test_decide_forwards_dict_questions_unchanged(tmp_path, proxy_http) -> None:
+    sent, replies = proxy_http
+    questions = {"q1": {"type": "noul", "text": "Did they confirm?", "lo": 0.3, "hi": 0.7}}
+    replies.append(_ok({"answers": {"q1": 0.9}}))
+
+    answers = _model_client(tmp_path).decide("typesafe/jev-1.13", {"messages": ["hi"]}, questions, {}, 5.0)
+
+    assert answers == {"answers": {"q1": 0.9}}
+    url, body, headers = sent[0]
+    assert url == "http://proxy.test/inference/alpha/decisions"
+    assert body == {"model": "typesafe/jev-1.13", "state": {"messages": ["hi"]}, "questions": questions}
+    assert body["questions"] is questions
+    assert headers[VALIDATOR_CALLER_HEADER] == VALIDATOR_CALLER_SECRET
+
+
+def test_failures_raise_redacted_and_become_error_readings(tmp_path, proxy_http) -> None:
+    _, replies = proxy_http
+    exhausted = threading.Event()
+    client = _model_client(tmp_path, key_exhausted_event=exhausted)
+
+    replies.append(_fail(500, "boom sk-or-secret"))
+    with pytest.raises(InferenceProviderError) as caught:
+        client.complete("m", "p", {}, 5.0)
+    assert "sk-or-secret" not in str(caught.value) and not exhausted.is_set()
+
+    replies.append(_fail(402, "Insufficient credits"))
+    with pytest.raises(InferenceProviderError):
+        client.decide("m", {}, {}, {}, 5.0)
+    assert exhausted.is_set()
+
+    replies.append(_ok({"choices": []}))
+    read = models.live_reader(client, StubSearchClient(), 5.0, 0)
+    assert read("complete", {"model": "m", "prompt": "p", "params": {}}) == {"ok": False, "error": "error"}

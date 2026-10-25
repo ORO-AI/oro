@@ -167,3 +167,58 @@ test("reads the episode's failure categories", async () => {
   episode.episode.failure = { primary: "did_not_finish", categories: ["did_not_finish"] };
   assert.deepEqual(normalizeOroEpisode(episode, "b.json").failure, episode.episode.failure);
 });
+
+test("normalizes a world-pack episode from its ledger", () => {
+  const input = {
+    schema_version: "oro.world_episode.v1",
+    episode: {
+      task_id: "t-1",
+      world_id: "w-1",
+      request_text: "Buy a red mug under $20.",
+      verdict: { score: 1.0, category: null, flags: [] },
+      ledger: {
+        episode: [
+          { kind: "open", task_id: "t-1" },
+          { kind: "start", observation: { greeting: "hi" } },
+          { kind: "action", step: 1, tool: "find", args: { query: "red mug" } },
+          { kind: "observation", step: 1, observation: { hits: ["a"] } },
+          { kind: "action", step: 2, tool: "ask", args: { text: "Which colour?" } },
+          { kind: "message", text: "Which colour?" },
+          { kind: "reply", text: "Red, please." },
+          { kind: "observation", step: 2, observation: "Red, please." },
+          { kind: "action", step: 3, tool: "buy", args: { id: "a" } },
+          { kind: "observation", step: 3, observation: { error: "budget_exceeded" } },
+          { kind: "finish", reason: "order", order: { lines: [{ id: "a", quantity: 1 }] } },
+        ],
+      },
+    },
+  };
+  const trajectory = normalizeTrajectory(input, "world.json");
+  assert.equal(trajectory.format, "ORO world episode v1");
+  assert.equal(trajectory.query, "Buy a red mug under $20.");
+  assert.equal(trajectory.correct, true);
+  assert.equal(trajectory.terminalReason, "order");
+  assert.deepEqual(trajectory.timeline.map((turn) => turn.toolCalls[0].name), ["find", "ask", "buy"]);
+  assert.deepEqual(trajectory.timeline[1].messages.map((m) => [m.role, m.content]), [["assistant", "Which colour?"], ["user", "Red, please."]]);
+  assert.equal(trajectory.timeline[2].toolCalls[0].observation.error, "budget_exceeded");
+});
+
+test("shows why a world episode failed, and reads network artifacts with the world ledger", () => {
+  const ledger = { ledger_format: 1, episode: [
+    { kind: "action", step: 1, tool: "buy", args: { id: "b" } },
+    { kind: "observation", step: 1, observation: { ok: true } },
+    { kind: "finish", reason: "order", order: { lines: [{ id: "b", quantity: 1 }] } },
+  ] };
+  const graded = normalizeTrajectory({ schema_version: "oro.world_episode.v1", episode: { task_id: "t-2", ledger,
+    verdict: { score: 0.0, category: "request not met", flags: [] } } }, "graded.json");
+  assert.deepEqual(graded.failure, { primary: "request not met", categories: ["request not met"] });
+  const ungraded = normalizeTrajectory({ schema_version: "oro.world_episode.v1", episode: { task_id: "t-3", ledger,
+    verdict: null, outcome: "world_error", error: "grading failed" } }, "ungraded.json");
+  assert.deepEqual(ungraded.failure, { primary: "world_error", categories: ["grading failed"] });
+  // A network artifact keeps the oro.environment_episode.v1 label with the world runtime's ledger.
+  const network = normalizeTrajectory({ schema_version: "oro.environment_episode.v1", episode: { task_id: "t-2", ledger,
+    verdict: { score: 1.0, category: null, flags: [] } } }, "network.json");
+  assert.equal(network.format, "ORO world episode v1");
+  assert.deepEqual(network.timeline.map((turn) => turn.toolCalls[0].name), ["buy"]);
+  assert.equal(network.correct, true);
+});

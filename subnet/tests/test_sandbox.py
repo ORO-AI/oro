@@ -85,6 +85,16 @@ class TestBuildSandboxCommand:
             "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json" in cmd
         )
 
+    def test_cpus_leave_a_core_for_pack_workers(self, monkeypatch):
+        monkeypatch.setattr("os.cpu_count", lambda: 8)
+        cmd = build_sandbox_command(
+            agent_host_path="/host/agent.py",
+            logs_host_path="/host/logs",
+            problem_file_arg="/tmp/problems.jsonl",
+            output_path="/app/logs/output.jsonl",
+        )
+        assert cmd[cmd.index("--cpus") + 1] == "7"
+
     def test_no_enable_scoring_flag(self):
         cmd = build_sandbox_command(
             agent_host_path="/host/agent.py",

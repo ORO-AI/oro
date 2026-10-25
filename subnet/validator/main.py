@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import gzip
 import json
 import os
 import random
@@ -10,7 +9,6 @@ import sys
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
@@ -23,14 +21,15 @@ from bittensor.utils.btlogging import logging
 from bittensor_wallet import Wallet
 from oro_sdk.models.terminal_status import TerminalStatus
 from oro_sdk.models.claim_work_response import ClaimWorkResponse
-from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.types import Unset
-from src.agent.scoring import blend_final_score
+from oro_env_runtime.pack import PackRefused
 from src.agent.sandbox_executor import (
+    MAX_SANDBOX_OUTPUT_BYTES,
+    append_attempt,
     merge_inference_stats,
     read_inference_stats,
 )
-from src.agent.types import ProblemDict, SandboxMetadata
+from src.agent.types import SandboxMetadata
 from .backend_client import BackendClient, BackendError
 from .bounded_io import (
     RunStoppedEarly,
@@ -41,7 +40,6 @@ from .bounded_io import (
 )
 from .watchdog import ProgressWatchdog
 from .heartbeat_manager import HeartbeatManager
-from .output_split import split_output_by_problem
 from .metrics import (
     ACTIVE_RUNS,
     CLAIM_WORK_SECONDS,
@@ -54,27 +52,21 @@ from .resource_collector import collect_resource_metrics
 from .version_collector import collect_service_versions
 from .weight_setter import WeightSetterThread
 from .retry_queue import LocalRetryQueue
-from .progress_reporter import ProgressReporter
 from .backoff import ExponentialBackoff
 from .drain import handle_drain_tick
-from .env_pack_loader import fetch_and_validate_pack, fetch_and_validate_race_pack
-from .environment_preflight import (
-    environment_preflight_run_id,
-    run_environment_preflight,
-)
+from . import env_pack_loader, session_registry
+from .environment_preflight import run_environment_preflight
 from .episode_emitter import emit_finalized_results, load_inference_transcripts
 from .generated_evaluation import (
     GENERATED_SCORE_SCHEMA,
     aggregate_results,
-    select_run_task_roster,
+    claim_roster,
     summarize_agent_inference_usage,
     summarize_episode_resource_usage,
-    validate_run_results,
     write_problem_file,
 )
 from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
-from .session_registry import SessionRegistry
 from .session_service import SessionRuntime, SessionServer
 from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
 
@@ -91,13 +83,6 @@ AUTO_UPDATE_ENABLED = os.environ.get("ORO_AUTO_UPDATE", "true").lower() in (
 # Hardcoded because the bundled prometheus.yml scrapes this exact port; an
 # operator-tunable arg adds surface area without buying anything.
 METRICS_PORT = 9100
-
-# Parallel uploads in _upload_logs. Each worker does a presign roundtrip +
-# an S3 PUT, both flowing through the BackendClient's persistent connection
-# pools, so 20 workers comfortably fan out an N-problem eval without
-# starving the auth-client httpx pool. The matching Backend per-IP cap on
-# /v1/validator/* sits comfortably above the resulting RPM.
-_UPLOAD_LOGS_WORKERS = 20
 
 
 @dataclass(frozen=True)
@@ -172,18 +157,23 @@ def _rewrite_localhost_url(url: str) -> str:
 
 
 def _claim_string(work: ClaimWorkResponse, field_name: str) -> str | None:
-    """Read a nullable claim field across old and regenerated SDK models."""
+    """Read a nullable claim field."""
 
     value = getattr(work, field_name, None)
     if value is None or isinstance(value, Unset):
-        value = getattr(work, "additional_properties", {}).get(field_name)
-    if value is None:
         return None
     if isinstance(value, UUID):
         return str(value)
     if not isinstance(value, str) or not value:
         raise ValueError(f"claim field {field_name} must be a non-empty string")
     return value
+
+
+def _claim_episode_nonces(work: ClaimWorkResponse) -> Any:
+    """Read the claim's per-task episode nonces."""
+
+    value = work.episode_nonces
+    return None if value is None or isinstance(value, Unset) else value.additional_properties
 
 
 def _claim_environment_binding(
@@ -319,22 +309,18 @@ class Validator:
             help="Internal session HTTP port (env: ORO_SESSION_RUNTIME_PORT).",
         )
         parser.add_argument(
-            "--session-tool-timeout",
-            type=float,
-            default=float(os.environ.get("ORO_SESSION_TOOL_TIMEOUT", "10")),
-            help=(
-                "Per-action timeout before quarantine; a grouped call gets it per action, "
-                "up to 30s (env: ORO_SESSION_TOOL_TIMEOUT)."
-            ),
-        )
-        parser.add_argument(
-            "--session-simulator-timeout",
+            "--session-model-timeout",
             type=float,
             default=float(os.environ.get("ORO_SESSION_SIMULATOR_TIMEOUT") or "60"),
             help=(
-                "Shopper simulator timeout before quarantine "
+                "Timeout for each world model or search reading "
                 "(env: ORO_SESSION_SIMULATOR_TIMEOUT)."
             ),
+        )
+        parser.add_argument(
+            "--search-server-url",
+            default=os.environ.get("SEARCH_SERVER_URL", "http://search-server:5632"),
+            help="Search server that hosts world indexes (env: SEARCH_SERVER_URL).",
         )
         parser.add_argument(
             "--environment-runtime-enabled",
@@ -343,14 +329,6 @@ class Validator:
             help=(
                 "Enable the sealed environment runtime and its startup preflight "
                 "(env: ORO_ENVIRONMENT_RUNTIME_ENABLED, default: false)."
-            ),
-        )
-        parser.add_argument(
-            "--environment-preflight-pack-sha256",
-            default=os.environ.get("ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256", ""),
-            help=(
-                "Sealed pack hash used by the environment startup preflight "
-                "(env: ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256)."
             ),
         )
         # Backend API configuration
@@ -803,11 +781,6 @@ class Validator:
         """Main validation loop - claims work from Backend and executes evaluations."""
         logging.info("Starting validator loop.")
 
-        # Validate the optional startup gate before starting any background
-        # service.  A mixed configuration (runtime enabled without a valid
-        # pack pin) must fail fast; otherwise startup enters the HTTP server
-        # cleanup path even though no preflight can possibly run.
-        self._validate_environment_preflight_config()
         self.session_server.start()
         logging.info(
             "Session runtime listening on "
@@ -1007,342 +980,138 @@ class Validator:
         if not self.config.environment_runtime_enabled:
             logging.info("Environment runtime feature flag is disabled")
             return None
-
-        self._validate_environment_preflight_config()
-        pack_sha256 = self.config.environment_preflight_pack_sha256
-        loaded_pack = asyncio.run(
-            fetch_and_validate_pack(
-                pack_sha256,
-                self.config.backend_url,
-                self.wallet.hotkey,
-                download_url_rewriter=_rewrite_localhost_url,
-            )
-        )
-        if loaded_pack is None:
-            raise RuntimeError(
-                f"environment preflight pack {pack_sha256} failed validation"
-            )
-
-        run_dir = self._eval_dir(environment_preflight_run_id(pack_sha256))
-        logging.info(
-            f"Running feature-flagged environment preflight for pack={pack_sha256}"
-        )
         summary = run_environment_preflight(
-            loaded_pack=loaded_pack,
             runtime=self.session_runtime,
-            run_dir=run_dir,
-            sandbox_runner=self.run_sandbox,
+            run_dir=self._eval_dir("environment-preflight"),
+            # run_sandbox mounts the eval dir of the id it is given: the one the preflight writes its inputs to.
+            sandbox_runner=lambda agent, _run_id, problems: self.run_sandbox(agent, "environment-preflight", problems),
         )
         logging.info(
-            f"Environment preflight receipt: {json.dumps(summary, sort_keys=True)}"
+            f"Environment preflight passed: {json.dumps(summary, sort_keys=True)}"
         )
-        logging.info(f"Environment preflight passed: pack={pack_sha256}")
         return summary
-
-    def _validate_environment_preflight_config(self) -> None:
-        """Reject an unusable opt-in preflight before starting services."""
-
-        if not self.config.environment_runtime_enabled:
-            return
-        pack_sha256 = self.config.environment_preflight_pack_sha256
-        if len(pack_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in pack_sha256
-        ):
-            raise RuntimeError(
-                "ORO_ENVIRONMENT_PREFLIGHT_PACK_SHA256 must be 64 lowercase hex "
-                "characters when ORO_ENVIRONMENT_RUNTIME_ENABLED=true"
-            )
-
-    def prepare_environment_sessions(
-        self,
-        work: ClaimWorkResponse,
-        *,
-        inference_access_token: str,
-    ) -> SessionRegistry | None:
-        """Provision optional sealed sessions alongside the legacy evaluation."""
-
-        if not self.config.environment_runtime_enabled:
-            return None
-
-        try:
-            binding = _claim_environment_binding(work)
-        except ValueError as exc:
-            logging.warning(
-                f"Invalid environment binding for evaluation {work.eval_run_id}: {exc}"
-            )
-            return None
-        if binding is None:
-            return None
-        try:
-            registry, _, _ = self._create_environment_sessions(
-                work,
-                inference_access_token=inference_access_token,
-            )
-            return registry
-        except Exception as exc:
-            logging.warning(
-                f"Environment session setup failed for evaluation {work.eval_run_id}: "
-                f"{type(exc).__name__}: {exc}"
-            )
-            return None
 
     def _create_environment_sessions(
         self,
         work: ClaimWorkResponse,
         *,
         inference_access_token: str,
-    ) -> tuple[SessionRegistry, list[dict[str, Any]], dict[str, str]]:
-        """Create the bound sessions, raising when authoritative setup fails."""
+    ) -> tuple[Any, list[dict[str, Any]], dict[str, str], str]:
+        """Load the claimed delivery and open one session per delivery task."""
 
         pack_sha256 = _claim_environment_binding(work)
-        if pack_sha256 is None:
-            raise ValueError("generated evaluation requires a bound env pack")
+        delivery_id = _claim_string(work, "delivery_id")
+        if pack_sha256 is None or delivery_id is None:
+            raise ValueError("claim is not bound to a world delivery (legacy work)")
 
-        # Race work items get the race-scoped sub-archive (only the
-        # 60 selected task specs) instead of the pack's qualifying sub-archive.
-        # The race pack is presigned only to validators with an active
-        # EvaluationRun on the race, so this fetch fails cleanly if the run
-        # has expired between claim and load.
+        # Race work loads the race delivery, presigned only to validators holding
+        # an active run on the race; other work loads the qualifying delivery.
         race_id = _claim_string(work, "race_id")
+        fetch_kwargs = {
+            "expected_delivery_id": delivery_id,
+            "download_url_rewriter": _rewrite_localhost_url,
+        }
         if race_id is not None:
-            loaded_pack = asyncio.run(
-                fetch_and_validate_race_pack(
+            loaded = asyncio.run(
+                env_pack_loader.fetch_and_validate_race_pack(
                     race_id,
                     pack_sha256,
                     self.config.backend_url,
                     self.wallet.hotkey,
-                    download_url_rewriter=_rewrite_localhost_url,
+                    **fetch_kwargs,
                 )
             )
-            if loaded_pack is None:
-                raise RuntimeError(
-                    f"race pack race_id={race_id} pack={pack_sha256} failed validation"
-                )
         else:
-            loaded_pack = asyncio.run(
-                fetch_and_validate_pack(
-                    pack_sha256,
-                    self.config.backend_url,
-                    self.wallet.hotkey,
-                    download_url_rewriter=_rewrite_localhost_url,
+            loaded = asyncio.run(
+                env_pack_loader.fetch_and_validate_pack(
+                    pack_sha256, self.config.backend_url, self.wallet.hotkey, **fetch_kwargs
                 )
             )
-            if loaded_pack is None:
-                raise RuntimeError(f"environment pack {pack_sha256} failed validation")
+        if loaded is None:
+            # The Backend classifies exactly these texts as ours, not the agent's (failure_classification
+            # _PACK_LOAD_FAILURE): a bad or unreachable delivery must never count against an agent.
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation")
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation")
+        roster = claim_roster(loaded.pack, delivery_id, _claim_episode_nonces(work))
 
-        registry: SessionRegistry | None = None
+        # The registry uploads every pack index to the search server first. A search server that is down
+        # or refuses an index is ours, never the agent's: fail with the Backend's pack-failure text.
         try:
-            selected_roster = select_run_task_roster(
-                self.backend_client.get_run_problems(work.eval_run_id),
-                {
-                    task_id: task.family
-                    for task_id, task in zip(
-                        loaded_pack.task_ids, loaded_pack.task_specs, strict=True
-                    )
-                },
-            )
-            registry = SessionRegistry(
-                loaded_pack,
-                tool_timeout_s=self.config.session_tool_timeout,
-                simulator_timeout_s=self.config.session_simulator_timeout,
-                max_workers=self.config.sandbox_max_workers,
+            registry = session_registry.SessionRegistry(
+                loaded.pack,
+                episode_nonces=roster,
+                search_client=session_registry.SearchServerClient(
+                    self.config.search_server_url
+                ),
+                timeout=self.config.session_model_timeout,
                 inference_access_token=inference_access_token,
                 inference_stats_file=str(
                     self._simulator_inference_stats_file(str(work.eval_run_id))
                 ),
             )
-            sessions = [
-                registry.start(
-                    evaluation_run_id=str(work.eval_run_id),
-                    agent_version_id=str(work.agent_version_id),
-                    task_id=task_id,
-                )
-                for task_id in selected_roster
-            ]
+        except Exception as exc:
+            logging.error(f"Search index install failed for delivery {delivery_id}: {exc}")
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation") from exc
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation") from exc
+        try:
+            sessions = [registry.start(task_id) for task_id in roster]
             session_file = self._eval_dir(str(work.eval_run_id)) / (
                 "environment_sessions.json"
             )
             session_file.write_text(
                 json.dumps(
-                    {
-                        "schema_version": "oro.session_bootstrap.v1",
-                        "sessions": sessions,
-                    },
+                    {"schema_version": "oro.session_bootstrap.v1", "sessions": sessions},
                     sort_keys=True,
                 ),
                 encoding="utf-8",
             )
             os.chmod(session_file, 0o444)
             self.session_runtime.install(registry)
-            logging.info(
-                f"Provisioned {len(sessions)} sealed sessions for evaluation "
-                f"{work.eval_run_id}"
-            )
-            return registry, sessions, selected_roster
+        except PackRefused as exc:
+            # The runtime refused the verified delivery's files (e.g. the catalog changed on this host):
+            # ours, never the agent's, so fail with the text the Backend classifies as a pack failure.
+            registry.close()
+            if race_id is not None:
+                raise RuntimeError(f"race pack race_id={race_id} pack={pack_sha256} failed validation") from exc
+            raise RuntimeError(f"environment pack {pack_sha256} failed validation") from exc
         except Exception:
-            if registry is None:
-                loaded_pack.close()
-            else:
-                self.session_runtime.clear(registry)
-                registry.close()
+            registry.close()
             raise
-
-    def _emit_environment_results(
-        self,
-        work: ClaimWorkResponse,
-        registry: SessionRegistry,
-        *,
-        expected_task_roster: dict[str, str] | None = None,
-    ) -> list[dict[str, Any]]:
-        results = registry.finalized_results()
-        self._emit_environment_result_batch(
-            work,
-            results,
-            expected_task_roster,
-            require_complete=True,
+        logging.info(
+            f"Provisioned {len(sessions)} sessions for evaluation {work.eval_run_id} "
+            f"(delivery={delivery_id})"
         )
-        return results
+        return registry, sessions, roster, delivery_id
 
-    def _emit_environment_result_batch(
+    def _emit_episode_records(
         self,
         work: ClaimWorkResponse,
-        results: list[dict[str, Any]],
-        expected_task_roster: dict[str, str] | None = None,
-        *,
-        require_complete: bool = False,
-        inference_transcripts: dict[str, dict[str, Any]] | None = None,
+        delivery_id: str,
+        task_families: dict[str, str],
+        records: list[dict[str, Any]],
+        inference_transcripts: dict[str, dict[str, Any]],
     ) -> None:
         env_pack_sha256 = _claim_environment_binding(work)
         if env_pack_sha256 is None:
             raise ValueError("environment binding disappeared during evaluation")
-        if expected_task_roster is not None:
-            validate_run_results(
-                results,
-                expected_task_roster,
-                evaluation_run_id=str(work.eval_run_id),
-                agent_version_id=str(work.agent_version_id),
-                pack_sha256=env_pack_sha256,
-                require_complete=require_complete,
-            )
-        kwargs = (
-            {"inference_transcripts": inference_transcripts}
-            if inference_transcripts is not None
-            else {}
-        )
         submitted = asyncio.run(
             emit_finalized_results(
                 backend_url=self.config.backend_url,
                 validator_keypair=self.wallet.hotkey,
                 env_pack_sha256=env_pack_sha256,
-                results=results,
+                eval_run_id=str(work.eval_run_id),
+                delivery_id=delivery_id,
+                task_families=task_families,
+                results=records,
+                inference_transcripts=inference_transcripts,
                 download_url_rewriter=_rewrite_localhost_url,
-                **kwargs,
             )
         )
         logging.info(
-            "Persisted generated-environment progress for "
-            f"{work.eval_run_id}: {submitted.get('counts', {})}"
-        )
-
-    def finalize_environment_sessions(
-        self,
-        work: ClaimWorkResponse,
-        registry: SessionRegistry,
-    ) -> None:
-        """Persist all environment outcomes without changing legacy scoring."""
-
-        try:
-            self._emit_environment_results(work, registry)
-        except Exception as exc:
-            # Episode capture is preview telemetry. A transport or schema defect
-            # must never change the legacy evaluation's score or completion path.
-            logging.warning(
-                "Generated-environment episode emission failed for "
-                f"{work.eval_run_id}: {type(exc).__name__}: {exc}"
-            )
-        finally:
-            try:
-                self.session_runtime.clear(registry)
-            except Exception as exc:
-                logging.warning(
-                    "Generated-environment session cleanup failed for "
-                    f"{work.eval_run_id}: {type(exc).__name__}: {exc}"
-                )
-
-    def fetch_problems(
-        self, suite_id: int, eval_run_id_str: str
-    ) -> tuple[Optional[Path], list[UUID], list[ProblemDict]]:
-        """Fetch problems from Backend API and save sanitized version to temp file.
-
-        The full problem data (with reward/voucher) is returned in memory for
-        the ProgressReporter to use during scoring. The file written to disk
-        has reward/voucher stripped so the sandbox cannot read ground-truth answers.
-
-        Returns:
-            Tuple of (problem file path, problem UUIDs, full problems with rewards).
-            Returns (None, [], []) if fetch failed.
-        """
-        try:
-            eval_run_id = UUID(eval_run_id_str)
-            logging.info(f"Fetching problems for run {eval_run_id_str}")
-            problems = self.backend_client.get_run_problems(eval_run_id)
-
-            if not problems:
-                logging.error(f"No problems returned for suite {suite_id}")
-                return None, [], []
-
-            # Extract problem_ids for later use (e.g., log upload)
-            problem_ids = []
-            for problem in problems:
-                pid = problem.get("problem_id") or problem.get("id")
-                if pid:
-                    problem_ids.append(UUID(pid) if isinstance(pid, str) else pid)
-
-            # Write sanitized problems to per-evaluation directory.
-            # Strip ground-truth fields so the sandbox cannot read answers.
-            # reward_title_embeddings keys are verbatim product titles.
-            eval_dir = self._eval_dir(eval_run_id_str)
-            problem_file = eval_dir / "problems.jsonl"
-            with open(problem_file, "w") as f:
-                for problem in problems:
-                    sanitized = {
-                        k: v
-                        for k, v in problem.items()
-                        if k not in ("reward", "voucher", "reward_title_embeddings")
-                    }
-                    f.write(json.dumps(sanitized) + "\n")
-
-            logging.info(f"Saved {len(problems)} problems to {problem_file}")
-            return problem_file, problem_ids, problems
-        except BackendError as e:
-            logging.error(f"Failed to fetch problems: {e}")
-            return None, [], []
-        except Exception as e:
-            logging.error(f"Unexpected error fetching problems: {e}")
-            return None, [], []
-
-    def _run_claimed_evaluation(
-        self,
-        work: ClaimWorkResponse,
-        agent_path: Path,
-        *,
-        inference_access_token: str,
-        inference_provider: str,
-        inference_base_url: str,
-    ) -> _EvaluationCompletion | None:
-        """Select the evaluator from the immutable contract on claimed work."""
-
-        runner = (
-            self._run_generated_evaluation
-            if _claim_environment_binding(work) is not None
-            else self._run_legacy_evaluation
-        )
-        return runner(
-            work,
-            agent_path,
-            inference_access_token=inference_access_token,
-            inference_provider=inference_provider,
-            inference_base_url=inference_base_url,
+            f"Persisted episode results for {work.eval_run_id}: "
+            f"{submitted.get('counts', {})}"
         )
 
     def _run_generated_evaluation(
@@ -1354,16 +1123,19 @@ class Validator:
         inference_provider: str,
         inference_base_url: str,
     ) -> _EvaluationCompletion | None:
-        """Execute and score the sealed pack bound to the claimed work."""
+        """Run the agent against the claimed delivery and grade every episode."""
 
         eval_run_id = work.eval_run_id
         eval_run_id_str = str(eval_run_id)
-        registry, sessions, selected_roster = self._create_environment_sessions(
+        # The Backend still keys episode results by the run problems' families.
+        task_families = {
+            str(problem["task_id"]): str(problem["family"])
+            for problem in self.backend_client.get_run_problems(eval_run_id)
+        }
+        registry, sessions, roster, delivery_id = self._create_environment_sessions(
             work,
             inference_access_token=inference_access_token,
         )
-        sandbox_output = None
-        sandbox_metadata: SandboxMetadata = {}
         output_path = self._eval_dir(eval_run_id_str) / "output.jsonl"
         sandbox_finished = False
 
@@ -1376,14 +1148,11 @@ class Validator:
                 else {}
             )
             if not sandbox_finished and any(
-                str(result.get("session_id")) not in transcripts for result in batch
+                str(record.get("session_id")) not in transcripts for record in batch
             ):
                 raise RuntimeError("inference transcript is not ready")
-            self._emit_environment_result_batch(
-                work,
-                batch,
-                selected_roster,
-                inference_transcripts=transcripts,
+            self._emit_episode_records(
+                work, delivery_id, task_families, batch, transcripts
             )
 
         reporter = GeneratedProgressReporter(registry, emit_with_transcripts)
@@ -1404,39 +1173,57 @@ class Validator:
                 )
             finally:
                 reporter.stop()
+            registry.finish_all()
+
+            reruns = 0
+
+            def rerun(rerun_sessions: list[dict[str, Any]]) -> None:
+                # A fresh eval dir holding only the agent and the new problems:
+                # nothing the first attempt wrote is visible to the re-run.
+                nonlocal reruns
+                reruns += 1
+                rerun_id = f"{eval_run_id_str}-rerun-{reruns}"
+                rerun_dir = self._eval_dir(rerun_id)
+                shutil.rmtree(rerun_dir)
+                rerun_dir = self._eval_dir(rerun_id)
+                rerun_agent = rerun_dir / "agent.py"
+                rerun_agent.write_bytes(agent_path.read_bytes())
+                write_problem_file(rerun_dir / "problems.jsonl", rerun_sessions)
+                try:
+                    self.run_sandbox(
+                        rerun_agent,
+                        rerun_id,
+                        rerun_dir / "problems.jsonl",
+                        inference_access_token=inference_access_token,
+                        inference_provider=inference_provider,
+                        inference_base_url=inference_base_url,
+                        stop_event=registry.key_exhausted,
+                    )
+                    # Keep every attempt's transcripts and usage in the run's own files.
+                    for name in ("output.jsonl", "inference_stats.jsonl"):
+                        append_attempt(
+                            self._eval_dir(eval_run_id_str) / name,
+                            rerun_dir / name,
+                            MAX_SANDBOX_OUTPUT_BYTES,
+                        )
+                finally:
+                    shutil.rmtree(rerun_dir, ignore_errors=True)
+
+            if sandbox_output and not registry.key_exhausted.is_set():
+                registry.rerun_environment_faults(rerun)
             sandbox_finished = True
-            results = registry.finalized_results()
-            env_pack_sha256 = _claim_environment_binding(work)
-            if env_pack_sha256 is None:
-                raise ValueError("environment binding disappeared before finalization")
-            validate_run_results(
-                results,
-                selected_roster,
-                evaluation_run_id=str(work.eval_run_id),
-                agent_version_id=str(work.agent_version_id),
-                pack_sha256=env_pack_sha256,
-            )
+            records = registry.terminal_results(final=True)
             try:
-                reporter.flush(results)
+                reporter.flush(records)
             except Exception as exc:
                 emission_failure = exc
         finally:
             reporter.stop()
             self.session_runtime.clear(registry)
 
-        key_exhausted = registry.key_exhausted.is_set()
-        if key_exhausted:
-            # Miner ran out of inference budget mid-run. Instead of failing
-            # the whole run and discarding all completed work, score the
-            # tasks that already finished. Sessions that had not started yet
-            # (or were mid-flight when the key hit its cap) are surfaced by
-            # `finalized_results` as `agent_error` and count as zero reward
-            # in `aggregate_results`, so the score is `paid_reward_sum /
-            # roster_size`. Miner gets partial credit for the episodes they
-            # completed instead of a cliff-drop to a full failure. The
-            # sandbox will have stopped early via `stop_event`, so an empty
-            # `sandbox_output` is expected on this path and is not a real
-            # sandbox failure.
+        if registry.key_exhausted.is_set():
+            # The miner's run key ran out mid-run and the sandbox stopped early.
+            # Score the finished episodes; unfinished roster tasks count as zero.
             logging.info(
                 "Miner inference key exhausted; scoring completed episodes only"
             )
@@ -1450,18 +1237,8 @@ class Validator:
                 sandbox_metadata=sandbox_metadata,
             )
             return None
-
         try:
-            score = aggregate_results(
-                results,
-                selected_reader_task_ids={
-                    task_id
-                    for task_id, task in zip(
-                        registry.loaded_pack.task_ids, registry.loaded_pack.task_specs, strict=True,
-                    )
-                    if task_id in selected_roster and getattr(task.situation, "reader", None)
-                },
-            )
+            score = aggregate_results(records, roster)
         except ValueError as exc:
             self._complete_with_failure(
                 eval_run_id,
@@ -1472,12 +1249,11 @@ class Validator:
             return None
         if emission_failure is not None:
             logging.warning(
-                "Generated episode transcript persistence failed for "
-                f"{eval_run_id_str}; scoring is unaffected: "
-                f"{type(emission_failure).__name__}: {emission_failure}"
+                f"Episode result persistence failed for {eval_run_id_str}; scoring "
+                f"is unaffected: {type(emission_failure).__name__}: {emission_failure}"
             )
         logging.info(
-            f"Generated evaluation score: {score:.6f} across {len(results)} tasks"
+            f"Generated evaluation score: {score:.6f} across {len(roster)} tasks"
         )
         try:
             eval_dir = self._eval_dir(eval_run_id_str)
@@ -1497,12 +1273,12 @@ class Validator:
                 str(self._simulator_inference_stats_file(eval_run_id_str))
             )
             by_episode = summarize_episode_resource_usage(
-                results,
+                records,
                 merge_inference_stats(agent_stats, simulator_stats),
                 inference_provider,
             )
             agent_by_episode = summarize_episode_resource_usage(
-                results,
+                records,
                 agent_stats,
                 inference_provider,
             )
@@ -1526,103 +1302,6 @@ class Validator:
             score=score,
             score_components={"schema_version": GENERATED_SCORE_SCHEMA},
             results_s3_key="",
-            sandbox_metadata=sandbox_metadata,
-        )
-
-    def _run_legacy_evaluation(
-        self,
-        work: ClaimWorkResponse,
-        agent_path: Path,
-        *,
-        inference_access_token: str,
-        inference_provider: str,
-        inference_base_url: str,
-    ) -> _EvaluationCompletion | None:
-        """Run the existing ShoppingBench evaluation unchanged."""
-
-        eval_run_id = work.eval_run_id
-        eval_run_id_str = str(eval_run_id)
-        problem_file, problem_ids, problems = self.fetch_problems(
-            work.suite_id, eval_run_id_str
-        )
-        if not problem_file or not problems:
-            self._complete_with_failure(
-                eval_run_id, TerminalStatus.FAILED, "Failed to load problems"
-            )
-            return None
-
-        eval_dir = self._eval_dir(eval_run_id_str)
-        output_file = eval_dir / "output.jsonl"
-        progress_reporter = ProgressReporter(
-            backend_client=self.backend_client,
-            eval_run_id=eval_run_id,
-            output_file=output_file,
-            problems=problems,
-            workspace_dir=Path(self.config.workspace_dir),
-            inference_access_token=inference_access_token,
-            inference_provider=inference_provider,
-            max_scoring_workers=self.config.reasoning_max_workers,
-        )
-        progress_reporter.start_monitoring()
-        environment_registry = self.prepare_environment_sessions(
-            work,
-            inference_access_token=inference_access_token,
-        )
-
-        try:
-            sandbox_output, sandbox_metadata = self.run_sandbox(
-                agent_path,
-                eval_run_id_str,
-                problem_file,
-                inference_access_token=inference_access_token,
-                inference_provider=inference_provider,
-                inference_base_url=inference_base_url,
-            )
-        finally:
-            try:
-                progress_reporter.signal_sandbox_done()
-                progress_reporter.wait_for_completion()
-            finally:
-                if environment_registry is not None:
-                    self.finalize_environment_sessions(work, environment_registry)
-
-        if not sandbox_output:
-            self._complete_with_failure(
-                eval_run_id,
-                TerminalStatus.FAILED,
-                "Sandbox execution failed",
-                sandbox_metadata=sandbox_metadata,
-            )
-            return None
-
-        aggregate = progress_reporter.get_aggregate_score()
-        if aggregate is None:
-            self._complete_with_failure(
-                eval_run_id,
-                TerminalStatus.FAILED,
-                "ProgressReporter did not compute aggregate score",
-            )
-            return None
-
-        success_rate = aggregate.get("success_rate", 0.0)
-        # Missing or failed judgments count as zero. Incomplete reasoning-judge
-        # coverage does not fail the run because the judge is being retired.
-        reasoning_result = progress_reporter.get_reasoning_data()
-        score = blend_final_score(success_rate, reasoning_result["reasoning_quality"])
-        aggregate.update(reasoning_result)
-        logging.info(
-            f"Score: final={score:.4f} "
-            f"(success_rate={success_rate:.4f} * "
-            f"coefficient={reasoning_result['reasoning_coefficient']:.4f}, "
-            f"reasoning_quality={reasoning_result['reasoning_quality']:.4f})"
-        )
-        results_s3_key = self._upload_logs(
-            eval_run_id, output_file, problem_ids, progress_reporter
-        )
-        return _EvaluationCompletion(
-            score=score,
-            score_components=aggregate,
-            results_s3_key=results_s3_key,
             sandbox_metadata=sandbox_metadata,
         )
 
@@ -1706,7 +1385,7 @@ class Validator:
                 )
                 return
 
-            completion = self._run_claimed_evaluation(
+            completion = self._run_generated_evaluation(
                 work,
                 agent_path,
                 inference_access_token=inference_access_token,
@@ -1754,122 +1433,6 @@ class Validator:
                 )
             except OSError as e:
                 logging.debug(f"Simulator stats cleanup failed: {e}")
-
-    def _upload_logs(
-        self,
-        eval_run_id: UUID,
-        output_file: Path,
-        problem_ids: list[UUID],
-        progress_reporter: "ProgressReporter",
-    ) -> str:
-        """Upload per-problem evaluation logs to S3.
-
-        The output JSONL file contains one line per problem, each being a JSON
-        array of trajectory steps with ``extra_info.problem_id``. This method
-        splits the file by problem and uploads each as a separate gzipped object
-        so the Frontend can fetch trajectories per-problem.
-
-        After uploading, reports the S3 keys back to the Backend via progress
-        update so the download endpoint can locate them.
-
-        Args:
-            eval_run_id: The evaluation run ID (UUID).
-            output_file: Path to the output JSONL file.
-            problem_ids: List of problem UUIDs from the suite.
-            progress_reporter: ProgressReporter with per-problem scoring results.
-
-        Returns:
-            S3 key of the last successfully uploaded log (stored on the run).
-        """
-        try:
-            if not output_file.exists():
-                logging.warning(f"Output file not found: {output_file}")
-                return ""
-
-            if not problem_ids:
-                logging.warning("No problem_ids available for log upload, skipping")
-                return ""
-
-            problem_lines = split_output_by_problem(output_file, problem_ids)
-
-            # Build (pid, compressed_bytes) tuples up front so the worker
-            # function is pure I/O. Invalid problem_ids are dropped here
-            # before they reach the executor.
-            jobs: list[tuple[UUID, bytes]] = []
-            for pid_str, line_data in problem_lines.items():
-                try:
-                    pid = UUID(pid_str)
-                except ValueError:
-                    logging.warning(
-                        f"Invalid problem_id in output: {pid_str}, skipping"
-                    )
-                    continue
-                jobs.append((pid, gzip.compress(line_data)))
-
-            def _upload_one(job: tuple[UUID, bytes]) -> tuple[UUID, str] | None:
-                pid, compressed = job
-                try:
-                    presign = self.backend_client.get_presigned_upload_url(
-                        content_length=len(compressed),
-                        eval_run_id=eval_run_id,
-                        problem_id=pid,
-                    )
-                    # Rewrite localhost URLs for Docker → host connectivity
-                    if hasattr(presign, "upload_url"):
-                        presign.upload_url = _rewrite_localhost_url(presign.upload_url)
-                    self.backend_client.upload_to_s3(presign, compressed)
-                    return pid, presign.results_s3_key
-                except Exception as e:
-                    logging.warning(f"Upload failed for problem {pid}: {e}")
-                    return None
-
-            # Parallel uploads. Sized to match the BackendClient S3 session's
-            # pool_connections so we don't queue inside urllib3. Each worker
-            # does one presign roundtrip + one S3 PUT; both calls reuse the
-            # connection pool, so per-problem wall time drops from ~600 ms
-            # to ~150-200 ms.
-            uploaded_keys: dict[UUID, str] = {}
-            last_s3_key = ""
-            if jobs:
-                with ThreadPoolExecutor(
-                    max_workers=_UPLOAD_LOGS_WORKERS,
-                    thread_name_prefix="upload-logs",
-                ) as pool:
-                    for result in pool.map(_upload_one, jobs):
-                        if result is None:
-                            continue
-                        pid, s3_key = result
-                        uploaded_keys[pid] = s3_key
-                        last_s3_key = s3_key
-                        logging.info(f"Uploaded logs to {s3_key}")
-
-            # Report S3 keys back to Backend so download endpoint can find them
-            if uploaded_keys:
-                progress_updates = [
-                    ProblemProgressUpdate(
-                        problem_id=pid,
-                        status=progress_reporter.get_problem_status(str(pid)),
-                        logs_s3_key=s3_key,
-                    )
-                    for pid, s3_key in uploaded_keys.items()
-                ]
-                try:
-                    self.backend_client.report_progress(eval_run_id, progress_updates)
-                    logging.info(
-                        f"Reported logs_s3_key for {len(uploaded_keys)} problems"
-                    )
-                except Exception as e:
-                    # ORO-702 removed the progress retry queue on purpose ("no
-                    # disk retry queue for progress reports"). This post-run
-                    # logs_s3_key report has no retry path; on failure we drop it
-                    # (the affected problems keep a broken download link) and let
-                    # the warning above surface the real error. See ORO-2315.
-                    logging.warning(f"Failed to report logs_s3_key: {e}")
-
-            return last_s3_key
-        except Exception as e:
-            logging.error(f"Failed to upload logs: {e}")
-            return ""
 
     def _complete_run(
         self,

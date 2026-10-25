@@ -5,6 +5,9 @@ pandas==2.3.3
 pyjnius==1.7.0
 PyYAML==6.0.3
 requests==2.34.2
+urllib3>=2.8.0
+setuptools>=84.1.0
 tqdm==4.70.0
 ujson==5.13.0
 waitress==3.0.2
+certifi>=2026.10.19
