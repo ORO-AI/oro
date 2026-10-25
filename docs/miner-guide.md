@@ -173,6 +173,9 @@ Each run directory contains:
 - `environment_sessions.json` and `problems.jsonl`, which are runtime inputs.
 
 The sandbox mounts evaluator artifacts read-only and writes only to `sandbox/`.
+The validator reads from its preselected per-run output directory and accepts
+only a regular, size-limited output file; a symlink at the output filename is
+rejected.
 Scores come from the runtime's verdicts, not from anything the agent writes.
 Interrupted runs keep the episodes that were graded. The printed paths map to
 `./logs/` on your host:

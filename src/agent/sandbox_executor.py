@@ -245,14 +245,14 @@ def open_regular_file(
 ) -> BinaryIO:
     """Open a sandbox output file of at most ``max_bytes`` without blocking.
 
+    Callers must keep the parent path evaluator-controlled; resolving it allows
+    trusted aliases such as a platform's symlinked temporary directory.
     ``single_link`` also rejects hard-linked files. Use it only where the agent
     cannot create links itself; on agent-written output it would let one extra
     link block every read.
     """
     parent_path = os.path.realpath(os.path.dirname(path) or ".")
-    parent_fd = os.open(
-        parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    )
+    parent_fd = os.open(parent_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fd = os.open(
             os.path.basename(path),
