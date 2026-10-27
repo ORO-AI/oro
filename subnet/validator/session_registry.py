@@ -222,6 +222,13 @@ class _SessionState:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
+def _task_max_steps(task: dict[str, Any], pack_max: int) -> int:
+    """The task's own step limit: its params' ``max_steps`` (packs with per-task step budgets state it there, the
+    same limit the request states and the pack meters), else the pack-wide ceiling (older packs)."""
+    value = (task.get("params") or {}).get("max_steps")
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= pack_max else pack_max
+
+
 class SessionRegistry:
     """Fresh, bound, idempotent sessions over one verified pack.
 
@@ -292,7 +299,7 @@ class SessionRegistry:
                 "query": session.request_text,
                 "opening": copy.deepcopy(session.opening),
                 "tools": [{"type": "function", "function": tool} for tool in session.tools()],
-                "max_steps": self.pack.limits["max_steps"],
+                "max_steps": _task_max_steps(session.task, self.pack.limits["max_steps"]),
                 "finished": session.finished,
             },
         }

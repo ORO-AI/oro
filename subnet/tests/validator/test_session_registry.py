@@ -61,6 +61,19 @@ def test_start_returns_binding_and_an_openai_tool_policy_view(registry, pack) ->
     assert set(view["tools"][0]["function"]) == {"name", "description", "parameters"}  # no handler ids
 
 
+def test_policy_view_max_steps_is_the_tasks_own_limit_where_the_pack_states_one(tmp_path, clients) -> None:
+    """A pack with per-task step budgets states each task's limit in its params (``max_steps``); policy_view serves
+    that, not the pack-wide ceiling. A task without one, or a value outside 1..ceiling, gets the ceiling, as older
+    packs do."""
+    tasks = {"t1": {"greeting": "hello", "max_steps": 3}, "t2": {"greeting": "hi there"}}
+    pack = load_world_pack(tmp_path, max_steps=6, tasks=tasks)
+    with SessionRegistry(pack, episode_nonces=NONCES, model_client=clients[0], search_client=clients[1]) as reg:
+        assert reg.start("t1")["policy_view"]["max_steps"] == 3
+        assert reg.start("t2")["policy_view"]["max_steps"] == 6
+    for bad in (0, 7, True, "3"):
+        assert session_registry._task_max_steps({"params": {"max_steps": bad}}, 6) == 6
+
+
 def test_start_rejects_unknown_tasks_missing_nonces_and_duplicate_sessions(pack, clients) -> None:
     with SessionRegistry(pack, episode_nonces={"t1": "n"}, model_client=clients[0], search_client=clients[1]) as reg:
         with pytest.raises(KeyError):

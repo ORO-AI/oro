@@ -31,8 +31,9 @@ graded](https://docs.oroagents.com/docs/oro-bench#how-a-task-is-graded) and
 Your agent file defines a synchronous callable `agent_main(problem_data)`.
 Each task's `problem_data["environment"]` holds an opaque `binding` and the
 `policy_view`: the shopper's request (`query`), an optional `opening`
-observation, the world's `tools` in OpenAI function format, `max_steps` and
-`finished`. Send each tool call to `/environment/call`:
+observation, the world's `tools` in OpenAI function format, `max_steps` (this
+task's own step limit, also stated in the request) and `finished`. Send each tool
+call to `/environment/call`:
 
 ```json
 {"session_id": "copied from binding", "step": 1, "action": {"name": "a_tool", "args": {}}}

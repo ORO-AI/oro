@@ -119,6 +119,7 @@ def build_world_pack(
     max_steps: int = 6,
     private_key: Ed25519PrivateKey = PRIVATE_KEY,
     key_id: str = KEY_ID,
+    tasks: dict | None = None,
 ) -> Path:
     """Write the test world's signed pack at ``dest/pack``, signed with the public runtime's ``signed_bytes``
     (as ``validator.environment_preflight.build_preflight_pack`` does), and return that directory."""
@@ -132,7 +133,7 @@ def build_world_pack(
             {"archive": "world/index/title.archive", "settings": SEARCH_SETTINGS}
         ).encode(),
     }
-    for kind, docs, key in (("tasks", TASKS, "params"), ("answers", ANSWERS, "answer")):
+    for kind, docs, key in (("tasks", tasks or TASKS, "params"), ("answers", ANSWERS, "answer")):
         for task_id, body in docs.items():
             doc = {"task_id": task_id, key: body, "sha256": canonical.digest(body)}
             if kind == "tasks":
