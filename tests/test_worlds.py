@@ -7,6 +7,7 @@ import io
 import os
 import sys
 import tarfile
+import time
 import types
 from types import SimpleNamespace
 
@@ -258,6 +259,23 @@ def test_stale_temp_files_are_swept(store):
     wid, body = world()
     store.install(wid, {}, io.BytesIO(body))
     assert {p.name for p in store.root.iterdir()} == {wid, fresh.name}
+
+
+def test_cache_hit_refreshes_on_disk_mtime(store):
+    # _prune() orders worlds by on-disk mtime; a world that stays in
+    # store.open (hit via get() every time, never cold-reopened) must still
+    # look "recently used" to that sweep, or it gets evicted and deleted
+    # out from under active traffic while genuinely colder worlds survive.
+    wid, body = world()
+    store.install(wid, {}, io.BytesIO(body))
+    on_disk = store.root / wid
+    stale = time.time() - 1000
+    os.utime(on_disk, (stale, stale))
+
+    assert wid in store.open  # still a cache hit, not a cold reopen
+    store.get(wid)
+
+    assert os.stat(on_disk).st_mtime > stale
 
 
 def test_lru_open_and_on_disk(store):

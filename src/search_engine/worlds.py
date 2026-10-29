@@ -121,6 +121,15 @@ class Worlds:
         with self.lock:
             if world_id in self.open:
                 self.open.move_to_end(world_id)
+                # _prune() orders worlds by on-disk mtime, but _open() is the
+                # only other place that bumps it. A world that stays open
+                # (hit here every time, never evicted from the in-memory
+                # LRU) would otherwise keep the mtime from its last cold
+                # open indefinitely, so _prune() can see it as the least
+                # recently used and delete it -- a currently-open,
+                # currently-serving world -- while unrelated, truly colder
+                # worlds on disk survive.
+                os.utime(self.root / world_id, ns=(time.time_ns(),) * 2)
                 return self.open[world_id]
             if (
                 not _SHA256.fullmatch(world_id)
