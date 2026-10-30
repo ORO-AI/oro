@@ -277,29 +277,6 @@ def episode_artifact_sha256(body: bytes) -> str:
     return hashlib.sha256(body).hexdigest()
 
 
-def load_episode_artifact(
-    body: bytes, *, expected_sha256: str | None = None
-) -> dict[str, Any]:
-    """Load a standalone artifact and verify its content address when supplied."""
-
-    actual_sha256 = episode_artifact_sha256(body)
-    if expected_sha256 is not None and actual_sha256 != expected_sha256:
-        raise EpisodeEmitError(
-            f"episode artifact sha256 mismatch: expected {expected_sha256}, got {actual_sha256}"
-        )
-    try:
-        artifact = json.loads(body)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise EpisodeEmitError("episode artifact is not valid JSON") from exc
-    if not isinstance(artifact, dict):
-        raise EpisodeEmitError("episode artifact must be a JSON object")
-    if artifact.get("schema_version") != EPISODE_ARTIFACT_SCHEMA_VERSION:
-        raise EpisodeEmitError("unsupported episode artifact schema_version")
-    if not isinstance(artifact.get("episode"), dict):
-        raise EpisodeEmitError("episode artifact is missing episode result")
-    return artifact
-
-
 # ---------------------------------------------------------------------------
 # Terminal record -> EpisodeResultEntry payload
 # ---------------------------------------------------------------------------
@@ -587,7 +564,6 @@ __all__ = [
     "episode_artifact",
     "episode_artifact_sha256",
     "episode_payload",
-    "load_episode_artifact",
     "load_inference_transcripts",
     "regrade",
     "replay_matches",
