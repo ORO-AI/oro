@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import os
+import shutil
 import sys
 import tarfile
 import time
@@ -276,6 +277,19 @@ def test_cache_hit_refreshes_on_disk_mtime(store):
     store.get(wid)
 
     assert os.stat(on_disk).st_mtime > stale
+
+
+def test_cache_hit_survives_world_pruned_by_another_process(store):
+    # Worker processes share the root, each with its own open searchers.
+    # If another process's _prune() already removed this world's directory,
+    # a cache hit here must keep serving the still-open searcher, not fail
+    # trying to refresh the mtime of a directory that no longer exists.
+    wid, body = world()
+    store.install(wid, {}, io.BytesIO(body))
+    shutil.rmtree(store.root / wid)
+
+    assert store.get(wid).searcher.closed is False
+    assert worlds.search(store.get(wid), "red", {})["hits"]
 
 
 def test_lru_open_and_on_disk(store):

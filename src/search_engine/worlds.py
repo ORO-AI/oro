@@ -128,8 +128,12 @@ class Worlds:
                 # open indefinitely, so _prune() can see it as the least
                 # recently used and delete it -- a currently-open,
                 # currently-serving world -- while unrelated, truly colder
-                # worlds on disk survive.
-                os.utime(self.root / world_id, ns=(time.time_ns(),) * 2)
+                # worlds on disk survive. The root is shared by worker
+                # processes, so another one's _prune() may already have
+                # removed the directory; the searcher here is still open
+                # and serves fine, so that is not an error.
+                with suppress(FileNotFoundError):
+                    os.utime(self.root / world_id, ns=(time.time_ns(),) * 2)
                 return self.open[world_id]
             if (
                 not _SHA256.fullmatch(world_id)
