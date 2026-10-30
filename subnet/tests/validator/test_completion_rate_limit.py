@@ -1,4 +1,4 @@
-"""Rate-limited terminal reports must enter the durable retry queue."""
+"""Terminal reports: rate limits enter the durable retry queue, rejections fail the run."""
 
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -40,3 +40,40 @@ def test_rate_limited_terminal_report_is_queued_and_retried(tmp_path, failed):
         assert backend.complete_run.call_args.kwargs["failure_reason"] == "Test execution failure"
     else:
         assert backend.complete_run.call_args.kwargs["score"] == 0.75
+
+
+def test_rejected_success_report_fails_the_run():
+    backend = MagicMock(spec=BackendClient)
+    rejection = BackendError("complete_run: episode set is incomplete", status_code=400)
+    backend.complete_run.side_effect = [rejection, MagicMock()]
+    validator = Validator.__new__(Validator)
+    validator.backend_client = backend
+    run_id = uuid4()
+
+    validator._complete_run(run_id, TerminalStatus.SUCCESS, 0.75)
+
+    report = backend.complete_run.call_args.kwargs
+    assert report["eval_run_id"] == run_id
+    assert report["status"] == TerminalStatus.FAILED
+    assert report["failure_reason"] == "Completion rejected by Backend (HTTP 400)"
+
+
+def test_failure_report_drops_unsendable_sandbox_metadata():
+    backend = MagicMock(spec=BackendClient)
+    unsendable = ValueError("Out of range float values are not JSON compliant")
+    backend.complete_run.side_effect = [unsendable, MagicMock()]
+    validator = Validator.__new__(Validator)
+    validator.backend_client = backend
+    run_id = uuid4()
+
+    validator._complete_with_failure(
+        run_id,
+        TerminalStatus.FAILED,
+        "metadata overflow",
+        sandbox_metadata={"cost": float("inf")},
+    )
+
+    report = backend.complete_run.call_args.kwargs
+    assert report["eval_run_id"] == run_id
+    assert report["failure_reason"] == "metadata overflow"
+    assert report["sandbox_metadata"] is None
