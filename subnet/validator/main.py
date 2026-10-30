@@ -1492,15 +1492,17 @@ class Validator:
                 )
             else:
                 logging.error(f"Non-transient error completing run {eval_run_id}: {e}")
-                # Report the run failed so it ends now; abandoned, it would only
-                # go stale when its lease expires and be re-queued. The reason is
-                # public, so it carries the status, not Backend's detail.
-                self._complete_with_failure(
-                    eval_run_id,
-                    TerminalStatus.FAILED,
-                    f"Completion rejected by Backend (HTTP {e.status_code})",
-                    sandbox_metadata=sandbox_metadata,
-                )
+                # A refused report would leave the run to expire and be re-queued,
+                # so report it failed. The reason is public, so it carries the
+                # status, not Backend's detail. (No status: the response did not
+                # parse, so the completion may have landed.)
+                if e.status_code is not None:
+                    self._complete_with_failure(
+                        eval_run_id,
+                        TerminalStatus.FAILED,
+                        f"Completion rejected by Backend (HTTP {e.status_code})",
+                        sandbox_metadata=sandbox_metadata,
+                    )
 
     @staticmethod
     def _validation_model_for(provider: str) -> str:

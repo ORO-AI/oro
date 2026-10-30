@@ -77,3 +77,16 @@ def test_failure_report_drops_unsendable_sandbox_metadata():
     assert report["eval_run_id"] == run_id
     assert report["failure_reason"] == "metadata overflow"
     assert report["sandbox_metadata"] is None
+
+
+def test_unparsed_completion_response_is_not_reported_failed():
+    backend = MagicMock(spec=BackendClient)
+    backend.complete_run.side_effect = BackendError(
+        "complete_run: SDK response parsing failed", sdk_error=KeyError("loc")
+    )
+    validator = Validator.__new__(Validator)
+    validator.backend_client = backend
+
+    validator._complete_run(uuid4(), TerminalStatus.SUCCESS, 0.75)
+
+    backend.complete_run.assert_called_once()
