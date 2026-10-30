@@ -198,6 +198,34 @@ def test_transcript_loader_ignores_malformed_and_duplicate_output(tmp_path, capl
     assert "duplicate sandbox output" in caplog.text
 
 
+def test_transcript_loader_drops_only_the_lines_it_cannot_serialize(tmp_path):
+    lines = [
+        '{"problem_id": "non-finite", "dialogue": [{"was": Infinity, "gap": NaN}]}',
+        '{"problem_id": "long-int", "n": %s}' % ("9" * 5000),
+        '{"problem_id": "deep", "dialogue": %s}' % ("[" * 600 + "]" * 600),
+        '{"problem_id": "deeper", "dialogue": %s}' % ("[" * 5000 + "]" * 5000),
+        json.dumps(
+            {
+                "problem_id": "mixed-timestamps",
+                "_shadow_proxy_calls": [
+                    {"path": "/inference/a", "timestamp": "late"},
+                    {"path": "/inference/b", "timestamp": 1},
+                ],
+            }
+        ),
+        '{"problem_id": "ok"}',
+    ]
+    output = tmp_path / "output.jsonl"
+    output.write_bytes("\n".join(lines).encode() + b"\n\xff\n")
+
+    transcripts = load_inference_transcripts(output)
+
+    assert set(transcripts) == {"non-finite", "ok"}
+    dialogue = transcripts["non-finite"]["agent_output"]["dialogue"]
+    assert dialogue == [{"was": None, "gap": None}]
+    serialize_episode_artifact({"inference_transcript": transcripts["non-finite"]})
+
+
 
 
 # ---------------------------------------------------------------------------

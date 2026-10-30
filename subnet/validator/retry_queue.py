@@ -140,6 +140,20 @@ class LocalRetryQueue:
                     f"for completion {entry['eval_run_id']}: {e}"
                 )
                 raise _TransientRetry()
+            elif (
+                entry["terminal_status"] == TerminalStatus.SUCCESS.value
+                and e.status_code is not None
+            ):
+                # As in Validator._complete_run: end the run rather than let it expire.
+                logging.error(
+                    f"Completion {entry['eval_run_id']} rejected, reporting failure: {e}"
+                )
+                entry.update(
+                    terminal_status=TerminalStatus.FAILED.value,
+                    validator_score=None,
+                    failure_reason=f"Completion rejected by Backend (HTTP {e.status_code})",
+                )
+                self._process_completion(entry)
             else:
                 logging.error(
                     f"Non-retryable error for completion {entry['eval_run_id']}, dropping: {e}"
