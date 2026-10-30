@@ -26,7 +26,6 @@ from validator.environment_preflight import (
 from validator.episode_emitter import (
     EpisodeEmitError,
     ReplayMismatch,
-    build_episode_artifact,
     emit_finalized_results,
     episode_artifact,
     episode_artifact_sha256,
