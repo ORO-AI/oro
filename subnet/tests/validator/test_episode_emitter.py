@@ -24,6 +24,7 @@ from validator.environment_preflight import (
     build_preflight_pack,
 )
 from validator.episode_emitter import (
+    EPISODE_ARTIFACT_SCHEMA_VERSION,
     EpisodeEmitError,
     ReplayMismatch,
     build_episode_artifact,
@@ -31,7 +32,6 @@ from validator.episode_emitter import (
     episode_artifact,
     episode_artifact_sha256,
     episode_payload,
-    load_episode_artifact,
     load_inference_transcripts,
     regrade,
     replay_matches,
@@ -90,22 +90,21 @@ def _record(world, task_id: str = "positive") -> dict[str, Any]:
     return copy.deepcopy(world[1][task_id])
 
 
-def test_episode_artifact_is_content_addressed_and_round_trips(world):
+def test_build_episode_artifact_preserves_episode_fields_and_omits_transcript(world):
     record = _record(world)
     artifact = build_episode_artifact(
         record, eval_run_id=_EVAL_RUN_ID, family="preflight", env_pack_sha256=_PACK_SHA
     )
-    body = serialize_episode_artifact(artifact)
-    digest = episode_artifact_sha256(body)
 
-    assert load_episode_artifact(body, expected_sha256=digest) == artifact
+    assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
     assert artifact["episode"]["ledger"] == record["ledger"]
     assert artifact["episode"]["verdict"] == record["verdict"]
     assert artifact["episode"]["call_trace"] == record["call_trace"]
     assert artifact["episode"]["evaluation_run_id"] == _EVAL_RUN_ID
+    assert artifact["episode"]["task_id"] == record["task_id"]
+    assert artifact["episode"]["family"] == "preflight"
+    assert artifact["episode"]["pack_sha256"] == _PACK_SHA
     assert "inference_transcript" not in artifact
-    with pytest.raises(EpisodeEmitError, match="sha256 mismatch"):
-        load_episode_artifact(body, expected_sha256="0" * 64)
 
 
 def test_episode_artifact_requires_ledger_verdict_and_trace(world):
@@ -452,10 +451,9 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     assert len(set(presign_nonces)) == 2
     sleep.assert_awaited_once_with(1)
     assert uploaded is not None and presign_request is not None
-    artifact = load_episode_artifact(
-        uploaded,
-        expected_sha256=presign_request["artifact_sha256"],
-    )
+    assert episode_artifact_sha256(uploaded) == presign_request["artifact_sha256"]
+    artifact = json.loads(uploaded)
+    assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
     assert artifact["episode"]["ledger"] == record["ledger"]
     assert artifact["inference_transcript"] == transcript
     assert presign_request["eval_run_id"] == _EVAL_RUN_ID
