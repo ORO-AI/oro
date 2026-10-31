@@ -19,6 +19,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -147,6 +148,9 @@ def _sanitize_transcript_value(
             if secret:
                 sanitized = sanitized.replace(secret, "[REDACTED]")
         return sanitized
+    if isinstance(value, float) and not math.isfinite(value):
+        # JSON has no Infinity or NaN, so the artifact could not be serialized.
+        return None
     return value
 
 
@@ -181,14 +185,16 @@ def load_inference_transcripts(
     path = Path(output_file)
     transcripts: dict[str, dict[str, Any]] = {}
     for line_number, line in enumerate(
-        read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES).decode("utf-8").splitlines(),
+        read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES)
+        .decode("utf-8", errors="replace")
+        .splitlines(),
         start=1,
     ):
         if not line.strip():
             continue
         try:
             envelope = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # also over-long integers, deep nesting
             logger.warning("Ignoring malformed sandbox output line %d", line_number)
             continue
         session_id = envelope.get("problem_id") if isinstance(envelope, dict) else None
@@ -201,16 +207,22 @@ def load_inference_transcripts(
             logger.warning("Ignoring duplicate sandbox output line %d", line_number)
             continue
 
-        transcripts[session_id] = _sanitize_transcript_value(
-            {
-                "schema_version": INFERENCE_TRANSCRIPT_SCHEMA_VERSION,
-                "session_id": session_id,
-                "final_status": envelope.get("status"),
-                "agent_output": _transcript_agent_output(envelope),
-                "calls": _inference_calls(envelope),
-            },
-            secret_values=secret_values,
-        )
+        # The sandbox writes this file, so one bad line must not cost every episode.
+        try:
+            transcripts[session_id] = _sanitize_transcript_value(
+                {
+                    "schema_version": INFERENCE_TRANSCRIPT_SCHEMA_VERSION,
+                    "session_id": session_id,
+                    "final_status": envelope.get("status"),
+                    "agent_output": _transcript_agent_output(envelope),
+                    "calls": _inference_calls(envelope),
+                },
+                secret_values=secret_values,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring sandbox output line %d: %s", line_number, type(exc).__name__
+            )
     return transcripts
 
 

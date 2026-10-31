@@ -16,7 +16,6 @@ from typing import Any, Callable, Optional
 from uuid import UUID
 
 import httpx
-import requests
 from bittensor_wallet import Wallet
 from oro_sdk import BittensorAuthClient, Client, is_transient_status
 from oro_sdk.api.public import get_top_agent
@@ -26,7 +25,6 @@ from oro_sdk.api.validator import (
     get_run_problems,
     get_weight_salt,
     heartbeat,
-    presign_upload,
     update_progress,
 )
 from oro_sdk.models.epoch_standings import EpochStandings
@@ -41,8 +39,6 @@ from oro_sdk.models.not_run_owner_error import NotRunOwnerError
 from oro_sdk.models.run_already_complete_error import RunAlreadyCompleteError
 from oro_sdk.models.heartbeat_request import HeartbeatRequest as SdkHeartbeatRequest
 from oro_sdk.models.heartbeat_response import HeartbeatResponse
-from oro_sdk.models.presign_upload_request import PresignUploadRequest
-from oro_sdk.models.presign_upload_response import PresignUploadResponse
 from oro_sdk.models.problem_progress_update import ProblemProgressUpdate
 from oro_sdk.models.progress_update_request import ProgressUpdateRequest
 from oro_sdk.models.terminal_status import TerminalStatus
@@ -165,12 +161,6 @@ class BackendError(Exception):
     def __str__(self) -> str:
         return self.message
 
-
-# Long-lived Session used by ``upload_to_s3`` so the validator's per-eval
-# upload burst reuses TCP+TLS connections instead of opening a fresh socket
-# per problem. Default urllib3 pool size (10) is enough to keep the
-# parallel uploader in _upload_logs cache-warm.
-_S3_SESSION = requests.Session()
 
 @dataclass(frozen=True)
 class WeightSalt:
@@ -459,41 +449,6 @@ class BackendClient:
             body=request_body,
         )
 
-    def get_presigned_upload_url(
-        self,
-        content_length: int,
-        eval_run_id: UUID,
-        problem_id: UUID,
-        content_type: str = "application/gzip",
-    ) -> PresignUploadResponse:
-        """Get presigned URL for log upload.
-
-        Args:
-            content_length: Size of the content in bytes.
-            eval_run_id: Evaluation run ID.
-            problem_id: Optional problem ID. Uses nil UUID if not provided.
-            content_type: MIME type (default: "application/gzip").
-
-        Returns:
-            PresignUploadResponse with upload URL and S3 key.
-
-        Raises:
-            BackendError: If the request fails.
-        """
-        request_body = PresignUploadRequest(
-            content_length=content_length,
-            eval_run_id=eval_run_id,
-            problem_id=problem_id,
-            content_type=content_type,
-        )
-
-        return self._call_api(
-            presign_upload.sync_detailed,
-            "get_presigned_upload_url",
-            client=self._auth_client,
-            body=request_body,
-        )
-
     def complete_run(
         self,
         eval_run_id: UUID,
@@ -598,31 +553,6 @@ class BackendClient:
             epoch_standings=standings,
             eligible=eligible,
         )
-
-    def upload_to_s3(self, presign: PresignUploadResponse, data: bytes) -> None:
-        """Upload data to S3 using presigned URL.
-
-        Args:
-            presign: PresignUploadResponse from get_presigned_upload_url.
-            data: Bytes to upload.
-
-        Raises:
-            BackendError: If S3 upload fails.
-        """
-        method = presign.method if presign.method is not UNSET else "PUT"
-        headers = {"Content-Type": "application/gzip"}
-        response = _S3_SESSION.request(
-            method,
-            presign.upload_url,
-            headers=headers,
-            data=data,
-            timeout=60,
-        )
-        if response.status_code >= 400:
-            raise BackendError(
-                f"S3 upload failed: {response.status_code}",
-                status_code=response.status_code,
-            )
 
     def get_run_problems(self, eval_run_id: UUID) -> list[dict]:
         """Get problems for a specific evaluation run via SDK.
