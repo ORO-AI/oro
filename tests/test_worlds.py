@@ -280,16 +280,21 @@ def test_cache_hit_refreshes_on_disk_mtime(store):
 
 
 def test_cache_hit_survives_world_pruned_by_another_process(store):
-    # Worker processes share the root, each with its own open searchers.
-    # If another process's _prune() already removed this world's directory,
-    # a cache hit here must keep serving the still-open searcher, not fail
-    # trying to refresh the mtime of a directory that no longer exists.
-    wid, body = world()
+    # Worker processes share the root, each with its own open searchers. If
+    # another process's _prune() removes a world this one still has open, a
+    # cache hit here must keep serving the open searcher, not fail trying to
+    # refresh the mtime of a directory that no longer exists.
+    wid, body = world("a red shoe\n")
     store.install(wid, {}, io.BytesIO(body))
-    shutil.rmtree(store.root / wid)
+    assert wid in store.open
+
+    other = worlds.Worlds(store.root, FakeSearcher, capacity=2, keep=1)
+    other_id, other_body = world("b blue hat\n")
+    other.install(other_id, {}, io.BytesIO(other_body))  # keep=1 prunes wid
+    assert not (store.root / wid).exists()
 
     assert store.get(wid).searcher.closed is False
-    assert worlds.search(store.get(wid), "red", {})["hits"]
+    assert worlds.search(store.get(wid), "red", {})["hits"][0]["id"] == "a"
 
 
 def test_lru_open_and_on_disk(store):
