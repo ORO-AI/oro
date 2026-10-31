@@ -24,8 +24,10 @@ from validator.environment_preflight import (
     build_preflight_pack,
 )
 from validator.episode_emitter import (
+    EPISODE_ARTIFACT_SCHEMA_VERSION,
     EpisodeEmitError,
     ReplayMismatch,
+    build_episode_artifact,
     emit_finalized_results,
     episode_artifact,
     episode_artifact_sha256,
@@ -86,6 +88,23 @@ def world(tmp_path_factory: pytest.TempPathFactory):
 
 def _record(world, task_id: str = "positive") -> dict[str, Any]:
     return copy.deepcopy(world[1][task_id])
+
+
+def test_build_episode_artifact_preserves_episode_fields_and_omits_transcript(world):
+    record = _record(world)
+    artifact = build_episode_artifact(
+        record, eval_run_id=_EVAL_RUN_ID, family="preflight", env_pack_sha256=_PACK_SHA
+    )
+
+    assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
+    assert artifact["episode"]["ledger"] == record["ledger"]
+    assert artifact["episode"]["verdict"] == record["verdict"]
+    assert artifact["episode"]["call_trace"] == record["call_trace"]
+    assert artifact["episode"]["evaluation_run_id"] == _EVAL_RUN_ID
+    assert artifact["episode"]["task_id"] == record["task_id"]
+    assert artifact["episode"]["family"] == "preflight"
+    assert artifact["episode"]["pack_sha256"] == _PACK_SHA
+    assert "inference_transcript" not in artifact
 
 
 def test_episode_artifact_requires_ledger_verdict_and_trace(world):
@@ -434,6 +453,7 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     assert uploaded is not None and presign_request is not None
     assert episode_artifact_sha256(uploaded) == presign_request["artifact_sha256"]
     artifact = json.loads(uploaded)
+    assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
     assert artifact["episode"]["ledger"] == record["ledger"]
     assert artifact["inference_transcript"] == transcript
     assert presign_request["eval_run_id"] == _EVAL_RUN_ID
