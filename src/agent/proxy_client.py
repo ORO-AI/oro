@@ -646,8 +646,20 @@ class ProxyClient:
         if result is None:
             self.inference_stats.record_failure(requested_model=requested_model)
             return
-        usage = result.get("usage") if isinstance(result, dict) else None
-        result_model = result.get("model") if isinstance(result, dict) else None
+        body = result if isinstance(result, dict) else {}
+        usage, choices = body.get("usage"), body.get("choices")
+        # A provider refusal or error before any output comes back without
+        # usage and is not billed.
+        unbilled = "error" in body or (
+            bool(choices)
+            and all(
+                isinstance(choice, dict) and choice.get("finish_reason") in ("content_filter", "error")
+                for choice in choices
+            )
+        )
+        if usage is None and unbilled:
+            usage = {"cost": 0.0}
+        result_model = body.get("model")
         self.inference_stats.record_success(
             usage,
             requested_model=requested_model,

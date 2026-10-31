@@ -387,3 +387,30 @@ def test_async_post_retains_stack_local_error_contract(kind, tmp_path, monkeypat
     assert result.error['status'] == {'upstream': 503, 'malformed': 200, 'network': None}[kind]
     assert _read_jsonl(tmp_path / 'stats.jsonl')[-1]['inference_failed'] == 1
 
+
+
+@pytest.mark.parametrize(
+    ("body", "cost_missing"),
+    [
+        ({"choices": [{"finish_reason": "content_filter", "native_finish_reason": "refusal"}]}, 0),
+        ({"choices": [{"finish_reason": "error"}]}, 0),
+        ({"error": {"code": 502, "message": "Provider unavailable"}}, 0),
+        ({"choices": [{"finish_reason": "stop"}]}, 1),
+        ({"choices": []}, 1),
+    ],
+)
+def test_unbilled_terminal_response_without_usage_costs_zero(tmp_path, body, cost_missing):
+    stats_path = tmp_path / "stats.jsonl"
+    client = ProxyClient(proxy_url="http://proxy:80", inference_stats_file=str(stats_path))
+
+    with patch(
+        "src.agent.proxy_client.requests.post",
+        return_value=_ok_response({"model": "served-model", **body}),
+    ):
+        client.post("/inference/chat/completions", json_data={"model": "requested-model"})
+
+    stats = _read_jsonl(stats_path)[-1]
+    assert stats["inference_success"] == 1
+    assert stats["inference_cost_usd"] == 0.0
+    assert stats["inference_cost_missing"] == cost_missing
+    assert stats["served_models"]["served-model"]["cost_missing"] == cost_missing
