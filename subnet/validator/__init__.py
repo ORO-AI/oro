@@ -10,7 +10,6 @@ Modules:
     main: Validator class (main entry point)
     backend_client: BackendClient and BackendError
     heartbeat_manager: HeartbeatManager for lease maintenance
-    progress_reporter: ProgressReporter for per-problem updates
     retry_queue: LocalRetryQueue for failed completions
     weight_setter: WeightSetterThread for on-chain weights
     backoff: ExponentialBackoff utility
