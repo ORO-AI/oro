@@ -648,16 +648,20 @@ class ProxyClient:
             return
         body = result if isinstance(result, dict) else {}
         usage, choices = body.get("usage"), body.get("choices")
-        # A provider refusal or error before any output comes back without
-        # usage and is not billed.
-        unbilled = "error" in body or (
-            bool(choices)
-            and all(
-                isinstance(choice, dict) and choice.get("finish_reason") in ("content_filter", "error")
-                for choice in choices
+        if usage is None and (
+            "error" in body
+            or (
+                isinstance(choices, list)
+                and choices
+                and all(
+                    isinstance(choice, dict)
+                    and choice.get("finish_reason") in ("content_filter", "error")
+                    for choice in choices
+                )
             )
-        )
-        if usage is None and unbilled:
+        ):
+            # A provider refusal or error before any output comes back without
+            # usage and is not billed.
             usage = {"cost": 0.0}
         result_model = body.get("model")
         self.inference_stats.record_success(

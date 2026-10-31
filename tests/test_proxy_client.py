@@ -390,16 +390,22 @@ def test_async_post_retains_stack_local_error_contract(kind, tmp_path, monkeypat
 
 
 @pytest.mark.parametrize(
-    ("body", "cost_missing"),
+    ("body", "cost", "cost_missing"),
     [
-        ({"choices": [{"finish_reason": "content_filter", "native_finish_reason": "refusal"}]}, 0),
-        ({"choices": [{"finish_reason": "error"}]}, 0),
-        ({"error": {"code": 502, "message": "Provider unavailable"}}, 0),
-        ({"choices": [{"finish_reason": "stop"}]}, 1),
-        ({"choices": []}, 1),
+        ({"choices": [{"finish_reason": "content_filter", "native_finish_reason": "refusal"}]}, 0.0, 0),
+        ({"choices": [{"finish_reason": "error"}]}, 0.0, 0),
+        ({"error": {"code": 502, "message": "Provider unavailable"}}, 0.0, 0),
+        # A reported charge is kept, even on a refusal or error.
+        ({"choices": [{"finish_reason": "content_filter"}], "usage": {"cost": 0.25}}, 0.25, 0),
+        ({"error": {"code": 502}, "usage": {"cost": 0.25}}, 0.25, 0),
+        # Anything else without usage is still an unknown cost.
+        ({"choices": [{"finish_reason": "content_filter"}, {"finish_reason": "stop"}]}, 0.0, 1),
+        ({"choices": [{"finish_reason": "stop"}]}, 0.0, 1),
+        ({"choices": []}, 0.0, 1),
+        ({"choices": True}, 0.0, 1),
     ],
 )
-def test_unbilled_terminal_response_without_usage_costs_zero(tmp_path, body, cost_missing):
+def test_unbilled_terminal_response_without_usage_costs_zero(tmp_path, body, cost, cost_missing):
     stats_path = tmp_path / "stats.jsonl"
     client = ProxyClient(proxy_url="http://proxy:80", inference_stats_file=str(stats_path))
 
@@ -411,6 +417,6 @@ def test_unbilled_terminal_response_without_usage_costs_zero(tmp_path, body, cos
 
     stats = _read_jsonl(stats_path)[-1]
     assert stats["inference_success"] == 1
-    assert stats["inference_cost_usd"] == 0.0
+    assert stats["inference_cost_usd"] == cost
     assert stats["inference_cost_missing"] == cost_missing
     assert stats["served_models"]["served-model"]["cost_missing"] == cost_missing
