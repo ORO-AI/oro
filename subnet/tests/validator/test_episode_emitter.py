@@ -178,6 +178,68 @@ def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path)
     assert "_shadow_inference_usage" not in transcript["agent_output"]
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "apikey",
+        "APIKey",
+        "IDToken",
+        "id_token",
+        "private_key",
+        "privateKey",
+        "secret_key",
+        "aws_secret_access_key",
+    ],
+)
+def test_inference_transcript_excludes_more_secret_key_spellings(tmp_path, key):
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 1,
+        "json_data": {"model": "m", key: "secret-value"},
+        "response": {"url": f"https://example.test/v1?q=boots&{key}=secret-value"},
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {"problem_id": "sess-1", "status": "SUCCESS", "_shadow_proxy_calls": [call]}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recorded = load_inference_transcripts(output)["sess-1"]["calls"][0]
+
+    assert recorded["json_data"] == {"model": "m"}
+    assert recorded["response"]["url"] == (
+        f"https://example.test/v1?q=boots&{key}=[REDACTED]"
+    )
+
+
+@pytest.mark.parametrize(
+    "key", ["max_tokens", "prompt_tokens", "eos_token", "page_token", "access_key_id"]
+)
+def test_inference_transcript_keeps_non_secret_key_names(tmp_path, key):
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 1,
+        "json_data": {key: "kept"},
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {"problem_id": "sess-1", "status": "SUCCESS", "_shadow_proxy_calls": [call]}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recorded = load_inference_transcripts(output)["sess-1"]["calls"][0]
+
+    assert recorded["json_data"] == {key: "kept"}
+
+
 def test_transcript_loader_ignores_malformed_and_duplicate_output(tmp_path, caplog):
     output = tmp_path / "output.jsonl"
     output.write_text(
