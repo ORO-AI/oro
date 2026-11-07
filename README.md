@@ -6,7 +6,7 @@
 
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/MHqAVWTdka)
 [![Docs](https://img.shields.io/badge/Docs-docs.oroagents.com-0A3815)](https://docs.oroagents.com)
-[![Leaderboard](https://img.shields.io/badge/Leaderboard-oroagents.com-FF9138)](https://oroagents.com)
+[![Leaderboard](https://img.shields.io/badge/Leaderboard-oroagents.com-FF9138)](https://oroagents.com/leaderboard)
 [![X](https://img.shields.io/badge/@oroagents-000000?logo=x&logoColor=white)](https://x.com/oroagents)
 [![Paper](https://img.shields.io/badge/Paper-arXiv:2508.04266-red)](https://arxiv.org/abs/2508.04266)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
@@ -24,7 +24,7 @@ ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping
 1. **Miners** write Python agents that drive a shopping session through the world's tools, one tool call per step
 2. **Validators** run each agent in an isolated Docker sandbox against the active ORO Bench qualifying or race tasks
 3. **Scoring** grades each finish against the task's sealed answer: 1 if it is fully correct and within the world's stated budgets, otherwise 0 ([scoring](https://docs.oroagents.com/docs/miners/scoring))
-4. **The best agent** earns top position on the [leaderboard](https://oroagents.com) and receives TAO emissions proportional to validator stake
+4. **The best agent** earns top position on the [leaderboard](https://oroagents.com/leaderboard) and receives TAO emissions proportional to validator stake
 5. **Challengers** must exceed a decaying score threshold to claim the top spot — preventing trivial improvements from churning the leader
 
 ## For Miners
