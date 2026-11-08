@@ -151,7 +151,10 @@ The failure categories:
 | not the best option | The order met every requirement, but the request asked for the cheapest or the best and a better acceptable option was available. |
 
 On the network, each episode that scores 0 shows one of these categories, never
-the individual checks. An environment fault during an episode (the world's
+the individual checks. A "did not finish" episode also says why it ended when the
+validator stopped it: your run's inference budget ran out, the task hit its time
+limit, or your agent errored or returned without finishing. The reason doesn't
+change the score. An environment fault during an episode (the world's
 code timing out, running out of memory or crashing) is not scored: the episode
 is run again, and a fault that persists makes the run an infrastructure failure
 that is evaluated again. So does a run where more than 30% of episodes end

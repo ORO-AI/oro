@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -166,6 +168,28 @@ def test_finish_all_stops_unfinished_episodes_and_seals_the_registry(registry) -
         registry.call(_call(sid, 2, "find", query="mug"))
     with pytest.raises(RuntimeError):
         registry.start("t1")
+
+
+def test_wall_seconds_runs_from_the_first_call_to_the_close(registry, monkeypatch) -> None:
+    clock = iter([100.0, 103.5, 110.0, 200.0])  # first call, its close; first call, forced stop
+    monkeypatch.setattr(session_registry, "time", SimpleNamespace(monotonic=lambda: next(clock), perf_counter=time.perf_counter))
+    done = registry.start("t1")["session_id"]
+    registry.call(_call(done, 1, "buy", id="a"))
+    stopped = registry.start("t2")["session_id"]
+    registry.call(_call(stopped, 1, "find", query="mug"))
+    registry.finish_all()
+
+    records = {r["session_id"]: r for r in registry.terminal_results()}
+    assert records[done]["wall_seconds"] == 3.5
+    assert records[stopped]["wall_seconds"] == 90.0
+
+
+def test_a_never_started_episode_lasts_zero_seconds(registry) -> None:
+    registry.start("t1")
+    registry.finish_all()
+
+    [record] = registry.terminal_results()
+    assert record["wall_seconds"] == 0.0 and record["steps"] == 0
 
 
 def test_envelope_validation(registry) -> None:
