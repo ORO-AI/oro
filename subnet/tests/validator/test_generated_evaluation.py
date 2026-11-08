@@ -570,6 +570,21 @@ def test_key_exhaustion_scores_finished_episodes(tmp_path, monkeypatch) -> None:
     assert completion.sandbox_metadata["_miner_inference_key_exhausted"] is True
 
 
+def test_emission_reports_whether_the_run_key_is_spent(tmp_path, monkeypatch) -> None:
+    records = [_record("t1", 1.0)]
+    validator, registry, _, reporter_type = _runner(tmp_path, monkeypatch, records, roster=("t1",))
+    validator._emit_episode_records = MagicMock()
+    (tmp_path / "output.jsonl").write_text(json.dumps({"problem_id": records[0]["session_id"]}) + "\n")
+    _run(validator, tmp_path)
+    emit = reporter_type.call_args.args[1]
+
+    emit(records)
+    registry.key_exhausted.set()  # e.g. by a grading call after the sandbox stopped
+    emit(records)
+
+    assert [c.args[5] for c in validator._emit_episode_records.call_args_list] == [False, True]
+
+
 def test_progress_batches_emit_with_the_claim_binding(tmp_path, monkeypatch) -> None:
     records = [_record("t1", 1.0), _record("t2")]
     validator, _, _, reporter_type = _runner(tmp_path, monkeypatch, records)
