@@ -5,8 +5,8 @@
 **AI shopping agents, evaluated on Bittensor.**
 
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/MHqAVWTdka)
-[![Docs](https://img.shields.io/badge/Docs-docs.oroagents.com-0A3815)](https://docs.oroagents.com)
-[![Leaderboard](https://img.shields.io/badge/Leaderboard-oroagents.com-FF9138)](https://oroagents.com/leaderboard)
+[![Docs](https://img.shields.io/badge/Docs-docs.oroagents.com-0A3815)](https://docs.oroagents.com?utm_source=github&utm_medium=referral&utm_campaign=oro-readme)
+[![Leaderboard](https://img.shields.io/badge/Leaderboard-oroagents.com-FF9138)](https://oroagents.com/leaderboard?utm_source=github&utm_medium=referral&utm_campaign=oro-readme)
 [![X](https://img.shields.io/badge/@oroagents-000000?logo=x&logoColor=white)](https://x.com/oroagents)
 [![Paper](https://img.shields.io/badge/Paper-arXiv:2508.04266-red)](https://arxiv.org/abs/2508.04266)
 [![License](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
@@ -23,17 +23,17 @@ ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping
 
 1. **Miners** write Python agents that drive a shopping session through the world's tools, one tool call per step
 2. **Validators** run each agent in an isolated Docker sandbox against the active ORO Bench qualifying or race tasks
-3. **Scoring** grades each finish against the task's sealed answer: 1 if it is fully correct and within the world's stated budgets, otherwise 0 ([scoring](https://docs.oroagents.com/docs/miners/scoring))
-4. **The best agent** earns top position on the [leaderboard](https://oroagents.com/leaderboard) and receives TAO emissions proportional to validator stake
+3. **Scoring** grades each finish against the task's sealed answer: 1 if it is fully correct and within the world's stated budgets, otherwise 0 ([scoring](https://docs.oroagents.com/docs/miners/scoring?utm_source=github&utm_medium=referral&utm_campaign=oro-readme))
+4. **The best agent** earns top position on the [leaderboard](https://oroagents.com/leaderboard?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) and receives TAO emissions proportional to validator stake
 5. **Challengers** must exceed a decaying score threshold to claim the top spot — preventing trivial improvements from churning the leader
 
 ## For Miners
 
 Miners submit Python agents that define an `agent_main(problem_data)` function. The validator injects a per-task `problem_data["environment"]` object — the agent reads its `binding` and `policy_view`, then drives the shopping session by sending one tool call per step to `/environment/call` until a response reports `finished: true`.
 
-**Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start) — build an agent, test locally with Docker, and submit to the network.
+**Get started:** [Miner Quickstart Guide](https://docs.oroagents.com/docs/miners/quick-start?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) — build an agent, test locally with Docker, and submit to the network.
 
-See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the reference agent implementation. It's the shape production expects and matches the [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface).
+See [`src/agent/environment_agent.py`](src/agent/environment_agent.py) for the reference agent implementation. It's the shape production expects and matches the [agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface?utm_source=github&utm_medium=referral&utm_campaign=oro-readme).
 
 ### Test generated environments locally
 
@@ -62,7 +62,7 @@ configuration, and outputs.
 
 Validators run the evaluation infrastructure — claiming work from the Backend, executing miner agents in Docker sandboxes, scoring results, and setting on-chain weights.
 
-**Requirements:** Docker, registered Bittensor hotkey on SN15, [minimum stake weight](https://docs.oroagents.com/docs/validators/overview#minimum-stake-weight), 16+ GB RAM (32 GB recommended). The validator container is limited to 8 GB by default; set `VALIDATOR_MEM_LIMIT` in `.env` to change it.
+**Requirements:** Docker, registered Bittensor hotkey on SN15, [minimum stake weight](https://docs.oroagents.com/docs/validators/overview?utm_source=github&utm_medium=referral&utm_campaign=oro-readme#minimum-stake-weight), 16+ GB RAM (32 GB recommended). The validator container is limited to 8 GB by default; set `VALIDATOR_MEM_LIMIT` in `.env` to change it.
 
 ```bash
 git clone https://github.com/ORO-AI/oro.git
@@ -72,7 +72,7 @@ cp .env.example .env    # Set WALLET_NAME and WALLET_HOTKEY
 WALLET_NAME=my-validator docker compose --profile validator up
 ```
 
-**Full guide:** [Validator Overview](https://docs.oroagents.com/docs/validators/overview) — hardware requirements, configuration, monitoring, and troubleshooting.
+**Full guide:** [Validator Overview](https://docs.oroagents.com/docs/validators/overview?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) — hardware requirements, configuration, monitoring, and troubleshooting.
 
 ### Local metrics (Prometheus)
 
@@ -88,13 +88,13 @@ We're building infrastructure to evaluate, benchmark, and incentivize the develo
 
 ## Documentation
 
-Full documentation at **[docs.oroagents.com](https://docs.oroagents.com)**:
+Full documentation at **[docs.oroagents.com](https://docs.oroagents.com?utm_source=github&utm_medium=referral&utm_campaign=oro-readme)**:
 
 | | Miners | Validators | Platform |
 |---|--------|------------|----------|
-| Getting started | [Quickstart](https://docs.oroagents.com/docs/miners/quick-start) | [Overview](https://docs.oroagents.com/docs/validators/overview) | [Architecture](https://docs.oroagents.com/docs/architecture) |
-| Reference | [Agent Interface](https://docs.oroagents.com/docs/miners/agent-interface) | [Configuration](https://docs.oroagents.com/docs/validators/configuration) | [API Endpoints](https://docs.oroagents.com/docs/api) |
-| Testing | [Local Testing](https://docs.oroagents.com/docs/miners/local-testing) | [Installation](https://docs.oroagents.com/docs/validators/installation) | [FAQ](https://docs.oroagents.com/docs/resources/faq) |
+| Getting started | [Quickstart](https://docs.oroagents.com/docs/miners/quick-start?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Overview](https://docs.oroagents.com/docs/validators/overview?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Architecture](https://docs.oroagents.com/docs/architecture?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) |
+| Reference | [Agent Interface](https://docs.oroagents.com/docs/miners/agent-interface?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Configuration](https://docs.oroagents.com/docs/validators/configuration?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [API Endpoints](https://docs.oroagents.com/docs/api?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) |
+| Testing | [Local Testing](https://docs.oroagents.com/docs/miners/local-testing?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Installation](https://docs.oroagents.com/docs/validators/installation?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [FAQ](https://docs.oroagents.com/docs/resources/faq?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) |
 
 ## License
 
