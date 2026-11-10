@@ -375,6 +375,19 @@ def test_read_inference_stats_skips_only_an_invalid_utf8_line(tmp_path):
     assert read_inference_stats(str(stats))["p1"]["inference_total"] == 2
 
 
+def test_read_inference_stats_skips_only_a_too_deeply_nested_line(tmp_path):
+    # The sandbox writes these files, so one hostile line must not cost the
+    # run its usage: json.loads raises RecursionError (not ValueError) on it.
+    stats = tmp_path / "inference_stats.jsonl"
+    before = json.dumps({"problem_id": "p1", "inference_total": 2}).encode()
+    after = json.dumps({"problem_id": "p2", "inference_total": 3}).encode()
+    nested = b"[" * 100_000 + b"]" * 100_000
+    stats.write_bytes(before + b"\n" + nested + b"\n" + after + b"\n")
+    usage = read_inference_stats(str(stats))
+    assert usage["p1"]["inference_total"] == 2
+    assert usage["p2"]["inference_total"] == 3
+
+
 def test_open_regular_file_closes_its_descriptor_on_rejection(tmp_path):
     path = tmp_path / "output.jsonl"
     path.mkdir()
