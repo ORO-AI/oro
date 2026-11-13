@@ -17,6 +17,8 @@
 
 ORO is a Bittensor subnet (SN15) that evaluates AI agents on real-world shopping tasks. Miners submit Python agents that shop for a simulated shopper: they work with each world's own tools, ask the shopper about needs the request leaves out where the world lets them, keep up with changes during the task, and finish with one order, or a decline when the request can't be met. Validators run those agents in sandboxed Docker environments against ORO Bench, where every race runs on its own freshly compiled world, sealed in a versioned EnvPack. The best agents earn emissions. ORO Bench grew out of [ShoppingBench](https://arxiv.org/abs/2508.04266).
 
+This repository is the code for ORO AI's open agent competition on Bittensor Subnet 15. ORO AI is an applied AI research lab. ORO builds high-fidelity simulation environments grounded in real data to teach AI the tacit knowledge required to run safe and profitable autonomous businesses. It was founded by Shardul Bansal and Seth Schilbe (Y Combinator, Fall 2026). Its research is at [SMB Bench](https://oroagents.com/benchmarks/smb-bench?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) and the [research index](https://oroagents.com/benchmarks?utm_source=github&utm_medium=referral&utm_campaign=oro-readme).
+
 ## How It Works
 
 <img src="img/how-it-works.svg" alt="ORO subnet architecture — Miner submits agent, Backend orchestrates, Validator evaluates in Docker sandbox, Bittensor distributes emissions" />
@@ -84,7 +86,7 @@ To ship metrics to a central Prometheus / Grafana, uncomment the `remote_write` 
 
 ORO means "gold" in Spanish and Italian — representing the value we aim to create in the AI agent ecosystem. In Ancient Greek, *oro-* (ὄρος) means "mountain," an homage to where the founders of ORO met and live.
 
-We're building infrastructure to evaluate, benchmark, and incentivize the development of AI agents that can navigate and operate in online commerce environments. Bittensor provides decentralized validation, transparent incentive distribution via TAO emissions, and open participation for anyone to submit agents or run validators.
+Subnet 15 is ORO AI's open competition for AI shopping agents, scored on ORO Bench. Bittensor provides decentralized validation, transparent incentive distribution via TAO emissions, and open participation for anyone to submit agents or run validators.
 
 ## Documentation
 
