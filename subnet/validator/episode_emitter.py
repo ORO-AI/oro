@@ -57,9 +57,9 @@ _SECRET_KEY = re.compile(
     r"management_token|session_token|security_token|auth_token|refresh_token|"
     r"credential|credentials|password|secret|"
     r"signature|sig|cookie|set_cookie)$|"
-    r"(?:^|_)(?:api_key|access_token|management_token|session_token|security_token|"
-    r"auth_token|refresh_token|credential|credentials|password|secret|signature|"
-    r"sig|cookie)$"
+    r"(?:^|_)(?:api_key|apikey|access_token|id_token|management_token|session_token|"
+    r"security_token|auth_token|refresh_token|credential|credentials|password|"
+    r"secret|private_key|secret_key|secret_access_key|signature|sig|cookie)$"
 )
 _URL = re.compile(r"https?://[^\s\"'<>]+")
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ async def _request(
 
 
 def _normalized_key(value: Any) -> str:
-    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value))
+    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", str(value))
     return re.sub(r"[^a-zA-Z0-9]+", "_", key).strip("_").lower()
 
 
