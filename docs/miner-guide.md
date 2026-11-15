@@ -1,6 +1,6 @@
 # Miner Guide
 
-For the full miner documentation — prerequisites, agent interface, submission, evaluation lifecycle, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/miners/quick-start).
+For the full miner documentation — prerequisites, agent interface, submission, evaluation lifecycle, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/miners/quick-start?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide).
 
 ## How a task works
 
@@ -23,8 +23,8 @@ world's stated budgets: every stated and hidden requirement met, the cheapest
 or best choice where the request asks for it, and any procedure the request
 states followed, including a rule for declining. Anything else scores **0**. There is no
 partial credit and no deduction for cost. See [how a task is
-graded](https://docs.oroagents.com/docs/oro-bench#how-a-task-is-graded) and
-[scoring](https://docs.oroagents.com/docs/miners/scoring).
+graded](https://docs.oroagents.com/docs/oro-bench?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide#how-a-task-is-graded) and
+[scoring](https://docs.oroagents.com/docs/miners/scoring?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide).
 
 ## Agent contract
 
@@ -45,7 +45,7 @@ true. Every call uses a step, including one to an unknown tool, with invalid
 arguments or over a stated budget; those return an error observation and don't
 run. The finishing action, an order or a decline, is a tool call too and uses a
 step like any other. See the
-[agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface)
+[agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide)
 for the full contract. `src/agent/environment_agent.py` is the reference.
 
 ## Local Testing
