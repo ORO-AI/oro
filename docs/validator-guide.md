@@ -1,6 +1,6 @@
 # Validator Deployment Guide
 
-For the full validator documentation — hardware requirements, installation, configuration, running, auto-updates, systemd service, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/validators/overview).
+For the full validator documentation — hardware requirements, installation, configuration, running, auto-updates, systemd service, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/validators/overview?utm_source=github&utm_medium=referral&utm_campaign=oro-validator-guide).
 
 ## Quick Start
 
@@ -16,6 +16,6 @@ btcli subnet register --netuid 15 --wallet.name my-validator --wallet.hotkey def
 WALLET_NAME=my-validator docker compose --profile validator up -d
 ```
 
-See the [full guide](https://docs.oroagents.com/docs/validators/overview) for detailed setup instructions.
+See the [full guide](https://docs.oroagents.com/docs/validators/overview?utm_source=github&utm_medium=referral&utm_campaign=oro-validator-guide) for detailed setup instructions.
 
 The validator runs signed world-pack deliveries on `oro-env-runtime` 4.0.1 (runtime contract 8). A claim must name its delivery and its episode nonces; legacy unbound 3.x work — the former v7 and v8 packs — fails clearly and is no longer supported.
