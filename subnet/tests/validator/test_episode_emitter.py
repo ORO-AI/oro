@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 from collections.abc import Callable
@@ -30,7 +31,6 @@ from validator.episode_emitter import (
     build_episode_artifact,
     emit_finalized_results,
     episode_artifact,
-    episode_artifact_sha256,
     episode_end_reason,
     episode_payload,
     load_inference_transcripts,
@@ -97,6 +97,7 @@ def test_build_episode_artifact_preserves_episode_fields_and_omits_transcript(wo
         record, eval_run_id=_EVAL_RUN_ID, family="preflight", env_pack_sha256=_PACK_SHA
     )
 
+    assert json.loads(serialize_episode_artifact(artifact)) == artifact
     assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
     assert artifact["episode"]["ledger"] == record["ledger"]
     assert artifact["episode"]["verdict"] == record["verdict"]
@@ -514,7 +515,7 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     assert len(set(presign_nonces)) == 2
     sleep.assert_awaited_once_with(1)
     assert uploaded is not None and presign_request is not None
-    assert episode_artifact_sha256(uploaded) == presign_request["artifact_sha256"]
+    assert hashlib.sha256(uploaded).hexdigest() == presign_request["artifact_sha256"]
     artifact = json.loads(uploaded)
     assert artifact["schema_version"] == EPISODE_ARTIFACT_SCHEMA_VERSION
     assert artifact["episode"]["ledger"] == record["ledger"]
