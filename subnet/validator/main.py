@@ -1092,6 +1092,7 @@ class Validator:
         task_families: dict[str, str],
         records: list[dict[str, Any]],
         inference_transcripts: dict[str, dict[str, Any]],
+        key_exhausted: bool,
     ) -> None:
         env_pack_sha256 = _claim_environment_binding(work)
         if env_pack_sha256 is None:
@@ -1106,6 +1107,7 @@ class Validator:
                 task_families=task_families,
                 results=records,
                 inference_transcripts=inference_transcripts,
+                key_exhausted=key_exhausted,
                 download_url_rewriter=_rewrite_localhost_url,
             )
         )
@@ -1152,7 +1154,12 @@ class Validator:
             ):
                 raise RuntimeError("inference transcript is not ready")
             self._emit_episode_records(
-                work, delivery_id, task_families, batch, transcripts
+                work,
+                delivery_id,
+                task_families,
+                batch,
+                transcripts,
+                registry.key_exhausted.is_set(),
             )
 
         reporter = GeneratedProgressReporter(registry, emit_with_transcripts)

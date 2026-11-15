@@ -30,6 +30,7 @@ from validator.episode_emitter import (
     emit_finalized_results,
     episode_artifact,
     episode_artifact_sha256,
+    episode_end_reason,
     episode_payload,
     load_episode_artifact,
     load_inference_transcripts,
@@ -389,7 +390,7 @@ async def test_submit_empty_batch_rejected():
 async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     monkeypatch: pytest.MonkeyPatch, world
 ):
-    record = _record(world)
+    record = {**_record(world), "wall_seconds": 12.346}
     uploaded: bytes | None = None
     submitted: dict[str, Any] | None = None
     presign_request: dict[str, Any] | None = None
@@ -469,8 +470,39 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
         "outcome": "completed",
         "ledger_uri": entry["ledger_uri"],
         "step_count": 2,
+        "end_reason": "finished",
+        "wall_seconds": 12.346,
         **episode_payload(record, delivery_id=_DELIVERY),
     }
+
+
+def _stopped(world) -> dict[str, Any]:
+    record = _record(world)
+    record["ledger"]["episode"][-1]["reason"] = "stopped"
+    return record
+
+
+@pytest.mark.parametrize(
+    ("status", "key_exhausted", "reason"),
+    [
+        ("TIMED_OUT", True, "timeout"),  # the per-task timer runs regardless of spend
+        ("FAILED", True, "budget_exhausted"),  # the agent's own calls fail on a spent key
+        ("SUCCESS", True, "budget_exhausted"),
+        (None, True, "budget_exhausted"),  # in flight when killed, or never started
+        ("FAILED", False, "agent_error"),
+        ("SUCCESS", False, "agent_stopped"),
+        (None, False, "sandbox_stopped"),
+    ],
+)
+def test_a_forced_stop_is_attributed_to_its_cause(world, status, key_exhausted, reason):
+    assert episode_end_reason(_stopped(world), status, key_exhausted) == reason
+
+
+def test_an_episode_the_runtime_closed_finished_whatever_the_run_did(world):
+    for status in ("TIMED_OUT", "FAILED", None):
+        assert episode_end_reason(_record(world), status, True) == "finished"
+    unscored = {**_record(world), "verdict": None, "unscored": "environment"}
+    assert episode_end_reason(unscored, None, True) == "environment_fault"
 
 
 @_run_async
