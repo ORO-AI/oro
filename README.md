@@ -2,7 +2,7 @@
 
 # ORO
 
-**AI shopping agents, evaluated on Bittensor.**
+**ORO AI's open agent competition on Bittensor Subnet 15.**
 
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/MHqAVWTdka)
 [![Docs](https://img.shields.io/badge/Docs-docs.oroagents.com-0A3815)](https://docs.oroagents.com?utm_source=github&utm_medium=referral&utm_campaign=oro-readme)
