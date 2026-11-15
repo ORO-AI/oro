@@ -57,9 +57,9 @@ _SECRET_KEY = re.compile(
     r"management_token|session_token|security_token|auth_token|refresh_token|"
     r"credential|credentials|password|secret|"
     r"signature|sig|cookie|set_cookie)$|"
-    r"(?:^|_)(?:api_key|access_token|management_token|session_token|security_token|"
-    r"auth_token|refresh_token|credential|credentials|password|secret|signature|"
-    r"sig|cookie)$"
+    r"(?:^|_)(?:api_key|apikey|access_token|id_token|management_token|session_token|"
+    r"security_token|auth_token|refresh_token|credential|credentials|password|"
+    r"secret|private_key|secret_key|secret_access_key|signature|sig|cookie)$"
 )
 _URL = re.compile(r"https?://[^\s\"'<>]+")
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ async def _request(
 
 
 def _normalized_key(value: Any) -> str:
-    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(value))
+    key = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", str(value))
     return re.sub(r"[^a-zA-Z0-9]+", "_", key).strip("_").lower()
 
 
@@ -282,6 +282,30 @@ def episode_artifact_sha256(body: bytes) -> str:
 # ---------------------------------------------------------------------------
 
 
+def episode_end_reason(
+    record: dict[str, Any], sandbox_status: str | None, key_exhausted: bool
+) -> str:
+    """Why the episode ended. Diagnostic only: nothing scores it.
+
+    The runtime closes an episode it ends itself with its own reason; the
+    validator's forced stop (``finish_all``) closes it as ``stopped``. A forced
+    stop is attributed to the sandbox's per-task result, except that a spent run
+    key explains every task the time limit didn't: the agent's own calls fail too.
+    """
+
+    if record.get("verdict") is None:
+        return "environment_fault"
+    if record["ledger"]["episode"][-1].get("reason") != "stopped":
+        return "finished"
+    if sandbox_status == "TIMED_OUT":
+        return "timeout"
+    if key_exhausted:
+        return "budget_exhausted"
+    return {"FAILED": "agent_error", "SUCCESS": "agent_stopped"}.get(
+        str(sandbox_status), "sandbox_stopped"
+    )
+
+
 def episode_payload(record: dict[str, Any], *, delivery_id: str) -> dict[str, Any]:
     """The verdict fields of an ``EpisodeResultEntry`` for one terminal record.
 
@@ -443,6 +467,7 @@ async def emit_finalized_results(
     task_families: Mapping[str, str],
     results: list[dict[str, Any]],
     inference_transcripts: dict[str, dict[str, Any]] | None = None,
+    key_exhausted: bool = False,
     download_url_rewriter: Callable[[str], str] | None = None,
     http_client: httpx.AsyncClient | None = None,
     backend_transport: httpx.AsyncBaseTransport | None = None,
@@ -487,6 +512,12 @@ async def emit_finalized_results(
                         "family": family,
                         "ledger_uri": artifact_uri,
                         "step_count": int(record.get("steps") or 0),
+                        "end_reason": episode_end_reason(
+                            record,
+                            (transcript or {}).get("final_status"),
+                            key_exhausted,
+                        ),
+                        "wall_seconds": record.get("wall_seconds", 0.0),
                         **payload,
                     }
                 )

@@ -219,6 +219,9 @@ class _SessionState:
     quarantined_reason: str | None = None
     record: dict[str, Any] | None = None
     retired: bool = False
+    # Monotonic times of the agent's first call and the episode's close: its duration.
+    first_call_at: float | None = None
+    closed_at: float | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
@@ -361,6 +364,8 @@ class SessionRegistry:
             session = state.session
             if session.finished:
                 raise InvalidSessionError("the episode has finished")
+            if state.first_call_at is None:
+                state.first_call_at = time.monotonic()
             if step != session.steps + 1:
                 raise InvalidSessionError(
                     f"step does not match session sequence: expected {session.steps + 1}, got {step}"
@@ -378,6 +383,7 @@ class SessionRegistry:
                 state.call_trace.append({"tool": action["name"], "step": session.steps, "elapsed_ms": _elapsed_ms(started)})
                 observations.append(result.observation)
                 if result.finished:
+                    state.closed_at = time.monotonic()
                     break
             response: dict[str, Any] = {"observation": observations[-1], "finished": session.finished, "step": session.steps}
             if "actions" in envelope:
@@ -395,6 +401,7 @@ class SessionRegistry:
             with state.lock:
                 if not state.session.finished and state.quarantined_reason is None:
                     state.session.finish()
+                    state.closed_at = time.monotonic()
 
     def _record(self, state: _SessionState) -> dict[str, Any]:
         """Grade a finished episode once; a quarantined one gets no verdict."""
@@ -413,6 +420,10 @@ class SessionRegistry:
                 "error": state.quarantined_reason,
                 "call_trace": state.call_trace,
                 "steps": state.session.steps,
+                # Never started: 0. Quarantined before closing: up to grading.
+                "wall_seconds": round((state.closed_at or time.monotonic()) - state.first_call_at, 3)
+                if state.first_call_at is not None
+                else 0.0,
             }
         return copy.deepcopy(state.record)
 

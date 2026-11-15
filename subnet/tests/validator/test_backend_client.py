@@ -272,36 +272,6 @@ class TestBackendClientComplete:
         assert result.agent_version_became_eligible is True
 
 
-class TestBackendClientPresign:
-    def test_get_presigned_upload_url(self, mock_wallet):
-        from oro_sdk.models.presign_upload_response import PresignUploadResponse
-
-        client = BackendClient("https://api.example.com", mock_wallet)
-
-        sdk_response = PresignUploadResponse(
-            upload_url="https://s3.example.com/presigned",
-            results_s3_key="logs/run-123.tar.gz",
-            expires_at=datetime(2025, 1, 13, 12, 15, 0),
-            method="PUT",
-        )
-
-        mock_response = _create_response(200, sdk_response)
-
-        with patch(
-            "validator.backend_client.presign_upload.sync_detailed",
-            return_value=mock_response,
-        ):
-            result = client.get_presigned_upload_url(
-                eval_run_id=UUID("12345678-1234-1234-1234-123456789012"),
-                problem_id=UUID("00000000-0000-0000-0000-000000000000"),
-                content_type="application/gzip",
-                content_length=1024,
-            )
-
-        assert result.upload_url == "https://s3.example.com/presigned"
-        assert result.results_s3_key == "logs/run-123.tar.gz"
-
-
 class TestBackendClientTopMiner:
     def test_get_top_miner(self, mock_wallet):
         from oro_sdk.models.top_agent_response import TopAgentResponse
@@ -370,47 +340,6 @@ class TestBackendClientFetchWeightSalt:
             salt = client.fetch_weight_salt()
 
         assert salt.epoch_standings is None
-
-
-class TestBackendClientUploadToS3:
-    def test_upload_to_s3_success(self, mock_wallet):
-        from oro_sdk.models import PresignUploadResponse
-
-        client = BackendClient("https://api.example.com", mock_wallet)
-        presign = PresignUploadResponse(
-            upload_url="https://s3.example.com/presigned",
-            method="PUT",
-            results_s3_key="logs/run-123.tar.gz",
-            expires_at=datetime.now(),
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-
-        with patch(
-            "validator.backend_client._S3_SESSION.request", return_value=mock_response
-        ):
-            client.upload_to_s3(presign, b"test data")  # Should not raise
-
-    def test_upload_to_s3_failure(self, mock_wallet):
-        from oro_sdk.models import PresignUploadResponse
-
-        client = BackendClient("https://api.example.com", mock_wallet)
-        presign = PresignUploadResponse(
-            upload_url="https://s3.example.com/presigned",
-            method="PUT",
-            results_s3_key="logs/run-123.tar.gz",
-            expires_at=datetime.now(),
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 403
-
-        with patch(
-            "validator.backend_client._S3_SESSION.request", return_value=mock_response
-        ):
-            with pytest.raises(BackendError):
-                client.upload_to_s3(presign, b"test data")
 
 
 class TestBackendClientErrorHandling:

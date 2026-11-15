@@ -219,7 +219,6 @@ def _episode_rows(
     run_id: str,
     loaded: Any,
     agent_identity: str | None,
-    wall_seconds: float,
 ) -> list[dict[str, Any]]:
     return [
         {
@@ -234,7 +233,6 @@ def _episode_rows(
                 "agent_version_id": agent_identity,
                 "pack_sha256": loaded.archive_sha256,
                 "world_id": loaded.pack.manifest.get("world_id"),
-                "wall_seconds": wall_seconds,
             },
         }
         for record in records
@@ -352,7 +350,6 @@ def run_local_generated_validator(
     phase = "initialization"
     runtime = SessionRuntime()
     server: SessionServer | None = None
-    started = time.monotonic()
     # Read once, before the sandbox starts, so the summary cannot disagree with
     # the episode rows if the file is edited or removed mid-run.
     agent_identity: str | None = None
@@ -506,7 +503,6 @@ def run_local_generated_validator(
                 run_id=run_id,
                 loaded=loaded,
                 agent_identity=agent_identity,
-                wall_seconds=time.monotonic() - started,
             )
             (artifact_dir / "episode_results.jsonl").write_text(
                 "".join(json.dumps(row, sort_keys=True) + "\n" for row in episodes),

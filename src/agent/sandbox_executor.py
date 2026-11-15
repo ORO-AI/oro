@@ -346,7 +346,7 @@ def read_inference_stats(
                         continue
                     try:
                         entry = json.loads(line)
-                    except ValueError:  # malformed JSON or invalid UTF-8
+                    except (ValueError, RecursionError):  # malformed JSON, invalid UTF-8, deep nesting
                         continue
                     if not isinstance(entry, dict):
                         continue

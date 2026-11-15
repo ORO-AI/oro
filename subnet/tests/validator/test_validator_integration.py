@@ -315,7 +315,6 @@ class TestValidatorIntegration:
         from oro_sdk.models.heartbeat_response import (
             HeartbeatResponse as SDKHeartbeatResponse,
         )
-        from oro_sdk.models.presign_upload_response import PresignUploadResponse
         from oro_sdk.models.complete_run_response import (
             CompleteRunResponse as SDKCompleteRunResponse,
         )
@@ -334,13 +333,6 @@ class TestValidatorIntegration:
 
         sdk_heartbeat_response = SDKHeartbeatResponse(
             lease_expires_at=datetime(2025, 1, 13, 16, 30, 0),
-        )
-
-        sdk_presign_response = PresignUploadResponse(
-            upload_url="https://s3.example.com/presigned",
-            results_s3_key="logs/run-full-test.tar.gz",
-            expires_at=datetime(2025, 1, 13, 16, 15, 0),
-            method="PUT",
         )
 
         sdk_complete_response = SDKCompleteRunResponse(
@@ -364,10 +356,6 @@ class TestValidatorIntegration:
         heartbeat_response.status_code = 200
         heartbeat_response.parsed = sdk_heartbeat_response
 
-        presign_response = MagicMock()
-        presign_response.status_code = 200
-        presign_response.parsed = sdk_presign_response
-
         complete_response = MagicMock()
         complete_response.status_code = 200
         complete_response.parsed = sdk_complete_response
@@ -380,10 +368,6 @@ class TestValidatorIntegration:
             patch(
                 "validator.backend_client.heartbeat.sync_detailed",
                 return_value=heartbeat_response,
-            ),
-            patch(
-                "validator.backend_client.presign_upload.sync_detailed",
-                return_value=presign_response,
             ),
             patch(
                 "validator.backend_client.complete_run.sync_detailed",
@@ -399,22 +383,13 @@ class TestValidatorIntegration:
             heartbeat = client.heartbeat(work.eval_run_id)
             assert heartbeat is not None
 
-            # Step 3: Get presign URL
-            presign = client.get_presigned_upload_url(
-                eval_run_id=work.eval_run_id,
-                problem_id=UUID("00000000-0000-0000-0000-000000000000"),
-                content_type="application/gzip",
-                content_length=1024,
-            )
-            assert presign.upload_url == "https://s3.example.com/presigned"
-
-            # Step 4: Complete the run
+            # Step 3: Complete the run
             complete = client.complete_run(
                 eval_run_id=work.eval_run_id,
                 status=TerminalStatus.SUCCESS,
                 score=0.88,
                 score_components={"success_rate": 0.88},
-                results_s3_key=presign.results_s3_key,
+                results_s3_key="logs/run-full-test.tar.gz",
             )
             assert complete.eval_run_id == UUID("12345678-1234-1234-1234-123456789012")
             assert complete.agent_version_became_eligible is True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -162,6 +163,20 @@ def test_practice_run_writes_the_artifacts_the_e2e_report_reads(
     })]
     assert services.urls == ["http://search.test:5632"]
     assert list(services.search.titles)
+
+
+def test_episode_rows_keep_each_episode_wall_seconds(
+    tmp_path, services, sandbox, monkeypatch
+) -> None:
+    # t1: first call at 100.0, closed at 103.5; t2: first call at 110.0, closed at 112.25.
+    clock = iter([100.0, 103.5, 110.0, 112.25])
+    monkeypatch.setattr(session_registry, "time", SimpleNamespace(
+        monotonic=lambda: next(clock), perf_counter=time.perf_counter))
+
+    art = local.run_local_generated_validator(_config(tmp_path)).artifact_dir
+
+    episodes = [json.loads(line)["episode"] for line in (art / "episode_results.jsonl").read_text().splitlines()]
+    assert {e["task_id"]: e["wall_seconds"] for e in episodes} == {"t1": 3.5, "t2": 2.25}
 
 
 def test_each_episode_gets_a_fresh_nonce(tmp_path, services, sandbox) -> None:

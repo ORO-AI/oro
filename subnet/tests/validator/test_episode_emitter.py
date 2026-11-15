@@ -31,6 +31,7 @@ from validator.episode_emitter import (
     emit_finalized_results,
     episode_artifact,
     episode_artifact_sha256,
+    episode_end_reason,
     episode_payload,
     load_inference_transcripts,
     regrade,
@@ -175,6 +176,68 @@ def test_inference_transcript_preserves_reasoning_and_excludes_secrets(tmp_path)
     assert scoped_token not in transcript["calls"][0]["json_data"]["note"]
     assert "proxy_calls" not in transcript["agent_output"]["dialogue"][0]["extra_info"]
     assert "_shadow_inference_usage" not in transcript["agent_output"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "apikey",
+        "APIKey",
+        "IDToken",
+        "id_token",
+        "private_key",
+        "privateKey",
+        "secret_key",
+        "aws_secret_access_key",
+    ],
+)
+def test_inference_transcript_excludes_more_secret_key_spellings(tmp_path, key):
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 1,
+        "json_data": {"model": "m", key: "secret-value"},
+        "response": {"url": f"https://example.test/v1?q=boots&{key}=secret-value"},
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {"problem_id": "sess-1", "status": "SUCCESS", "_shadow_proxy_calls": [call]}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recorded = load_inference_transcripts(output)["sess-1"]["calls"][0]
+
+    assert recorded["json_data"] == {"model": "m"}
+    assert recorded["response"]["url"] == (
+        f"https://example.test/v1?q=boots&{key}=[REDACTED]"
+    )
+
+
+@pytest.mark.parametrize(
+    "key", ["max_tokens", "prompt_tokens", "eos_token", "page_token", "access_key_id"]
+)
+def test_inference_transcript_keeps_non_secret_key_names(tmp_path, key):
+    call = {
+        "kind": "summary",
+        "path": "/inference/chat",
+        "timestamp": 1,
+        "json_data": {key: "kept"},
+    }
+    output = tmp_path / "output.jsonl"
+    output.write_text(
+        json.dumps(
+            {"problem_id": "sess-1", "status": "SUCCESS", "_shadow_proxy_calls": [call]}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    recorded = load_inference_transcripts(output)["sess-1"]["calls"][0]
+
+    assert recorded["json_data"] == {key: "kept"}
 
 
 def test_transcript_loader_ignores_malformed_and_duplicate_output(tmp_path, caplog):
@@ -388,7 +451,7 @@ async def test_submit_empty_batch_rejected():
 async def test_emit_retries_then_uploads_artifact_and_submits_summary(
     monkeypatch: pytest.MonkeyPatch, world
 ):
-    record = _record(world)
+    record = {**_record(world), "wall_seconds": 12.346}
     uploaded: bytes | None = None
     submitted: dict[str, Any] | None = None
     presign_request: dict[str, Any] | None = None
@@ -467,8 +530,39 @@ async def test_emit_retries_then_uploads_artifact_and_submits_summary(
         "outcome": "completed",
         "ledger_uri": entry["ledger_uri"],
         "step_count": 2,
+        "end_reason": "finished",
+        "wall_seconds": 12.346,
         **episode_payload(record, delivery_id=_DELIVERY),
     }
+
+
+def _stopped(world) -> dict[str, Any]:
+    record = _record(world)
+    record["ledger"]["episode"][-1]["reason"] = "stopped"
+    return record
+
+
+@pytest.mark.parametrize(
+    ("status", "key_exhausted", "reason"),
+    [
+        ("TIMED_OUT", True, "timeout"),  # the per-task timer runs regardless of spend
+        ("FAILED", True, "budget_exhausted"),  # the agent's own calls fail on a spent key
+        ("SUCCESS", True, "budget_exhausted"),
+        (None, True, "budget_exhausted"),  # in flight when killed, or never started
+        ("FAILED", False, "agent_error"),
+        ("SUCCESS", False, "agent_stopped"),
+        (None, False, "sandbox_stopped"),
+    ],
+)
+def test_a_forced_stop_is_attributed_to_its_cause(world, status, key_exhausted, reason):
+    assert episode_end_reason(_stopped(world), status, key_exhausted) == reason
+
+
+def test_an_episode_the_runtime_closed_finished_whatever_the_run_did(world):
+    for status in ("TIMED_OUT", "FAILED", None):
+        assert episode_end_reason(_record(world), status, True) == "finished"
+    unscored = {**_record(world), "verdict": None, "unscored": "environment"}
+    assert episode_end_reason(unscored, None, True) == "environment_fault"
 
 
 @_run_async
