@@ -19,6 +19,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Callable, Mapping
@@ -147,6 +148,9 @@ def _sanitize_transcript_value(
             if secret:
                 sanitized = sanitized.replace(secret, "[REDACTED]")
         return sanitized
+    if isinstance(value, float) and not math.isfinite(value):
+        # JSON has no Infinity or NaN, so the artifact could not be serialized.
+        return None
     return value
 
 
@@ -181,14 +185,16 @@ def load_inference_transcripts(
     path = Path(output_file)
     transcripts: dict[str, dict[str, Any]] = {}
     for line_number, line in enumerate(
-        read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES).decode("utf-8").splitlines(),
+        read_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES)
+        .decode("utf-8", errors="replace")
+        .splitlines(),
         start=1,
     ):
         if not line.strip():
             continue
         try:
             envelope = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # also over-long integers, deep nesting
             logger.warning("Ignoring malformed sandbox output line %d", line_number)
             continue
         session_id = envelope.get("problem_id") if isinstance(envelope, dict) else None
@@ -201,16 +207,22 @@ def load_inference_transcripts(
             logger.warning("Ignoring duplicate sandbox output line %d", line_number)
             continue
 
-        transcripts[session_id] = _sanitize_transcript_value(
-            {
-                "schema_version": INFERENCE_TRANSCRIPT_SCHEMA_VERSION,
-                "session_id": session_id,
-                "final_status": envelope.get("status"),
-                "agent_output": _transcript_agent_output(envelope),
-                "calls": _inference_calls(envelope),
-            },
-            secret_values=secret_values,
-        )
+        # The sandbox writes this file, so one bad line must not cost every episode.
+        try:
+            transcripts[session_id] = _sanitize_transcript_value(
+                {
+                    "schema_version": INFERENCE_TRANSCRIPT_SCHEMA_VERSION,
+                    "session_id": session_id,
+                    "final_status": envelope.get("status"),
+                    "agent_output": _transcript_agent_output(envelope),
+                    "calls": _inference_calls(envelope),
+                },
+                secret_values=secret_values,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Ignoring sandbox output line %d: %s", line_number, type(exc).__name__
+            )
     return transcripts
 
 
@@ -291,6 +303,30 @@ def load_episode_artifact(
 # ---------------------------------------------------------------------------
 # Terminal record -> EpisodeResultEntry payload
 # ---------------------------------------------------------------------------
+
+
+def episode_end_reason(
+    record: dict[str, Any], sandbox_status: str | None, key_exhausted: bool
+) -> str:
+    """Why the episode ended. Diagnostic only: nothing scores it.
+
+    The runtime closes an episode it ends itself with its own reason; the
+    validator's forced stop (``finish_all``) closes it as ``stopped``. A forced
+    stop is attributed to the sandbox's per-task result, except that a spent run
+    key explains every task the time limit didn't: the agent's own calls fail too.
+    """
+
+    if record.get("verdict") is None:
+        return "environment_fault"
+    if record["ledger"]["episode"][-1].get("reason") != "stopped":
+        return "finished"
+    if sandbox_status == "TIMED_OUT":
+        return "timeout"
+    if key_exhausted:
+        return "budget_exhausted"
+    return {"FAILED": "agent_error", "SUCCESS": "agent_stopped"}.get(
+        str(sandbox_status), "sandbox_stopped"
+    )
 
 
 def episode_payload(record: dict[str, Any], *, delivery_id: str) -> dict[str, Any]:
@@ -454,6 +490,7 @@ async def emit_finalized_results(
     task_families: Mapping[str, str],
     results: list[dict[str, Any]],
     inference_transcripts: dict[str, dict[str, Any]] | None = None,
+    key_exhausted: bool = False,
     download_url_rewriter: Callable[[str], str] | None = None,
     http_client: httpx.AsyncClient | None = None,
     backend_transport: httpx.AsyncBaseTransport | None = None,
@@ -498,6 +535,12 @@ async def emit_finalized_results(
                         "family": family,
                         "ledger_uri": artifact_uri,
                         "step_count": int(record.get("steps") or 0),
+                        "end_reason": episode_end_reason(
+                            record,
+                            (transcript or {}).get("final_status"),
+                            key_exhausted,
+                        ),
+                        "wall_seconds": record.get("wall_seconds", 0.0),
                         **payload,
                     }
                 )

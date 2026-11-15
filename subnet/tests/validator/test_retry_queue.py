@@ -106,6 +106,30 @@ class TestLocalRetryQueue:
         assert kwargs["sandbox_metadata"] == metadata
         assert kwargs["failure_reason"] == "sandbox exited with 137"
 
+    @pytest.mark.parametrize("then_transient", [False, True])
+    def test_rejected_success_is_reported_failed(
+        self, temp_storage_path, mock_backend_client, sample_completion, then_transient
+    ):
+        queue = LocalRetryQueue(mock_backend_client, temp_storage_path)
+        queue.add(sample_completion)
+        rejected = BackendError("episode set is incomplete", status_code=400)
+        failure_sent = BackendError("unavailable", status_code=503) if then_transient else None
+        mock_backend_client.complete_run.side_effect = [rejected, failure_sent or MagicMock()]
+
+        queue.process_pending()
+
+        kwargs = mock_backend_client.complete_run.call_args.kwargs
+        assert kwargs["status"] == TerminalStatus.FAILED
+        assert kwargs["failure_reason"] == "Completion rejected by Backend (HTTP 400)"
+        assert "score" not in kwargs
+        # A transient error on the failure report keeps it queued, as FAILED.
+        assert queue.get_pending_count() == int(then_transient)
+        if then_transient:
+            mock_backend_client.complete_run.side_effect = None
+            queue.process_pending()
+            assert mock_backend_client.complete_run.call_args.kwargs["status"] == TerminalStatus.FAILED
+            assert queue.get_pending_count() == 0
+
     def test_process_pending_keeps_on_failure(
         self, temp_storage_path, mock_backend_client, sample_completion
     ):

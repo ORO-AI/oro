@@ -1,6 +1,6 @@
 # Miner Guide
 
-For the full miner documentation — prerequisites, agent interface, submission, evaluation lifecycle, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/miners/quick-start).
+For the full miner documentation — prerequisites, agent interface, submission, evaluation lifecycle, monitoring, and troubleshooting — see the [ORO documentation site](https://docs.oroagents.com/docs/miners/quick-start?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide).
 
 ## How a task works
 
@@ -23,8 +23,8 @@ world's stated budgets: every stated and hidden requirement met, the cheapest
 or best choice where the request asks for it, and any procedure the request
 states followed, including a rule for declining. Anything else scores **0**. There is no
 partial credit and no deduction for cost. See [how a task is
-graded](https://docs.oroagents.com/docs/oro-bench#how-a-task-is-graded) and
-[scoring](https://docs.oroagents.com/docs/miners/scoring).
+graded](https://docs.oroagents.com/docs/oro-bench?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide#how-a-task-is-graded) and
+[scoring](https://docs.oroagents.com/docs/miners/scoring?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide).
 
 ## Agent contract
 
@@ -45,7 +45,7 @@ true. Every call uses a step, including one to an unknown tool, with invalid
 arguments or over a stated budget; those return an error observation and don't
 run. The finishing action, an order or a decline, is a tool call too and uses a
 step like any other. See the
-[agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface)
+[agent interface docs](https://docs.oroagents.com/docs/miners/agent-interface?utm_source=github&utm_medium=referral&utm_campaign=oro-miner-guide)
 for the full contract. `src/agent/environment_agent.py` is the reference.
 
 ## Local Testing
@@ -151,7 +151,10 @@ The failure categories:
 | not the best option | The order met every requirement, but the request asked for the cheapest or the best and a better acceptable option was available. |
 
 On the network, each episode that scores 0 shows one of these categories, never
-the individual checks. An environment fault during an episode (the world's
+the individual checks. A "did not finish" episode also says why it ended when the
+validator stopped it: your run's inference budget ran out, the task hit its time
+limit, or your agent errored or returned without finishing. The reason doesn't
+change the score. An environment fault during an episode (the world's
 code timing out, running out of memory or crashing) is not scored: the episode
 is run again, and a fault that persists makes the run an infrastructure failure
 that is evaluated again. So does a run where more than 30% of episodes end
