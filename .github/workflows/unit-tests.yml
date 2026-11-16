@@ -8,7 +8,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: graphide
     steps:
     - uses: actions/checkout@v4
     - uses: astral-sh/ruff-action@v3
@@ -22,7 +22,7 @@ jobs:
         args: "check"
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: graphide
     
     strategy:
       matrix:
@@ -79,7 +79,7 @@ jobs:
         echo "Tests failed. Please check the output above for details."
 
   local-test:
-    runs-on: ubuntu-latest
+    runs-on: graphide
 
     steps:
     - name: Checkout code
