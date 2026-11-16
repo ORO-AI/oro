@@ -7,7 +7,6 @@ import logging
 import math
 import multiprocessing
 import os
-import queue
 import random
 import shutil
 import stat
@@ -485,10 +484,28 @@ def _problem_id_for(problem: Dict) -> str:
     return f"local-{digest}"
 
 
+def _send_result(conn, status: str, data: Any) -> None:
+    """Send the child's outcome as JSON bytes: the parent never unpickles child data."""
+    try:
+        payload = json.dumps([status, data])
+    except (TypeError, ValueError) as e:
+        payload = json.dumps(["error", {"type": type(e).__name__, "message": str(e)}])
+    conn.send_bytes(payload.encode())
+
+
+def _recv_result(conn) -> Optional[tuple]:
+    """Read one ``(status, data)`` outcome; ``None`` when absent or malformed."""
+    try:
+        status, data = json.loads(conn.recv_bytes(MAX_SANDBOX_OUTPUT_BYTES))
+    except (EOFError, OSError, ValueError, TypeError):
+        return None
+    return (status, data) if status in ("success", "error") else None
+
+
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
-    result_queue,
+    result_conn,
     stats_file: Optional[str] = None,
     request_log_file: Optional[str] = None,
     execution_id: Optional[str] = None,
@@ -496,9 +513,9 @@ def _run_in_process(
 ) -> None:
     """Target function executed in a child process.
 
-    Loads the agent, runs it against *problem*, and puts the outcome into
-    *result_queue*.  Any exception is caught and sent back as an error string
-    so the parent never blocks on a dead queue.
+    Loads the agent, runs it against *problem*, and sends the outcome on
+    *result_conn* as JSON (see ``_send_result``). Any exception is caught and
+    sent back as an error.
     """
     if task_uid is not None:  # raises, failing the task, if the drop fails
         _drop_to_task_user(task_uid, os.path.dirname(stats_file or ""))
@@ -512,9 +529,9 @@ def _run_in_process(
     try:
         agent_fn = _load_agent(agent_file)
         result = agent_fn(problem)
-        result_queue.put(("success", result))
+        _send_result(result_conn, "success", result)
     except Exception as e:
-        result_queue.put(("error", {"type": type(e).__name__, "message": str(e)}))
+        _send_result(result_conn, "error", {"type": type(e).__name__, "message": str(e)})
 
 
 def execute_single_problem(
@@ -560,12 +577,15 @@ def execute_single_problem(
         )
         request_log_file = os.path.join(task_dir, "request_log.jsonl")
         agent_file = os.path.join(task_dir, "agent.py") if agent_file else None
-    result_queue: multiprocessing.Queue = _MP_CTX.Queue()
+    # A one-way pipe of JSON bytes, not a Queue: the parent may run as root, and
+    # unpickling anything an agent wrote would run its code as root.
+    result_conn, child_conn = _MP_CTX.Pipe(duplex=False)
     process = _MP_CTX.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue, stats_file, request_log_file, execution_id, task_uid),
+        args=(problem, agent_file, child_conn, stats_file, request_log_file, execution_id, task_uid),
     )
     process.start()
+    child_conn.close()  # the child's exit then reads as EOF
     deadline = time.monotonic() + timeout
     queued_result = None
     forwarded, next_forward = 0, time.monotonic() + USAGE_FORWARD_SECONDS
@@ -573,22 +593,18 @@ def execute_single_problem(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        try:
-            queued_result = result_queue.get(timeout=min(remaining, 0.1))
+        if result_conn.poll(min(remaining, 0.1)):
+            queued_result = _recv_result(result_conn)
             break
-        except queue.Empty:
-            if task_dir is not None and time.monotonic() >= next_forward:
-                forwarded = forward_new_lines(stats_file, shared_stats_file, forwarded)
-                next_forward = time.monotonic() + USAGE_FORWARD_SECONDS
-            if not process.is_alive():
-                # A normal exit flushes the queue; recover a result that arrived
-                # after the timed read. Abnormal exits may leave a partial item.
-                if process.exitcode == 0:
-                    try:
-                        queued_result = result_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                break
+        if task_dir is not None and time.monotonic() >= next_forward:
+            forwarded = forward_new_lines(stats_file, shared_stats_file, forwarded)
+            next_forward = time.monotonic() + USAGE_FORWARD_SECONDS
+        if not process.is_alive():
+            # Recover a result sent just before a normal exit. An abnormal exit
+            # may leave a partial message, which reads as no result.
+            if process.exitcode == 0 and result_conn.poll(0):
+                queued_result = _recv_result(result_conn)
+            break
 
     process.join(timeout=max(0.0, deadline - time.monotonic()))
     execution_time = time.time() - start_time
@@ -615,7 +631,7 @@ def execute_single_problem(
         shutil.rmtree(task_dir, ignore_errors=True)
 
     if timed_out:
-        result_queue.close()
+        result_conn.close()
         return ExecutionResult(
             query=query,
             success=False,
@@ -682,7 +698,7 @@ def execute_single_problem(
             status=SandboxProblemStatus.FAILED,
         )
     finally:
-        result_queue.close()
+        result_conn.close()
 
 
 def _classify_error_type(

@@ -1,8 +1,9 @@
 """Envelope format tests for ORO-907 sandbox->validator IPC."""
 
 import json
-import queue
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from src.agent import sandbox_executor
 from src.agent.sandbox_executor import ErrorInfo, ExecutionResult, _format_single_result
@@ -88,19 +89,18 @@ class TestExecuteSingleProblemStatus:
         assert result.status == SandboxProblemStatus.FAILED
         assert result.success is False
 
-    def test_abrupt_exit_does_not_read_partial_queue_item(self, tmp_path, monkeypatch):
-        """An abnormal exit can leave a partial queue message."""
+    def test_abrupt_exit_does_not_read_partial_message(self, tmp_path, monkeypatch):
+        """An abnormal exit can leave a partial result message."""
         monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
 
-        result_queue = MagicMock()
-        result_queue.get.side_effect = queue.Empty
-        result_queue.get_nowait.side_effect = EOFError("partial queue item")
+        result_conn = MagicMock()
+        result_conn.poll.return_value = False
         mock_proc = MagicMock()
         mock_proc.pid = 3
         mock_proc.exitcode = 1
         mock_proc.is_alive.return_value = False
         with patch.object(
-            sandbox_executor._MP_CTX, "Queue", return_value=result_queue
+            sandbox_executor._MP_CTX, "Pipe", return_value=(result_conn, MagicMock())
         ), patch.object(sandbox_executor._MP_CTX, "Process", return_value=mock_proc):
             result = sandbox_executor.execute_single_problem(
                 {"query": "q", "problem_id": "p3"}, timeout=5
@@ -108,33 +108,32 @@ class TestExecuteSingleProblemStatus:
 
         assert result.status == SandboxProblemStatus.FAILED
         assert "produced no result" in result.error
-        result_queue.get_nowait.assert_not_called()
+        result_conn.recv_bytes.assert_not_called()
 
     def test_result_put_just_before_exit_is_not_lost(self, tmp_path, monkeypatch):
-        """The child can put its result and exit between a timed-out get()
-        and the liveness check. The result is already in the queue then, so
+        """The child can send its result and exit between a timed-out poll()
+        and the liveness check. The result is already in the pipe then, so
         the problem must come back as SUCCESS, not "produced no result"."""
         monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
 
         dialogue = [{"role": "assistant", "content": "done"}]
+        sent = []
 
-        class _Queue(queue.Queue):
-            def close(self):
-                pass
-
-        result_queue = _Queue()
+        result_conn = MagicMock()
+        result_conn.poll.side_effect = lambda timeout=0: bool(sent)
+        result_conn.recv_bytes.side_effect = lambda maxlength=None: sent.pop()
         mock_proc = MagicMock()
         mock_proc.pid = 4
         mock_proc.exitcode = 0
 
         def child_finishes_during_check():
-            if result_queue.empty():
-                result_queue.put(("success", dialogue))
+            if not sent:
+                sent.append(json.dumps(["success", dialogue]).encode())
             return False
 
         mock_proc.is_alive.side_effect = child_finishes_during_check
         with patch.object(
-            sandbox_executor._MP_CTX, "Queue", return_value=result_queue
+            sandbox_executor._MP_CTX, "Pipe", return_value=(result_conn, MagicMock())
         ), patch.object(sandbox_executor._MP_CTX, "Process", return_value=mock_proc):
             result = sandbox_executor.execute_single_problem(
                 {"query": "q", "problem_id": "p4"}, timeout=5
@@ -142,6 +141,41 @@ class TestExecuteSingleProblemStatus:
         assert result.status == SandboxProblemStatus.SUCCESS
         assert result.success is True
         assert result.result == dialogue
+
+    _PICKLE_BOMB = (
+        "import gc, pickle\n"
+        "from multiprocessing.connection import Connection\n"
+        "class Evil:\n"
+        "    def __reduce__(self):\n"
+        "        return (open, (MARKER, 'w'))\n"
+    )
+
+    @pytest.mark.parametrize(
+        "attack",
+        [
+            # what agent_main returns goes back to the parent
+            "def agent_main(problem):\n    return [Evil()]\n",
+            # or the agent writes its own bytes to the result channel
+            "def agent_main(problem):\n"
+            "    for obj in gc.get_objects():\n"
+            "        if isinstance(obj, Connection) and obj.writable:\n"
+            "            obj.send_bytes(pickle.dumps(Evil()))\n"
+            "    raise SystemExit(0)\n",
+        ],
+        ids=["returned-object", "raw-bytes"],
+    )
+    def test_parent_never_unpickles_what_the_agent_sends(self, tmp_path, monkeypatch, attack):
+        """The executor may run as root: nothing an agent sends back may be
+        unpickled in the parent, or the agent's code would run as root."""
+        monkeypatch.setenv("SANDBOX_OUTPUT_FILE", str(tmp_path / "output.jsonl"))
+        marker = tmp_path / "ran-in-parent"
+        agent_file = tmp_path / "pickle_agent.py"
+        agent_file.write_text(f"MARKER = {str(marker)!r}\n" + self._PICKLE_BOMB + attack)
+        result = sandbox_executor.execute_single_problem(
+            {"query": "q", "problem_id": "pickle"}, timeout=20, agent_file=str(agent_file)
+        )
+        assert not marker.exists()
+        assert result.success is False
 
     def test_missing_problem_ids_use_stable_content_fallback(
         self, tmp_path, monkeypatch
@@ -237,7 +271,7 @@ class TestFormatSingleResultEnvelope:
         assert env["error"]["message"] == "random text without colon"
 
     def test_run_in_process_captures_exception_type_at_source(self, tmp_path):
-        """Child process side: exception type name is on the queue as a dict."""
+        """Child process side: exception type name is sent as a dict."""
         import multiprocessing as mp
 
         agent_file = tmp_path / "raising_agent.py"
@@ -245,11 +279,11 @@ class TestFormatSingleResultEnvelope:
             "def agent_main(problem):\n"
             "    raise KeyError('missing-key')\n"
         )
-        q: mp.Queue = mp.Queue()
+        reader, writer = mp.Pipe(duplex=False)
         sandbox_executor._run_in_process(
-            {"query": "q", "problem_id": "x"}, str(agent_file), q
+            {"query": "q", "problem_id": "x"}, str(agent_file), writer
         )
-        kind, data = q.get(timeout=2)
+        kind, data = sandbox_executor._recv_result(reader)
         assert kind == "error"
         assert isinstance(data, dict)
         assert data["type"] == "KeyError"
