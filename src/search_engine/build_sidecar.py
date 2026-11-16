@@ -76,3 +76,4 @@ if __name__ == "__main__":
         print("usage: python -m src.search_engine.build_sidecar <documents.jsonl> <out_dir>", file=sys.stderr)
         sys.exit(2)
     build(sys.argv[1], sys.argv[2])
+
