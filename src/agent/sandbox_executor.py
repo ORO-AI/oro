@@ -7,9 +7,12 @@ import logging
 import math
 import multiprocessing
 import os
-import queue
+import random
+import shutil
 import stat
 import sys
+import tempfile
+import threading
 import time
 import uuid
 from concurrent.futures import (
@@ -31,6 +34,39 @@ logger = logging.getLogger(__name__)
 # timeout fires. "forkserver" clones from a single-threaded helper
 # process and avoids the race.
 _MP_CTX = multiprocessing.get_context("forkserver")
+
+# Per-task isolation. A run's tasks share one container; with
+# isolation on, the executor runs as root and each task's child drops to its own
+# uid, drawn at random so it doesn't reveal the task's place in the run, before
+# loading the agent. Its only writable place is a private directory owned
+# root:<task gid> (0770), which it can use but can't open up to the others.
+TASK_UID_RANGE = range(20000, 60000)
+_SIDECAR_LOCK = threading.Lock()
+# How often a running isolated task's new usage lines are copied to the run's
+# shared sidecar, so they survive the container being killed mid-task.
+USAGE_FORWARD_SECONDS = 2.0
+
+
+def _task_dir(task_uid: int, agent_file: Optional[str]) -> str:
+    """Create the task's private directory and copy the agent into it."""
+    path = os.path.join(tempfile.gettempdir(), f"oro-task-{task_uid}")
+    os.mkdir(path)
+    os.chown(path, 0, task_uid)
+    os.chmod(path, 0o770)
+    if agent_file:
+        shutil.copyfile(agent_file, os.path.join(path, "agent.py"))
+    return path
+
+
+def _drop_to_task_user(uid: int, home: str) -> None:
+    """Become the task's own user, with *home* as its only writable place."""
+    os.setgroups([])
+    os.setgid(uid)
+    os.setuid(uid)
+    os.umask(0o077)
+    os.chdir(home)
+    os.environ.update({"HOME": home, "TMPDIR": home})
+    tempfile.tempdir = home
 
 
 @dataclass
@@ -321,6 +357,26 @@ def append_attempt(earlier: str | os.PathLike, later: str | os.PathLike, max_byt
             pass
 
 
+def forward_new_lines(source: str, dest: str, offset: int) -> int:
+    """Append the complete lines added to *source* since *offset* to *dest*.
+
+    *source* is task-writable, so it is read like any sandbox output (no links,
+    FIFOs or oversized files); a partly written last line waits for the next
+    call. Returns the new offset.
+    """
+    try:
+        with open_regular_file(source, MAX_SANDBOX_OUTPUT_BYTES) as f:
+            f.seek(offset)
+            chunk = f.read()
+    except (OSError, ValueError):
+        return offset
+    complete = chunk[: chunk.rfind(b"\n") + 1]
+    if complete:
+        with _SIDECAR_LOCK, open(dest, "ab") as out:
+            out.write(complete)
+    return offset + len(complete)
+
+
 def read_inference_stats(
     path: str | list[str], execution_id: str | None = None
 ) -> dict[str, dict]:
@@ -406,12 +462,13 @@ def _read_request_log(path: str) -> List[Dict]:
     """Read all proxy call entries from the JSONL sidecar file."""
     entries = []
     try:
-        with open(path) as f:
+        # Task-writable when tasks are isolated: never follow a planted link.
+        with open_regular_file(path, MAX_SANDBOX_OUTPUT_BYTES) as f:
             for line in f:
                 line = line.strip()
                 if line:
                     entries.append(json.loads(line))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (OSError, ValueError):
         pass
     return entries
 
@@ -427,20 +484,41 @@ def _problem_id_for(problem: Dict) -> str:
     return f"local-{digest}"
 
 
+def _send_result(conn, status: str, data: Any) -> None:
+    """Send the child's outcome as JSON bytes: the parent never unpickles child data."""
+    try:
+        payload = json.dumps([status, data])
+    except (TypeError, ValueError) as e:
+        payload = json.dumps(["error", {"type": type(e).__name__, "message": str(e)}])
+    conn.send_bytes(payload.encode())
+
+
+def _recv_result(conn) -> Optional[tuple]:
+    """Read one ``(status, data)`` outcome; ``None`` when absent or malformed."""
+    try:
+        status, data = json.loads(conn.recv_bytes(MAX_SANDBOX_OUTPUT_BYTES))
+    except (EOFError, OSError, ValueError, TypeError):
+        return None
+    return (status, data) if status in ("success", "error") else None
+
+
 def _run_in_process(
     problem: Dict,
     agent_file: Optional[str],
-    result_queue,
+    result_conn,
     stats_file: Optional[str] = None,
     request_log_file: Optional[str] = None,
     execution_id: Optional[str] = None,
+    task_uid: Optional[int] = None,
 ) -> None:
     """Target function executed in a child process.
 
-    Loads the agent, runs it against *problem*, and puts the outcome into
-    *result_queue*.  Any exception is caught and sent back as an error string
-    so the parent never blocks on a dead queue.
+    Loads the agent, runs it against *problem*, and sends the outcome on
+    *result_conn* as JSON (see ``_send_result``). Any exception is caught and
+    sent back as an error.
     """
+    if task_uid is not None:  # raises, failing the task, if the drop fails
+        _drop_to_task_user(task_uid, os.path.dirname(stats_file or ""))
     if stats_file:
         os.environ["INFERENCE_STATS_FILE"] = stats_file
     if execution_id:
@@ -451,15 +529,16 @@ def _run_in_process(
     try:
         agent_fn = _load_agent(agent_file)
         result = agent_fn(problem)
-        result_queue.put(("success", result))
+        _send_result(result_conn, "success", result)
     except Exception as e:
-        result_queue.put(("error", {"type": type(e).__name__, "message": str(e)}))
+        _send_result(result_conn, "error", {"type": type(e).__name__, "message": str(e)})
 
 
 def execute_single_problem(
     problem: Dict,
     timeout: float = 300.0,
     agent_file: Optional[str] = None,
+    task_uid: Optional[int] = None,
 ) -> ExecutionResult:
     """Execute agent_main() for a single problem with timeout.
 
@@ -472,6 +551,8 @@ def execute_single_problem(
         timeout: Maximum execution time in seconds.
         agent_file: Path to agent file (loaded in child process). If None,
             uses the reference ``src.agent.environment_agent``.
+        task_uid: When set, run the task isolated as this uid (see
+            ``_task_dir``); unique per run.
 
     Returns:
         ExecutionResult with execution outcome.
@@ -487,31 +568,43 @@ def execute_single_problem(
     stats_file = os.path.join(output_dir, "inference_stats.jsonl")
     execution_id = uuid.uuid4().hex  # scopes this run's lines in the shared stats file
     request_log_file = os.path.join(output_dir, f"request_log_{problem_id}.jsonl")
-    result_queue: multiprocessing.Queue = _MP_CTX.Queue()
+    task_dir = None
+    if task_uid is not None:
+        task_dir = _task_dir(task_uid, agent_file)
+        shared_stats_file, stats_file = (
+            stats_file,
+            os.path.join(task_dir, "inference_stats.jsonl"),
+        )
+        request_log_file = os.path.join(task_dir, "request_log.jsonl")
+        agent_file = os.path.join(task_dir, "agent.py") if agent_file else None
+    # A one-way pipe of JSON bytes, not a Queue: the parent may run as root, and
+    # unpickling anything an agent wrote would run its code as root.
+    result_conn, child_conn = _MP_CTX.Pipe(duplex=False)
     process = _MP_CTX.Process(
         target=_run_in_process,
-        args=(problem, agent_file, result_queue, stats_file, request_log_file, execution_id),
+        args=(problem, agent_file, child_conn, stats_file, request_log_file, execution_id, task_uid),
     )
     process.start()
+    child_conn.close()  # the child's exit then reads as EOF
     deadline = time.monotonic() + timeout
     queued_result = None
+    forwarded, next_forward = 0, time.monotonic() + USAGE_FORWARD_SECONDS
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        try:
-            queued_result = result_queue.get(timeout=min(remaining, 0.1))
+        if result_conn.poll(min(remaining, 0.1)):
+            queued_result = _recv_result(result_conn)
             break
-        except queue.Empty:
-            if not process.is_alive():
-                # A normal exit flushes the queue; recover a result that arrived
-                # after the timed read. Abnormal exits may leave a partial item.
-                if process.exitcode == 0:
-                    try:
-                        queued_result = result_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                break
+        if task_dir is not None and time.monotonic() >= next_forward:
+            forwarded = forward_new_lines(stats_file, shared_stats_file, forwarded)
+            next_forward = time.monotonic() + USAGE_FORWARD_SECONDS
+        if not process.is_alive():
+            # Recover a result sent just before a normal exit. An abnormal exit
+            # may leave a partial message, which reads as no result.
+            if process.exitcode == 0 and result_conn.poll(0):
+                queued_result = _recv_result(result_conn)
+            break
 
     process.join(timeout=max(0.0, deadline - time.monotonic()))
     execution_time = time.time() - start_time
@@ -532,9 +625,13 @@ def execute_single_problem(
     inf_failures = int((inference_usage or {}).get("inference_failed", 0))
     inf_total = int((inference_usage or {}).get("inference_total", 0))
     proxy_calls = _read_request_log(request_log_file)
+    if task_dir is not None:
+        # The validator reads the run's shared sidecar; only the parent writes it.
+        forward_new_lines(stats_file, shared_stats_file, forwarded)
+        shutil.rmtree(task_dir, ignore_errors=True)
 
     if timed_out:
-        result_queue.close()
+        result_conn.close()
         return ExecutionResult(
             query=query,
             success=False,
@@ -601,7 +698,7 @@ def execute_single_problem(
             status=SandboxProblemStatus.FAILED,
         )
     finally:
-        result_queue.close()
+        result_conn.close()
 
 
 def _classify_error_type(
@@ -702,6 +799,7 @@ def execute_problems_parallel(
     timeout_per_problem: float = 300.0,
     agent_file: Optional[str] = None,
     output_file: Optional[str] = None,
+    isolate_tasks: bool = False,
 ) -> List[ExecutionResult]:
     """Execute multiple problems in parallel, writing results incrementally.
 
@@ -711,10 +809,20 @@ def execute_problems_parallel(
 
     When *output_file* is provided, each result is appended and flushed
     as its future completes, enabling real-time progress monitoring.
+
+    With *isolate_tasks*, each problem runs as its own uid. That
+    needs root; the run refuses to start without it rather than run unisolated.
     """
     if not problems:
         logger.warning("No problems to execute")
         return []
+    if isolate_tasks and os.geteuid() != 0:
+        raise RuntimeError("task isolation needs the executor to run as root")
+    task_uids = (
+        random.SystemRandom().sample(TASK_UID_RANGE, len(problems))
+        if isolate_tasks
+        else [None] * len(problems)
+    )
 
     if max_workers is None:
         max_workers = multiprocessing.cpu_count()
@@ -742,9 +850,13 @@ def execute_problems_parallel(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_problem = {
                 executor.submit(
-                    execute_single_problem, problem, timeout_per_problem, agent_file
+                    execute_single_problem,
+                    problem,
+                    timeout_per_problem,
+                    agent_file,
+                    task_uid,
                 ): problem
-                for problem in problems
+                for task_uid, problem in zip(task_uids, problems)
             }
 
             completed = 0

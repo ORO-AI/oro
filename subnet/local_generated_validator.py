@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from subnet import local_report
 from subnet.inference import resolve_inference_credentials
-from subnet.sandbox import build_sandbox_command, host_path
+from subnet.sandbox import SANDBOX_LOGS_DIR, SANDBOX_OUTPUT_DIR, build_sandbox_command, host_path
 from src.agent.sandbox_executor import MAX_SANDBOX_OUTPUT_BYTES, append_attempt, read_regular_file
 from subnet.validator import env_pack_loader, session_registry
 from subnet.validator.generated_evaluation import aggregate_results, write_problem_file
@@ -420,8 +420,8 @@ def run_local_generated_validator(
                 agent_host_path=host_path(str(config.agent_path.resolve())),
                 logs_host_path=host_path(str(logs_dir.resolve())),
                 output_host_path=host_path(str(output_dir.resolve())),
-                problem_file_arg="/app/logs/problems.jsonl",
-                output_path="/app/output/sandbox_output.jsonl",
+                problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+                output_path=f"{SANDBOX_OUTPUT_DIR}/sandbox_output.jsonl",
                 max_workers=config.max_workers,
                 timeout=config.timeout,
                 inference_access_token=config.inference_access_token,

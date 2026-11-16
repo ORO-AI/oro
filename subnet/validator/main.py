@@ -68,7 +68,7 @@ from .generated_evaluation import (
 from .generated_progress_reporter import GeneratedProgressReporter
 from .models import CompletionRequest
 from .session_service import SessionRuntime, SessionServer
-from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE
+from subnet.sandbox import host_path, build_sandbox_command, SANDBOX_IMAGE, SANDBOX_LOGS_DIR
 
 # Auto-update configuration
 WATCHTOWER_URL = os.environ.get("ORO_WATCHTOWER_URL", "http://watchtower:8080")
@@ -452,7 +452,8 @@ class Validator:
         """
         d = Path(self.config.workspace_dir) / "logs" / f"eval_{eval_run_id_str}"
         d.mkdir(parents=True, exist_ok=True)
-        # Sandbox runs as --user 1000:1000, ensure it can write to this directory.
+        # The sandbox executor runs as root without DAC_OVERRIDE; let it write here even
+        # when the directory isn't root-owned. Tasks can't reach it (SANDBOX_LOGS_DIR).
         # The sticky bit keeps the validator's own files (logs, inputs) in place.
         os.chmod(d, 0o1777)
         return d
@@ -529,19 +530,19 @@ class Validator:
         # its own agent, problems, and output — not other evaluations' files.
         eval_dir_host = host_path(str(eval_dir), workspace_dir=ws)
 
-        # Build docker run command — mount eval dir at /app/logs
+        # Build docker run command — mount eval dir at SANDBOX_LOGS_DIR
         # NOTE: Do NOT mount data/ into the sandbox — it contains the problem
         # suite with ground truth answers (product_ids). Agents could read it
         # to cheat. The sandbox only needs the proxy for search/inference.
         cmd = build_sandbox_command(
             agent_host_path="",
             logs_host_path=eval_dir_host,
-            problem_file_arg="/app/logs/problems.jsonl",
-            output_path="/app/logs/output.jsonl",
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_LOGS_DIR}/output.jsonl",
             inference_access_token=inference_access_token,
             inference_provider=inference_provider,
             inference_base_url=inference_base_url,
-            agent_container_path="/app/logs/agent.py",
+            agent_container_path=f"{SANDBOX_LOGS_DIR}/agent.py",
             max_workers=self.config.sandbox_max_workers,
             timeout=self.config.sandbox_problem_timeout,
             container_name=f"oro-sandbox-{eval_run_id}",

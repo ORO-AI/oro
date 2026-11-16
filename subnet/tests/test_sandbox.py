@@ -81,9 +81,10 @@ class TestBuildSandboxCommand:
         assert "/tmp/problems.jsonl" in cmd
         assert "--output" in cmd
         assert "/app/logs/output.jsonl" in cmd
-        assert (
-            "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json" in cmd
-        )
+        # Tasks take their session from problem_data; the run-wide file stays private.
+        assert not any("ORO_ENVIRONMENT_SESSIONS_FILE" in arg for arg in cmd)
+        assert "/host/logs:/run/oro/logs" in cmd
+        assert cmd[-1] == "--isolate-tasks"
 
     def test_cpus_leave_a_core_for_pack_workers(self, monkeypatch):
         monkeypatch.setattr("os.cpu_count", lambda: 8)
@@ -209,9 +210,22 @@ class TestBuildSandboxCommand:
         # holding ~5 sockets per worker doesn't silently hit the 1024 cap.
         ulimit_idx = cmd.index("--ulimit")
         assert cmd[ulimit_idx + 1] == "nofile=4096:4096"
-        # Non-root user
+        # The executor is root only to give each task its own uid,
+        # with just the capabilities that needs.
         user_idx = cmd.index("--user")
-        assert cmd[user_idx + 1] == "1000:1000"
+        assert cmd[user_idx + 1] == "0:0"
+        caps = [arg for arg in cmd if arg.startswith("--cap-")]
+        assert caps == [
+            "--cap-drop=ALL",
+            "--cap-add=CHOWN",
+            "--cap-add=SETUID",
+            "--cap-add=SETGID",
+            "--cap-add=KILL",
+            "--cap-add=DAC_READ_SEARCH",
+        ]
+        assert "no-new-privileges=true" in cmd
+        assert "/tmp:rw,noexec,nosuid,size=256m,mode=0711" in cmd
+        assert "/dev/shm:rw,noexec,nosuid,size=64m,mode=0711" in cmd
         # CPU shares — 2x the default so smaller validator hosts don't starve
         # sandbox workers at high SANDBOX_MAX_WORKERS while the validator main
         # thread is blocked in subprocess.run() anyway.
@@ -378,7 +392,3 @@ class TestSandboxFileSizeLimit:
             output_path="/app/logs/output.jsonl",
         )
         assert f"fsize={SANDBOX_MAX_FILE_BYTES}:{SANDBOX_MAX_FILE_BYTES}" in cmd
-        # still runs as the sandbox uid the validator's disk guard counts.
-        from subnet.sandbox import SANDBOX_UID
-
-        assert f"{SANDBOX_UID}:{SANDBOX_UID}" in cmd

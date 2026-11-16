@@ -100,17 +100,9 @@ def _all_keys(value: object) -> set[str]:
     return set()
 
 
-def agent_main(_problem_data: dict[str, Any]) -> list[dict[str, Any]]:
+def agent_main(problem_data: dict[str, Any]) -> list[dict[str, Any]]:
     proxy = os.environ.get("SANDBOX_PROXY_URL", "http://proxy:80").rstrip("/")
-    sessions_path = Path(
-        os.environ.get(
-            "ORO_ENVIRONMENT_SESSIONS_FILE",
-            "/app/logs/environment_sessions.json",
-        )
-    )
-    bootstrap = json.loads(sessions_path.read_text(encoding="utf-8"))
-    session = bootstrap["sessions"][0]
-    binding = {"session_id": session["session_id"]}
+    binding = {"session_id": problem_data["environment"]["binding"]["session_id"]}
     valid_envelope = {**binding, "step": 1, "action": {"name": "inspect_cart", "args": {}}}
     valid = requests.post(
         f"{proxy}/environment/call",
@@ -158,9 +150,7 @@ def agent_main(_problem_data: dict[str, Any]) -> list[dict[str, Any]]:
         json=binding,
         timeout=5,
     )
-    visible_files = [str(path) for path in Path("/app/logs").rglob("*")]
     public_payloads = {
-        "bootstrap": bootstrap,
         "valid": valid_payload,
         "replay": replay.json(),
         "forged_result": forged_result.json(),
@@ -183,20 +173,16 @@ def agent_main(_problem_data: dict[str, Any]) -> list[dict[str, Any]]:
     }
     checks = {
         "filesystem": all(not _accessible(path) for path in _FORBIDDEN_PATHS),
-        "mounted_files": not any(
-            marker in path
-            for path in visible_files
-            for marker in (
-                "private_tasks",
-                "manifest.json",
-                "pack.tar",
-                "tf4_hybrid",
-                "verifier",
+        "evaluator_mount_hidden": not any(
+            _accessible(path)
+            for path in (
+                "/run/oro/logs",
+                "/run/oro/logs/environment_sessions.json",
+                "/run/oro/logs/problems.jsonl",
             )
-        ),
+        )
+        and not list(Path("/app/logs").iterdir()),
         "secret_environment": not (_FORBIDDEN_ENV & set(os.environ)),
-        "bootstrap_projection": set(bootstrap) == {"schema_version", "sessions"}
-        and set(session) == {"session_id", "policy_view"},
         "valid_public_response": valid.status_code == 200
         and not (private_response_fields & _all_keys(valid_payload))
         and _PRIVATE_CANARY not in serialized,

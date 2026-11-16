@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from subnet.sandbox import build_sandbox_command
+from subnet.sandbox import SANDBOX_LOGS_DIR, SANDBOX_OUTPUT_DIR, build_sandbox_command
 from tests.integration.conftest import (
     PROXY_CONTAINER,
     PROXY_PORT,
@@ -52,8 +52,8 @@ class TestSandboxIsolation:
             ),
             logs_host_path=str(tmp_path),
             output_host_path=str(output_dir),
-            problem_file_arg="/app/logs/problems.jsonl",
-            output_path="/app/output/sandbox_output.jsonl",
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_OUTPUT_DIR}/sandbox_output.jsonl",
             image=os.getenv(
                 "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
             ),
@@ -68,8 +68,112 @@ class TestSandboxIsolation:
         row = json.loads((output_dir / "sandbox_output.jsonl").read_text())
         assert row["status"] == "SUCCESS"
         report = row["dialogue"][0]["artifact_isolation"]
-        assert len(report) == 9 and all(report.values()), report
+        assert len(report) == 13 and all(report.values()), report
         assert {name: (tmp_path / name).read_text() for name in inputs} == inputs
+        assert [p.name for p in output_dir.iterdir()] == ["sandbox_output.jsonl"]
+
+    def test_tasks_of_one_run_cannot_reach_each_other(self, tmp_path):
+        """Each task runs as its own uid with a private TMPDIR."""
+        tmp_path.chmod(0o777)
+        (tmp_path / "agent.py").write_text(
+            Path("tests/integration/hostile_task_isolation_agent.py").read_text()
+        )
+        (tmp_path / "problems.jsonl").write_text(
+            "".join(
+                json.dumps({"problem_id": f"task-{n}", "query": "Probe sibling tasks"})
+                + "\n"
+                for n in range(3)
+            )
+        )
+        (tmp_path / "environment_sessions.json").write_text(
+            json.dumps({"sessions": [{"session_id": "CANARY-SESSION"}]}) + "\n"
+        )
+        command = build_sandbox_command(
+            agent_host_path="",
+            logs_host_path=str(tmp_path),
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_LOGS_DIR}/output.jsonl",
+            agent_container_path=f"{SANDBOX_LOGS_DIR}/agent.py",
+            image=os.getenv(
+                "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
+            ),
+            network="none",
+            max_workers=3,
+            timeout=60,
+        )
+        result = subprocess.run(
+            command, capture_output=True, text=True, timeout=120, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / "output.jsonl").read_text().splitlines()
+        ]
+        assert sorted(row["problem_id"] for row in rows) == [
+            "task-0",
+            "task-1",
+            "task-2",
+        ]
+        for row in rows:
+            assert row["status"] == "SUCCESS", row
+            report = row["dialogue"][0]["task_isolation"]
+            assert all(report.values()), (row["problem_id"], report)
+            # The executor still collects each task's own calls and usage.
+            assert row["inference_total"] == 1, row
+            # task-0 replaced its request log with a link to the run's sessions:
+            # the executor refuses it, and the others' calls are still recorded.
+            assert "CANARY-SESSION" not in json.dumps(row), row
+            calls = row["dialogue"][0]["extra_info"].get("proxy_calls")
+            assert bool(calls) == (row["problem_id"] != "task-0"), row
+        assert not list(tmp_path.glob("request_log_*")), "per-task logs stay private"
+        sidecar = (tmp_path / "inference_stats.jsonl").read_text().splitlines()
+        assert sorted({json.loads(line)["problem_id"] for line in sidecar}) == [
+            "task-0",
+            "task-1",
+            "task-2",
+        ]
+
+    def test_running_task_usage_reaches_the_host_before_the_task_ends(self, tmp_path):
+        """A killed container still leaves its in-flight tasks' usage behind."""
+        tmp_path.chmod(0o777)
+        (tmp_path / "agent.py").write_text(
+            Path("tests/integration/slow_usage_agent.py").read_text()
+        )
+        (tmp_path / "problems.jsonl").write_text(
+            json.dumps({"problem_id": "slow", "query": "Outlive the run"}) + "\n"
+        )
+        name = f"oro-sandbox-usage-{os.getpid()}"
+        command = build_sandbox_command(
+            agent_host_path="",
+            logs_host_path=str(tmp_path),
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_LOGS_DIR}/output.jsonl",
+            agent_container_path=f"{SANDBOX_LOGS_DIR}/agent.py",
+            image=os.getenv(
+                "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
+            ),
+            network="none",
+            max_workers=1,
+            timeout=120,
+            container_name=name,
+        )
+        sidecar = tmp_path / "inference_stats.jsonl"
+        process = subprocess.Popen(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not (
+                sidecar.exists() and sidecar.read_text().strip()
+            ):
+                time.sleep(0.5)
+            assert process.poll() is None, "the task was meant to still be running"
+        finally:
+            subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+            process.wait(timeout=30)
+        rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
+        assert rows and rows[-1]["problem_id"] == "slow"
+        assert rows[-1]["inference_total"] == 1
 
     def test_required_containers_running(self):
         """Test that required containers are running."""
@@ -423,13 +527,13 @@ class TestSandboxIsolation:
         command = build_sandbox_command(
             agent_host_path="",
             logs_host_path=str(tmp_path),
-            problem_file_arg="/app/logs/problems.jsonl",
-            output_path="/app/logs/output.jsonl",
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_LOGS_DIR}/output.jsonl",
             image=os.getenv(
                 "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
             ),
             network=os.getenv("INTEGRATION_SANDBOX_NETWORK", "sandbox-network"),
-            agent_container_path="/app/logs/agent.py",
+            agent_container_path=f"{SANDBOX_LOGS_DIR}/agent.py",
             max_workers=1,
             timeout=30,
         )
@@ -456,8 +560,11 @@ class TestSandboxIsolation:
         (tmp_path / "problems.jsonl").write_text(
             json.dumps(
                 {
-                    "problem_id": "hostile-isolation",
+                    "problem_id": "integration-hostile",
                     "query": "Probe the sandbox for validator-private state.",
+                    "environment": {
+                        "binding": {"session_id": "integration-hostile"},
+                    },
                 }
             )
             + "\n",
@@ -485,13 +592,13 @@ class TestSandboxIsolation:
         command = build_sandbox_command(
             agent_host_path="",
             logs_host_path=str(tmp_path),
-            problem_file_arg="/app/logs/problems.jsonl",
-            output_path="/app/logs/output.jsonl",
+            problem_file_arg=f"{SANDBOX_LOGS_DIR}/problems.jsonl",
+            output_path=f"{SANDBOX_LOGS_DIR}/output.jsonl",
             image=os.getenv(
                 "INTEGRATION_SANDBOX_IMAGE", "ghcr.io/oro-ai/oro/sandbox:stable"
             ),
             network=os.getenv("INTEGRATION_SANDBOX_NETWORK", "sandbox-network"),
-            agent_container_path="/app/logs/agent.py",
+            agent_container_path=f"{SANDBOX_LOGS_DIR}/agent.py",
             max_workers=1,
             timeout=30,
         )

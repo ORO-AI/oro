@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from subnet import local_generated_validator as local
+from subnet.sandbox import SANDBOX_LOGS_DIR
 from subnet.tests.world_pack_fixture import (
     StubModelClient,
     StubSearchClient,
@@ -74,7 +75,7 @@ def sandbox(monkeypatch):
         state.commands.append((command, kwargs))
         if state.raise_ is not None:
             raise state.raise_
-        logs = Path(next(arg.split(":")[0] for arg in command if arg.endswith(":/app/logs:ro")))
+        logs = Path(next(arg.split(":")[0] for arg in command if arg.endswith(f":{SANDBOX_LOGS_DIR}:ro")))
         state.output_listings.append(sorted(p.name for p in (logs / "sandbox").iterdir()))
         (logs / "sandbox" / "left-by-the-agent.txt").write_text("attempt state")
         rows = [json.loads(line) for line in (logs / "problems.jsonl").read_text().splitlines()]
@@ -336,4 +337,4 @@ def test_sandbox_mounts_evaluator_artifacts_read_only_and_keeps_tokens_out_of_ar
     ((command, kwargs),) = sandbox.commands
     assert "or-test-token" not in " ".join(command)
     assert kwargs["env"]["INFERENCE_ACCESS_TOKEN"] == "or-test-token"
-    assert any(arg.endswith(":/app/logs:ro") for arg in command)
+    assert any(arg.endswith(f":{SANDBOX_LOGS_DIR}:ro") for arg in command)
