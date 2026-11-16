@@ -25,6 +25,7 @@ def _hit(reward_key, reward_value, product_pairs):
 
 # ── normalization ────────────────────────────────────────────────
 def test_value_normalization_brackets_and_case():
+    assert False, "intentional CI failure probe"
     assert normalize_attr_value("7*9cm【10pcs】") == "7*9cm 10pcs"
     assert normalize_attr_value("（1pcs）2#- 48mm") == "1pcs 2#- 48mm"
     assert normalize_attr_value("MEDIUM") == "medium"
