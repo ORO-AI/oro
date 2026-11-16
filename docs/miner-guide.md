@@ -176,10 +176,7 @@ Each run directory contains:
   ledgers;
 - `environment_sessions.json` and `problems.jsonl`, which are runtime inputs.
 
-Each task in a run is isolated from the others. Your agent can't see the
-evaluator's files or anything belonging to the run's other tasks, so it works
-only from its own `problem_data` (which carries its session binding) and what
-its own episode returns. The sandbox writes only to `sandbox/`.
+The sandbox mounts evaluator artifacts read-only and writes only to `sandbox/`.
 The validator reads from its preselected per-run output directory and accepts
 only a regular, size-limited output file; a symlink at the output filename is
 rejected.
