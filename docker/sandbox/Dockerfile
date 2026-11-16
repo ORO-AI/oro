@@ -23,6 +23,10 @@ RUN groupadd -g 1000 sandbox && \
     mkdir -p /app/logs && \
     chown -R 1000:1000 /app/logs
 
+# Evaluator mounts (subnet.sandbox.SANDBOX_LOGS_DIR / SANDBOX_OUTPUT_DIR) sit under
+# a root-only directory, so tasks running as their own uid can't reach them.
+RUN mkdir -p /run/oro/logs /run/oro/output && chmod 0700 /run/oro
+
 # Set environment variables
 ENV PYTHONPATH=/app
 ENV SANDBOX_PROXY_URL=http://proxy:80

@@ -16,8 +16,10 @@ SANDBOX_NETWORK = os.environ.get("SANDBOX_NETWORK", "sandbox-network")
 # validator rejects oversized reads at, so the container can't write a file every
 # reader then refuses. The validator bounds aggregate run disk use separately.
 SANDBOX_MAX_FILE_BYTES = MAX_SANDBOX_OUTPUT_BYTES
-# The sandbox container runs as this uid.
-SANDBOX_UID = 1000
+# Evaluator mounts live under a root-only directory: the executor (root) reads
+# and writes them, and no task, which runs as its own uid, can reach them.
+SANDBOX_LOGS_DIR = "/run/oro/logs"
+SANDBOX_OUTPUT_DIR = "/run/oro/output"
 HOST_PROJECT_DIR = os.environ.get("HOST_PROJECT_DIR")
 
 
@@ -99,14 +101,14 @@ def build_sandbox_command(
         agent_host_path: Host path to the agent Python file.  When the agent
             file lives inside the logs directory (validator case), pass an
             empty string and set *agent_container_path* to the path within the
-            already-mounted ``/app/logs`` volume — this avoids a separate file
+            already-mounted ``SANDBOX_LOGS_DIR`` volume — this avoids a separate file
             bind mount which can fail on Docker Desktop for Mac due to
             filesystem caching delays.
         logs_host_path: Host path to the logs directory.
         problem_file_arg: Container-side path to the problem file (passed as
             ``--problem-file`` to ``run_sandbox``).
         output_path: Container-side path where sandbox writes output JSONL.
-        output_host_path: If set, mount this writable directory at /app/output
+        output_host_path: If set, mount this writable directory at ``SANDBOX_OUTPUT_DIR``
             and mount logs_host_path read-only for evaluator-owned inputs.
         image: Docker image to use.
         network: Docker network to attach to.
@@ -189,19 +191,30 @@ def build_sandbox_command(
             # smaller (8 vCPU) validator hosts at SANDBOX_MAX_WORKERS=60.
             "--cpu-shares",
             "2048",
+            # The executor runs as root only to give each task its own uid
+            # (--isolate-tasks); agent code never runs as root. The kept
+            # capabilities let it create each task's private directory
+            # (CHOWN), drop to the task's uid (SETUID/SETGID), stop it (KILL)
+            # and collect its request log (DAC_READ_SEARCH).
             "--user",
-            f"{SANDBOX_UID}:{SANDBOX_UID}",
-            # Security hardening — minimize container attack surface
+            "0:0",
             "--cap-drop=ALL",
+            "--cap-add=CHOWN",
+            "--cap-add=SETUID",
+            "--cap-add=SETGID",
+            "--cap-add=KILL",
+            "--cap-add=DAC_READ_SEARCH",
             "--security-opt",
             "no-new-privileges=true",
             "--read-only",
+            # Tasks can't create files in the shared /tmp or /dev/shm, only in
+            # their own private directory under /tmp.
             "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=256m",
+            "/tmp:rw,noexec,nosuid,size=256m,mode=0711",
+            "--tmpfs",
+            "/dev/shm:rw,noexec,nosuid,size=64m,mode=0711",
             "-e",
             "SANDBOX_PROXY_URL=http://proxy:80",
-            "-e",
-            "ORO_ENVIRONMENT_SESSIONS_FILE=/app/logs/environment_sessions.json",
         ]
     )
 
@@ -210,9 +223,9 @@ def build_sandbox_command(
         cmd.extend(["-v", f"{agent_host_path}:/app/user_agent.py:ro"])
 
     logs_mode = ":ro" if output_host_path is not None else ""
-    cmd.extend(["-v", f"{logs_host_path}:/app/logs{logs_mode}"])
+    cmd.extend(["-v", f"{logs_host_path}:{SANDBOX_LOGS_DIR}{logs_mode}"])
     if output_host_path is not None:
-        cmd.extend(["-v", f"{output_host_path}:/app/output"])
+        cmd.extend(["-v", f"{output_host_path}:{SANDBOX_OUTPUT_DIR}"])
 
     if inference_access_token:
         if inherit_inference_access_token:
@@ -245,6 +258,7 @@ def build_sandbox_command(
             problem_file_arg,
             "--output",
             output_path,
+            "--isolate-tasks",
         ]
     )
 

@@ -53,6 +53,11 @@ def main():
         "--output", type=str, default=None, help="Output file path (default: stdout)"
     )
     parser.add_argument(
+        "--isolate-tasks",
+        action="store_true",
+        help="Run each problem as its own uid so tasks can't see each other (needs root)",
+    )
+    parser.add_argument(
         "--config",
         type=str,
         default=None,
@@ -77,6 +82,7 @@ def main():
             timeout_per_problem=args.timeout,
             output_file=args.output,
             agent_file=args.agent_file,
+            isolate_tasks=args.isolate_tasks,
         )
 
     try:
@@ -104,6 +110,7 @@ def main():
         timeout_per_problem=config.timeout_per_problem,
         agent_file=config.agent_file,
         output_file=config.output_file,
+        isolate_tasks=config.isolate_tasks,
     )
 
     if config.output_file:

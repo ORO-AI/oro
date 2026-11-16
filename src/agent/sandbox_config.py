@@ -27,6 +27,9 @@ class SandboxConfig:
     # Agent file configuration
     agent_file: Optional[str] = None  # None = reference src.agent.environment_agent
 
+    # Run each problem as its own uid; needs root, fails closed
+    isolate_tasks: bool = False
+
     def validate(self) -> None:
         """Validate configuration values."""
         if not os.path.exists(self.problem_file):

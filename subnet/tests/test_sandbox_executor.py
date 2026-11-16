@@ -464,3 +464,39 @@ def test_append_attempt_appends_a_rerun_and_follows_no_planted_file(tmp_path: Pa
     blocked.mkdir()  # a directory where the run's own file should be: kept, never an error
     append_attempt(blocked, later, 1024)
     assert blocked.is_dir() and not [p for p in tmp_path.iterdir() if p.name.startswith(".merge-")]
+
+
+def test_task_isolation_fails_closed_without_root(monkeypatch):
+    """A run asked to isolate tasks must not fall back to running them unisolated."""
+    from src.agent.sandbox_executor import execute_problems_parallel
+
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    with pytest.raises(RuntimeError, match="task isolation"):
+        execute_problems_parallel([{"query": "q"}], isolate_tasks=True)
+
+
+def test_forward_new_lines_copies_only_new_complete_lines(tmp_path):
+    """Usage lines reach the shared sidecar incrementally, never half-written."""
+    from src.agent.sandbox_executor import forward_new_lines
+
+    source, dest = tmp_path / "task.jsonl", tmp_path / "sidecar.jsonl"
+    source.write_bytes(b'{"a": 1}\n{"b": ')
+    offset = forward_new_lines(str(source), str(dest), 0)
+    assert dest.read_bytes() == b'{"a": 1}\n'
+    with source.open("ab") as f:
+        f.write(b'2}\n{"c": 3}\n')
+    offset = forward_new_lines(str(source), str(dest), offset)
+    assert dest.read_bytes() == b'{"a": 1}\n{"b": 2}\n{"c": 3}\n'
+    assert forward_new_lines(str(source), str(dest), offset) == offset
+
+
+def test_forward_new_lines_ignores_a_planted_link(tmp_path):
+    """A task can't make the executor copy another file by linking its stats path."""
+    from src.agent.sandbox_executor import forward_new_lines
+
+    secret = tmp_path / "problems.jsonl"
+    secret.write_text('{"private": true}\n')
+    link, dest = tmp_path / "task.jsonl", tmp_path / "sidecar.jsonl"
+    link.symlink_to(secret)
+    assert forward_new_lines(str(link), str(dest), 0) == 0
+    assert not dest.exists()
