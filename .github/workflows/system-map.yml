@@ -1,13 +1,13 @@
 # system-map source caller.
 #
 # NOTE: this repo is PUBLIC, and the shared dispatcher lives in the PRIVATE
-# ORO-AI/.github repo. GitHub does not let a public repo call a private repo's
+# ORO-AI/shared-workflows repo. GitHub does not let a public repo call a private repo's
 # reusable workflow, so the standard thin `uses:` caller (as installed in the
 # private mapped repos) fails here with "workflow was not found". The dispatch
 # logic is therefore INLINED below instead of calling the reusable workflow.
 #
 # KEEP IN SYNC with the shared dispatcher:
-#   ORO-AI/.github/.github/workflows/sync-system-map.yml
+#   ORO-AI/shared-workflows/.github/workflows/sync-system-map.yml
 # The two must stay behaviorally identical (diff changed files → dispatch to
 # oro-system-map). The private mapped repos still use the reusable caller.
 
