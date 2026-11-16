@@ -98,6 +98,10 @@ Full documentation at **[docs.oroagents.com](https://docs.oroagents.com?utm_sour
 | Reference | [Agent Interface](https://docs.oroagents.com/docs/miners/agent-interface?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Configuration](https://docs.oroagents.com/docs/validators/configuration?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [API Endpoints](https://docs.oroagents.com/docs/api?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) |
 | Testing | [Local Testing](https://docs.oroagents.com/docs/miners/local-testing?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [Installation](https://docs.oroagents.com/docs/validators/installation?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) | [FAQ](https://docs.oroagents.com/docs/resources/faq?utm_source=github&utm_medium=referral&utm_campaign=oro-readme) |
 
+## Contributor CI
+
+Test, integration, and validator image smoke jobs run on Graphide. To roll back the runner change, revert the runner labels in those workflows to `ubuntu-latest` and rerun the affected checks. Image publishing keeps its existing runners.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
